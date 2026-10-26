@@ -37,3 +37,15 @@ func ConnectionState(s utls.ConnectionState) tls.ConnectionState {
 		LocalCertificate:            s.LocalCertificate,
 	}
 }
+
+// StdConn exposes a uTLS connection with a crypto/tls ConnectionState, so
+// code that looks for that method (the HTTP/2 engine fills Response.TLS
+// from it) sees the converted state.
+type StdConn struct {
+	*utls.UConn
+}
+
+// ConnectionState returns the converted state; see ConnectionState.
+func (c StdConn) ConnectionState() tls.ConnectionState {
+	return ConnectionState(c.UConn.ConnectionState())
+}
