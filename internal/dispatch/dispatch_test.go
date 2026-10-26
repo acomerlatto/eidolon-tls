@@ -314,3 +314,37 @@ func TestDispatchEarlyBodyCloseDoesNotDrain(t *testing.T) {
 		})
 	}
 }
+
+// A dial that ends after Close closes its connection and fails with
+// ErrClosed, so no connection escapes the shutdown.
+func TestDispatchDialAfterClose(t *testing.T) {
+	srv := lab.Start(t, lab.Options{})
+	dialing := make(chan struct{})
+	proceed := make(chan struct{})
+	var dialed net.Conn
+	tr := transport(srv)
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		close(dialing)
+		<-proceed
+		var d net.Dialer
+		c, err := d.DialContext(ctx, network, srv.Addr)
+		dialed = c
+		return c, err
+	}
+	errc := make(chan error, 1)
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+		_, err := tr.RoundTrip(req)
+		errc <- err
+	}()
+	<-dialing
+	tr.Close()
+	close(proceed)
+	if err := <-errc; !errors.Is(err, dispatch.ErrClosed) {
+		t.Fatalf("err = %v, want ErrClosed", err)
+	}
+	dialed.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := dialed.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("connection dialed after Close is still open: read err = %v", err)
+	}
+}

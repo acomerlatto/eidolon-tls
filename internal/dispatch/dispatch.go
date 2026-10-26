@@ -2,14 +2,15 @@
 // reads the protocol negotiated by ALPN and hands the connection to the
 // HTTP/2 or the HTTP/1.1 engine.
 //
-// This is the M0 version: one connection per request, closed with the
-// response body. Pools, waiters for the first connection of an origin and
-// the protocol policy come in M1.
+// Each request still uses its own connection, closed with the response
+// body. Pools, waiters for the first connection of an origin and the
+// protocol policy come in later M1 steps.
 package dispatch
 
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -38,7 +39,14 @@ type Transport struct {
 
 	h2once sync.Once
 	h2     *http2.Transport
+
+	mu     sync.Mutex
+	closed bool
+	conns  map[*trackedConn]struct{}
 }
+
+// ErrClosed reports a request on a closed Transport.
+var ErrClosed = errors.New("eidolon: transport closed")
 
 // RoundTrip implements http.RoundTripper.
 //
@@ -47,6 +55,10 @@ type Transport struct {
 // (HTTP/2) use the normalized authority unless req.Host overrides it, as in
 // net/http. The caller's request is not modified.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.isClosed() {
+		closeBody(req)
+		return nil, ErrClosed
+	}
 	tgt, err := target.Parse(req.URL)
 	if err != nil {
 		closeBody(req)
@@ -59,10 +71,37 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		sent = &r
 	}
 	resp, err := t.roundTrip(sent, tgt)
+	if err != nil && t.isClosed() {
+		return nil, ErrClosed
+	}
 	if resp != nil {
 		resp.Request = req
 	}
 	return resp, err
+}
+
+// CloseIdleConnections closes idle connections. Without a pool there are
+// none yet: every connection belongs to a request in progress.
+func (t *Transport) CloseIdleConnections() {}
+
+// Close stops the transport: new requests fail with ErrClosed and every
+// open connection is closed, including responses still being read.
+func (t *Transport) Close() error {
+	t.mu.Lock()
+	t.closed = true
+	conns := t.conns
+	t.conns = nil
+	t.mu.Unlock()
+	for c := range conns {
+		c.Conn.Close()
+	}
+	return nil
+}
+
+func (t *Transport) isClosed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closed
 }
 
 func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Response, error) {
@@ -85,7 +124,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 	conn, err := tlsdial.Dial(ctx, "tcp", tgt.Addr(), tlsdial.Config{
 		Spec:        t.Spec,
 		TLS:         cfg,
-		DialContext: t.DialContext,
+		DialContext: t.trackedDial,
 	})
 	if err != nil {
 		closeBody(req)
@@ -100,11 +139,50 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 }
 
 func (t *Transport) dial(ctx context.Context, addr string) (net.Conn, error) {
-	if t.DialContext != nil {
-		return t.DialContext(ctx, "tcp", addr)
+	return t.trackedDial(ctx, "tcp", addr)
+}
+
+// trackedDial opens a TCP connection and registers it until it is closed,
+// so Close can reach it. A dial that ends after Close closes its connection.
+func (t *Transport) trackedDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	dial := t.DialContext
+	if dial == nil {
+		var d net.Dialer
+		dial = d.DialContext
 	}
-	var d net.Dialer
-	return d.DialContext(ctx, "tcp", addr)
+	conn, err := dial(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	tc := &trackedConn{Conn: conn, t: t}
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		conn.Close()
+		return nil, ErrClosed
+	}
+	if t.conns == nil {
+		t.conns = make(map[*trackedConn]struct{})
+	}
+	t.conns[tc] = struct{}{}
+	t.mu.Unlock()
+	return tc, nil
+}
+
+// trackedConn leaves the transport's set when it is closed.
+type trackedConn struct {
+	net.Conn
+	t    *Transport
+	once sync.Once
+}
+
+func (c *trackedConn) Close() error {
+	c.once.Do(func() {
+		c.t.mu.Lock()
+		delete(c.t.conns, c)
+		c.t.mu.Unlock()
+	})
+	return c.Conn.Close()
 }
 
 func (t *Transport) roundTripH2(conn net.Conn, req *http.Request) (*http.Response, error) {
