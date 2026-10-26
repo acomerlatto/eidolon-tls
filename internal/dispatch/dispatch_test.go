@@ -280,3 +280,37 @@ func TestDispatchTargetIdentity(t *testing.T) {
 		}
 	}
 }
+
+// Closing the body before the end discards the connection at once; it does
+// not wait for the server to finish the body (section 6.3).
+func TestDispatchEarlyBodyCloseDoesNotDrain(t *testing.T) {
+	for _, proto := range []string{"h2", "http/1.1"} {
+		t.Run(proto, func(t *testing.T) {
+			release := make(chan struct{})
+			defer close(release)
+			srv := lab.Start(t, lab.Options{
+				NextProtos: []string{proto},
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					io.WriteString(w, "partial")
+					w.(http.Flusher).Flush()
+					select { // a body that does not end
+					case <-release:
+					case <-r.Context().Done():
+					}
+				}),
+			})
+			req, _ := http.NewRequest(http.MethodGet, "https://example.com/slow", nil)
+			resp, err := transport(srv).RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closed := make(chan error, 1)
+			go func() { closed <- resp.Body.Close() }()
+			select {
+			case <-closed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Body.Close waited for the rest of the body")
+			}
+		})
+	}
+}

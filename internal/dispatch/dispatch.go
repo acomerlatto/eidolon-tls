@@ -149,15 +149,19 @@ type connBody struct {
 	once sync.Once
 }
 
+// Close closes the connection before the body: an HTTP/1.1 body from
+// http.ReadResponse reads to the end on Close, which never returns for a
+// body the server does not finish. Without a pool the connection is
+// discarded anyway (section 6.3: no unbounded drain).
 func (b *connBody) Close() error {
-	err := b.ReadCloser.Close()
 	b.once.Do(func() {
 		if b.stop != nil {
 			b.stop()
 		}
 		b.conn.Close()
 	})
-	return err
+	b.ReadCloser.Close()
+	return nil
 }
 
 func closeBody(req *http.Request) {
