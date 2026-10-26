@@ -4,4 +4,11 @@ go 1.27.2
 
 require golang.org/x/net v0.61.1-0.20261020135414-4af4fce62e93
 
-require golang.org/x/text v0.43.0 // indirect
+require (
+	github.com/acomerlatto/utls v0.0.1 // indirect
+	github.com/klauspost/compress v1.20.1 // indirect
+	github.com/molecule-man/go-brrr v1.2.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
+)
