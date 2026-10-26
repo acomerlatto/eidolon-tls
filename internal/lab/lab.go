@@ -54,6 +54,8 @@ type Server struct {
 	Addr string
 	// RootCAs trusts the lab certificate.
 	RootCAs *x509.CertPool
+	// Certificate is the self-signed lab certificate.
+	Certificate *x509.Certificate
 
 	ln      net.Listener
 	tlsConf *tls.Config
@@ -85,11 +87,12 @@ func Start(tb testing.TB, opts Options) *Server {
 		tb.Fatal(err)
 	}
 	s := &Server{
-		Addr:    ln.Addr().String(),
-		RootCAs: x509.NewCertPool(),
-		ln:      ln,
-		opts:    opts,
-		conns:   make(chan *Conn, 64),
+		Addr:        ln.Addr().String(),
+		RootCAs:     x509.NewCertPool(),
+		Certificate: leaf,
+		ln:          ln,
+		opts:        opts,
+		conns:       make(chan *Conn, 64),
 		tlsConf: &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			NextProtos:   opts.NextProtos,
