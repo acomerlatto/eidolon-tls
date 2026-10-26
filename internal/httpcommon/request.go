@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/acomerlatto/eidolon-tls/internal/http2/hpack"
+	"github.com/acomerlatto/eidolon-tls/internal/order" // [eidolon]
 	"golang.org/x/net/http/httpguts"
 )
 
@@ -130,6 +131,21 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 	}
 
 	enumerateHeaders := func(f func(name, value string)) {
+		// [eidolon] With an order in the context, collect the fields and
+		// emit them sorted once enumeration ends.
+		if o := order.FromContext(ctx); o != nil {
+			emit := f
+			var fields []order.Field
+			f = func(name, value string) {
+				fields = append(fields, order.Field{Name: name, Value: value})
+			}
+			defer func() {
+				for _, hf := range o.Sort(fields) {
+					emit(hf.Name, hf.Value)
+				}
+			}()
+		}
+
 		// 8.1.2.3 Request Pseudo-Header Fields
 		// The :path pseudo-header field includes the path and query parts of the
 		// target URI (the path-absolute production and optionally a '?' character

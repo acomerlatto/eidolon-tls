@@ -18,7 +18,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 
 ## Local patches
 
-None.
+- `scripts/xnet-patches/0001-header-order.patch`
 
 ## Excluded files
 
