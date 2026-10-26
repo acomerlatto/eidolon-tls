@@ -82,6 +82,10 @@ if grep -rn --include='*.go' -E '"golang.org/x/net/(http2|internal/)' "${gofiles
 	exit 1
 fi
 
+# Format before patching: the rewritten imports move, and patches are made
+# against the formatted files kept in the repository.
+gofmt -w "${gofiles[@]}"
+
 shopt -s nullglob
 patches=("$root"/scripts/xnet-patches/*.patch)
 for p in "${patches[@]}"; do
