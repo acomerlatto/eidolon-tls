@@ -212,3 +212,71 @@ func TestDispatchOneConnectionPerRequest(t *testing.T) {
 		}
 	}
 }
+
+// hostSent returns Host (HTTP/1.1) or :authority (HTTP/2) as received.
+func hostSent(t *testing.T, c *lab.Conn) string {
+	t.Helper()
+	if c.State.NegotiatedProtocol != "h2" {
+		for _, line := range strings.Split(string(c.Bytes()), "\r\n") {
+			if v, ok := strings.CutPrefix(line, "Host: "); ok {
+				return v
+			}
+		}
+		t.Fatal("no Host line")
+	}
+	frames, err := c.H2Frames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range frames {
+		for _, h := range f.Headers {
+			if h.Name == ":authority" {
+				return h.Value
+			}
+		}
+	}
+	t.Fatal("no :authority")
+	return ""
+}
+
+// The destination is normalized once: SNI, verification and Host or
+// :authority agree, in both protocols.
+func TestDispatchTargetIdentity(t *testing.T) {
+	tests := []struct {
+		name, url, host string
+		wantSNI         string
+		wantHost        string
+	}{
+		{name: "case and default port", url: "https://EXAMPLE.com:443/x", wantSNI: "example.com", wantHost: "example.com"},
+		{name: "explicit port", url: "https://example.com:8443/x", wantSNI: "example.com", wantHost: "example.com:8443"},
+		// No SNI for an IP address; the certificate is verified against its IP SAN.
+		{name: "IP address", url: "https://127.0.0.1:8443/x", wantSNI: "", wantHost: "127.0.0.1:8443"},
+		// req.Host changes the header only; the URL decides SNI.
+		{name: "Host override", url: "https://example.com/x", host: "other.example", wantSNI: "example.com", wantHost: "other.example"},
+	}
+	for _, proto := range []string{"h2", "http/1.1"} {
+		for _, tt := range tests {
+			t.Run(proto+"/"+tt.name, func(t *testing.T) {
+				srv := lab.Start(t, lab.Options{NextProtos: []string{proto}})
+				req, _ := http.NewRequest(http.MethodGet, tt.url, nil)
+				req.Host = tt.host
+				resp, err := transport(srv).RoundTrip(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				if resp.Request != req || req.Host != tt.host {
+					t.Errorf("caller's request changed: Response.Request is original %v, Host %q", resp.Request == req, req.Host)
+				}
+				c := srv.NextConn(t)
+				if c.State.ServerName != tt.wantSNI {
+					t.Errorf("SNI = %q, want %q", c.State.ServerName, tt.wantSNI)
+				}
+				if got := hostSent(t, c); got != tt.wantHost {
+					t.Errorf("Host/:authority = %q, want %q", got, tt.wantHost)
+				}
+			})
+		}
+	}
+}

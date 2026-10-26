@@ -10,8 +10,6 @@ package dispatch
 import (
 	"context"
 	"crypto/tls"
-	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -21,6 +19,7 @@ import (
 
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/http2"
+	"github.com/acomerlatto/eidolon-tls/internal/target"
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
 
@@ -42,52 +41,62 @@ type Transport struct {
 }
 
 // RoundTrip implements http.RoundTripper.
+//
+// The destination is normalized by internal/target: the URL decides the
+// endpoint and the verification name; Host (HTTP/1.1) and :authority
+// (HTTP/2) use the normalized authority unless req.Host overrides it, as in
+// net/http. The caller's request is not modified.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL == nil {
+	tgt, err := target.Parse(req.URL)
+	if err != nil {
 		closeBody(req)
-		return nil, errors.New("dispatch: Request.URL is nil")
+		return nil, err
 	}
-	host := req.URL.Hostname()
-	if host == "" {
-		closeBody(req)
-		return nil, errors.New("dispatch: URL has no host")
+	sent := req
+	if req.Host == "" {
+		r := *req
+		r.Host = tgt.Authority()
+		sent = &r
 	}
-	ctx := req.Context()
+	resp, err := t.roundTrip(sent, tgt)
+	if resp != nil {
+		resp.Request = req
+	}
+	return resp, err
+}
 
-	switch req.URL.Scheme {
-	case "http":
-		conn, err := t.dial(ctx, net.JoinHostPort(host, portOr(req, "80")))
+func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Response, error) {
+	ctx := req.Context()
+	if tgt.Scheme == "http" {
+		conn, err := t.dial(ctx, tgt.Addr())
 		if err != nil {
 			closeBody(req)
 			return nil, err
 		}
 		return t.roundTripHTTP1(conn, req, nil)
-	case "https":
-		cfg := t.TLS
-		if cfg == nil {
-			cfg = &utls.Config{}
-		}
-		cfg = cfg.Clone()
-		cfg.ServerName = host
-		conn, err := tlsdial.Dial(ctx, "tcp", net.JoinHostPort(host, portOr(req, "443")), tlsdial.Config{
-			Spec:        t.Spec,
-			TLS:         cfg,
-			DialContext: t.DialContext,
-		})
-		if err != nil {
-			closeBody(req)
-			return nil, err
-		}
-		std := tlsdial.StdConn{UConn: conn}
-		if conn.ConnectionState().NegotiatedProtocol == tlsdial.ProtoH2 {
-			return t.roundTripH2(std, req)
-		}
-		state := std.ConnectionState()
-		return t.roundTripHTTP1(std, req, &state)
-	default:
-		closeBody(req)
-		return nil, fmt.Errorf("dispatch: unsupported scheme %q", req.URL.Scheme)
 	}
+
+	cfg := t.TLS
+	if cfg == nil {
+		cfg = &utls.Config{}
+	}
+	cfg = cfg.Clone()
+	cfg.ServerName = tgt.ServerName()
+	conn, err := tlsdial.Dial(ctx, "tcp", tgt.Addr(), tlsdial.Config{
+		Spec:        t.Spec,
+		TLS:         cfg,
+		DialContext: t.DialContext,
+	})
+	if err != nil {
+		closeBody(req)
+		return nil, err
+	}
+	std := tlsdial.StdConn{UConn: conn}
+	if conn.ConnectionState().NegotiatedProtocol == tlsdial.ProtoH2 {
+		return t.roundTripH2(std, req)
+	}
+	state := std.ConnectionState()
+	return t.roundTripHTTP1(std, req, &state)
 }
 
 func (t *Transport) dial(ctx context.Context, addr string) (net.Conn, error) {
@@ -149,13 +158,6 @@ func (b *connBody) Close() error {
 		b.conn.Close()
 	})
 	return err
-}
-
-func portOr(req *http.Request, def string) string {
-	if p := req.URL.Port(); p != "" {
-		return p
-	}
-	return def
 }
 
 func closeBody(req *http.Request) {
