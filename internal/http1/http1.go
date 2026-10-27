@@ -231,6 +231,9 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 	if !validTarget(target) {
 		return "", fmt.Errorf("http1: invalid request target %q", target)
 	}
+	if exact := order.ExactFromContext(req.Context()); exact != nil {
+		return encodeExact(method, target, exact, req)
+	}
 	host := req.Host
 	if host == "" {
 		host = req.URL.Host
@@ -307,16 +310,72 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// No leading or trailing whitespace, as in the H2 engine; Cookie
-		// is exempt there because it is split into crumbs.
-		if !httpguts.ValidHeaderFieldValue(f.Value) ||
-			f.Value != strings.Trim(f.Value, " \t") && !strings.EqualFold(f.Name, "cookie") {
+		if !validValue(f) {
 			return "", fmt.Errorf("http1: invalid value for header %s", name)
 		}
 		b.WriteString(name + ": " + f.Value + "\r\n")
 	}
 	b.WriteString("\r\n")
 	return b.String(), nil
+}
+
+// encodeExact returns the head of a request in exact mode: the fields as
+// given, names spelled as given and nothing added. Host is required, and
+// the framing must match the body; nothing is corrected.
+func encodeExact(method, target string, exact []order.Field, req *http.Request) (string, error) {
+	hasBody := req.Body != nil && req.Body != http.NoBody
+	if hasBody && req.ContentLength <= 0 {
+		return "", errors.New("http1: body without a known ContentLength")
+	}
+	if !hasBody && req.ContentLength > 0 {
+		return "", errors.New("http1: ContentLength set without a body")
+	}
+	var hosts, lengths int
+	var b strings.Builder
+	b.WriteString(method + " " + target + " HTTP/1.1\r\n")
+	for _, f := range exact {
+		if !httpguts.ValidHeaderFieldName(f.Name) {
+			return "", fmt.Errorf("http1: invalid header name %q", f.Name)
+		}
+		if !validValue(f) {
+			return "", fmt.Errorf("http1: invalid value for header %s", f.Name)
+		}
+		switch strings.ToLower(f.Name) {
+		case "host":
+			hosts++
+			if !httpguts.ValidHostHeader(f.Value) {
+				return "", fmt.Errorf("http1: invalid Host %q", f.Value)
+			}
+		case "content-length":
+			lengths++
+			if n, err := strconv.ParseInt(f.Value, 10, 64); err != nil || n != req.ContentLength {
+				return "", fmt.Errorf("http1: exact Content-Length %q does not match the body of %d bytes", f.Value, req.ContentLength)
+			}
+		case "transfer-encoding":
+			return "", errors.New("http1: Transfer-Encoding is not supported; the body is sent with Content-Length")
+		case "upgrade":
+			return "", errors.New("http1: Upgrade is not supported")
+		}
+		b.WriteString(f.Name + ": " + f.Value + "\r\n")
+	}
+	switch {
+	case hosts != 1:
+		return "", fmt.Errorf("http1: exact headers need one Host field, have %d", hosts)
+	case lengths > 1:
+		return "", errors.New("http1: exact headers repeat Content-Length")
+	case hasBody && lengths == 0:
+		return "", errors.New("http1: exact headers need a Content-Length field for the body")
+	}
+	b.WriteString("\r\n")
+	return b.String(), nil
+}
+
+// validValue reports whether a field value can be sent: valid characters
+// and no leading or trailing whitespace, as in the H2 engine. Cookie is
+// exempt from the whitespace rule there because it is split into crumbs.
+func validValue(f order.Field) bool {
+	return httpguts.ValidHeaderFieldValue(f.Value) &&
+		(f.Value == strings.Trim(f.Value, " \t") || strings.EqualFold(f.Name, "cookie"))
 }
 
 // spelled returns the wire spelling of name.
