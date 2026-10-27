@@ -6,6 +6,7 @@ package order
 import (
 	"cmp"
 	"context"
+	"net/http"
 	"slices"
 	"strings"
 )
@@ -40,6 +41,39 @@ func WithOrder(ctx context.Context, o Order) context.Context {
 func FromContext(ctx context.Context) *Order {
 	o, _ := ctx.Value(ctxKey{}).(*Order)
 	return o
+}
+
+// Keys of Request.Header that carry the order of a request, with the
+// strings of fhttp and the sardanioss x/net fork. The ':' makes them invalid
+// field names, so an engine refuses them rather than sending them.
+const (
+	HeaderKey = "Header-Order:"
+	PseudoKey = "PHeader-Order:"
+)
+
+// FromHeader returns the order carried by the keys of h, or nil if it has
+// neither.
+func FromHeader(h http.Header) *Order {
+	pseudo, okP := h[PseudoKey]
+	header, okH := h[HeaderKey]
+	if !okP && !okH {
+		return nil
+	}
+	return &Order{Pseudo: slices.Clone(pseudo), Header: slices.Clone(header)}
+}
+
+// WithoutKeys returns h without the order keys: a copy if it has one, else
+// h itself. h is never modified.
+func WithoutKeys(h http.Header) http.Header {
+	_, okP := h[PseudoKey]
+	_, okH := h[HeaderKey]
+	if !okP && !okH {
+		return h
+	}
+	out := h.Clone()
+	delete(out, PseudoKey)
+	delete(out, HeaderKey)
+	return out
 }
 
 // Merge combines orders by precedence, highest first (request, client,

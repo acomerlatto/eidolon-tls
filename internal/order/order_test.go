@@ -2,6 +2,8 @@ package order
 
 import (
 	"context"
+	"net/http"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -151,5 +153,39 @@ func TestWithExact(t *testing.T) {
 	}
 	if ExactFromContext(ctx) != nil {
 		t.Fatal("exact fields in an empty context")
+	}
+}
+
+func TestFromHeader(t *testing.T) {
+	if o := FromHeader(http.Header{"X-A": {"1"}}); o != nil {
+		t.Fatalf("no keys: %+v", o)
+	}
+	h := http.Header{HeaderKey: {"x-b", "x-a"}, "X-A": {"1"}}
+	o := FromHeader(h)
+	if o == nil || o.Pseudo != nil || !slices.Equal(o.Header, []string{"x-b", "x-a"}) {
+		t.Fatalf("header key: %+v", o)
+	}
+	h[HeaderKey][0] = "changed"
+	if o.Header[0] != "x-b" {
+		t.Fatal("the list is not copied")
+	}
+	o = FromHeader(http.Header{PseudoKey: {":path", ":method"}})
+	if o == nil || o.Header != nil || !slices.Equal(o.Pseudo, []string{":path", ":method"}) {
+		t.Fatalf("pseudo key: %+v", o)
+	}
+}
+
+func TestWithoutKeys(t *testing.T) {
+	plain := http.Header{"X-A": {"1"}}
+	if got := WithoutKeys(plain); !reflect.DeepEqual(got, plain) {
+		t.Fatalf("no keys: %v", got)
+	}
+	h := http.Header{HeaderKey: {"x-a"}, PseudoKey: {":path"}, "X-A": {"1"}}
+	got := WithoutKeys(h)
+	if !reflect.DeepEqual(got, http.Header{"X-A": {"1"}}) {
+		t.Fatalf("got %v", got)
+	}
+	if len(h) != 3 {
+		t.Fatalf("the caller's Header changed: %v", h)
 	}
 }
