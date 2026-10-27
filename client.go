@@ -77,6 +77,8 @@ func New(opts ...Option) (HttpClient, error) {
 		Spelling:    cfg.spelling,
 		Order:       cfg.order,
 		Protocols:   alpn,
+
+		DisableDecompression: cfg.disableDecompression,
 	}
 	return &client{
 		hc: &http.Client{Transport: tr, Timeout: cfg.timeout, Jar: cfg.jar},

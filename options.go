@@ -30,6 +30,8 @@ type config struct {
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	jar         http.CookieJar
 
+	disableDecompression bool
+
 	order    *order.Order
 	spelling http1.Spelling
 
@@ -102,6 +104,19 @@ func WithCookieJar(jar http.CookieJar) Option {
 			return errors.New("WithCookieJar: nil jar")
 		}
 		c.jar = jar
+		return nil
+	}
+}
+
+// WithDisableDecompression delivers response bodies as the server sent
+// them. By default a body with Content-Encoding gzip or deflate is decoded,
+// as browsers do: the response loses Content-Encoding and Content-Length,
+// and Response.Uncompressed is set. Other codings are always delivered as
+// they came. Accept-Encoding is never added: it comes from the request or
+// the profile.
+func WithDisableDecompression() Option {
+	return func(c *config) error {
+		c.disableDecompression = true
 		return nil
 	}
 }
