@@ -5,9 +5,9 @@
 // HTTP/2 connections stay in the engine's own pool, keyed by origin and
 // endpoint; the profile, TLS settings and trust are fixed per Transport, so
 // each Transport has its own pool. An HTTP/1.1 request still uses its own
-// connection, closed with the response body. The HTTP/1.1 pool, waiters for
-// the first connection of an origin and the protocol policy come in later
-// M1 steps.
+// connection, closed with the response body. While no connection of an
+// origin is usable, its requests wait for one shared dial (firstconn.go).
+// The HTTP/1.1 pool and the protocol policy come in later M1 steps.
 package dispatch
 
 import (
@@ -51,6 +51,13 @@ type Transport struct {
 	mu     sync.Mutex
 	closed bool
 	conns  map[*trackedConn]struct{}
+	// protos holds the protocol learned per key; dialing, the shared
+	// dial in progress per key.
+	protos  map[string]string
+	dialing map[string]*dialCall
+	// dialCtx is the context of the shared dials, canceled by Close.
+	dialCtx     context.Context
+	cancelDials context.CancelFunc
 }
 
 // ErrClosed reports a request on a closed Transport.
@@ -111,6 +118,9 @@ func (t *Transport) Close() error {
 	t.closed = true
 	conns := t.conns
 	t.conns = nil
+	if t.cancelDials != nil {
+		t.cancelDials()
+	}
 	t.mu.Unlock()
 	for c := range conns {
 		c.Conn.Close()
@@ -179,10 +189,13 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 		}
 
 		dials++
-		conn, err := t.dialTLS(ctx, tgt)
+		conn, err := t.connFor(ctx, tgt, key)
 		if err != nil {
 			closeBody(req)
 			return nil, err
+		}
+		if conn == nil {
+			continue // a shared dial pooled an h2 connection
 		}
 		std := tlsdial.StdConn{UConn: conn}
 		if conn.ConnectionState().NegotiatedProtocol != tlsdial.ProtoH2 {
@@ -272,18 +285,24 @@ func rewind(req *http.Request) (*http.Request, bool) {
 	return &r, true
 }
 
-func (t *Transport) dialTLS(ctx context.Context, tgt target.Target) (*utls.UConn, error) {
+// dialTLS opens a TLS connection to tgt and records its protocol for key.
+func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) (*utls.UConn, error) {
 	cfg := t.TLS
 	if cfg == nil {
 		cfg = &utls.Config{}
 	}
 	cfg = cfg.Clone()
 	cfg.ServerName = tgt.ServerName()
-	return tlsdial.Dial(ctx, "tcp", tgt.Addr(), tlsdial.Config{
+	conn, err := tlsdial.Dial(ctx, "tcp", tgt.Addr(), tlsdial.Config{
 		Spec:        t.Spec,
 		TLS:         cfg,
 		DialContext: t.trackedDial,
 	})
+	if err != nil {
+		return nil, err
+	}
+	t.learn(key, conn.ConnectionState().NegotiatedProtocol)
+	return conn, nil
 }
 
 func (t *Transport) dial(ctx context.Context, addr string) (net.Conn, error) {
@@ -341,6 +360,9 @@ func (t *Transport) h2t() *http2.Transport {
 		// DisableCompression: the engine neither adds accept-encoding nor
 		// decompresses the response; both belong to the profile (C9).
 		t.h2.DisableCompression = true
+		// One connection per key (C4): a request waits for a free stream
+		// instead of opening another connection.
+		t.h2.StrictMaxConcurrentStreams = true
 	})
 	return t.h2
 }

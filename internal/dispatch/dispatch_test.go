@@ -330,8 +330,10 @@ func TestDispatchDialAfterClose(t *testing.T) {
 	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		close(dialing)
 		<-proceed
+		// Close cancels the dial; a dialer that ignores it still must
+		// not leak its connection.
 		var d net.Dialer
-		c, err := d.DialContext(ctx, network, srv.Addr)
+		c, err := d.DialContext(context.WithoutCancel(ctx), network, srv.Addr)
 		dialed = c
 		return c, err
 	}
