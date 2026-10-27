@@ -200,12 +200,10 @@ func (s *Server) serve(raw net.Conn) {
 // serveHTTP1 serves one connection with net/http.
 func serveHTTP1(c net.Conn, h http.Handler) {
 	srv := &http.Server{Handler: h, ErrorLog: log.New(io.Discard, "", 0)}
-	l := &oneConnListener{c: c, done: make(chan struct{})}
-	srv.ConnState = func(_ net.Conn, st http.ConnState) {
-		if st == http.StateClosed || st == http.StateHijacked {
-			l.close()
-		}
-	}
+	l := &oneConnListener{done: make(chan struct{})}
+	// The connection ends when it is closed: by the server, or by the
+	// handler that hijacked it, which may still be writing.
+	l.c = &closeHook{Conn: c, hook: l.close}
 	srv.Serve(l)
 	<-l.done
 }
@@ -321,7 +319,19 @@ func (l *oneConnListener) Accept() (net.Conn, error) {
 	return nil, net.ErrClosed
 }
 
-func (l *oneConnListener) close()         { l.once.Do(func() { close(l.done) }) }
+func (l *oneConnListener) close() { l.once.Do(func() { close(l.done) }) }
+
+// closeHook runs hook after the connection is closed.
+type closeHook struct {
+	net.Conn
+	hook func()
+}
+
+func (c *closeHook) Close() error {
+	err := c.Conn.Close()
+	c.hook()
+	return err
+}
 func (l *oneConnListener) Close() error   { l.close(); return nil }
 func (l *oneConnListener) Addr() net.Addr { return l.c.LocalAddr() }
 
