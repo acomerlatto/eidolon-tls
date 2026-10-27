@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	utls "github.com/acomerlatto/utls"
 
@@ -28,6 +29,12 @@ type HttpClient interface {
 	Get(url string) (*http.Response, error)
 	Head(url string) (*http.Response, error)
 	Post(url, contentType string, body io.Reader) (*http.Response, error)
+
+	// GetCookies returns the cookies of the jar (WithCookieJar) for u, and
+	// SetCookies stores cookies in it as if u had sent them. Without a jar
+	// GetCookies returns nil and SetCookies does nothing.
+	GetCookies(u *url.URL) []*http.Cookie
+	SetCookies(u *url.URL, cookies []*http.Cookie)
 
 	// CloseIdleConnections closes connections that carry no request. It
 	// never interrupts a response in progress.
@@ -72,7 +79,7 @@ func New(opts ...Option) (HttpClient, error) {
 		Protocols:   alpn,
 	}
 	return &client{
-		hc: &http.Client{Transport: tr, Timeout: cfg.timeout},
+		hc: &http.Client{Transport: tr, Timeout: cfg.timeout, Jar: cfg.jar},
 		tr: tr,
 	}, nil
 }
@@ -88,6 +95,19 @@ func (c *client) Head(url string) (*http.Response, error)      { return c.hc.Hea
 
 func (c *client) Post(url, contentType string, body io.Reader) (*http.Response, error) {
 	return c.hc.Post(url, contentType, body)
+}
+
+func (c *client) GetCookies(u *url.URL) []*http.Cookie {
+	if c.hc.Jar == nil {
+		return nil
+	}
+	return c.hc.Jar.Cookies(u)
+}
+
+func (c *client) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	if c.hc.Jar != nil {
+		c.hc.Jar.SetCookies(u, cookies)
+	}
 }
 
 func (c *client) CloseIdleConnections()        { c.hc.CloseIdleConnections() }

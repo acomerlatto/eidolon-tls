@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ type config struct {
 	rootCAs     *x509.CertPool
 	timeout     time.Duration
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	jar         http.CookieJar
 
 	order    *order.Order
 	spelling http1.Spelling
@@ -83,6 +85,23 @@ func WithDialContext(dial func(ctx context.Context, network, addr string) (net.C
 			return errors.New("WithDialContext: nil function")
 		}
 		c.dialContext = dial
+		return nil
+	}
+}
+
+// WithCookieJar sets the cookie jar of the client's own methods, as
+// http.Client.Jar does: cookies from Set-Cookie, including redirect
+// responses, are stored, and those of each URL are added to its Cookie
+// field. Without it there is no jar. NewCookieJar returns one with the
+// public suffix list. It is not part of Transport(): the http.Client that
+// uses it sets its own jar. In exact mode (WithExactHeaders) no cookie of
+// the jar is sent.
+func WithCookieJar(jar http.CookieJar) Option {
+	return func(c *config) error {
+		if jar == nil {
+			return errors.New("WithCookieJar: nil jar")
+		}
+		c.jar = jar
 		return nil
 	}
 }
