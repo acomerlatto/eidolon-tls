@@ -47,7 +47,7 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string) 
 		t.mu.Unlock()
 		return nil, ErrClosed
 	}
-	if t.protos[key] == tlsdial.ProtoHTTP1 {
+	if t.protos[key] == tlsdial.ProtoHTTP1 || !t.allows(tlsdial.ProtoH2) {
 		t.mu.Unlock()
 		return t.h1Get(ctx, key, t.h1DialTLS(tgt, key))
 	}
@@ -177,9 +177,6 @@ func (t *Transport) dialContext() context.Context {
 // learn records the protocol a new connection of key negotiated. Every new
 // connection revalidates it.
 func (t *Transport) learn(key, proto string) {
-	if proto != tlsdial.ProtoH2 {
-		proto = tlsdial.ProtoHTTP1 // no ALPN is served by HTTP/1.1
-	}
 	t.mu.Lock()
 	if t.protos == nil {
 		t.protos = make(map[string]string)

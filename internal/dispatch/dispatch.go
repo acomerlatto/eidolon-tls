@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -47,6 +48,10 @@ type Transport struct {
 	// MaxConnsPerHost bounds the HTTP/1.1 connections per origin and
 	// endpoint. Zero means DefaultMaxConnsPerHost.
 	MaxConnsPerHost int
+	// Protocols restricts the protocols offered by ALPN, and accepted
+	// from it, to tlsdial.ProtoHTTP1 and tlsdial.ProtoH2 as listed. Nil
+	// keeps the spec as it is and accepts both.
+	Protocols []string
 
 	h2once sync.Once
 	h2     *http2.Transport
@@ -60,6 +65,9 @@ type Transport struct {
 	dialing map[string]*dialCall
 	// h1 holds the HTTP/1.1 pool per key.
 	h1 map[string]*h1Host
+	// h1Required marks the keys whose server answered HTTP_1_1_REQUIRED:
+	// their new connections offer only http/1.1, as Chrome does.
+	h1Required map[string]bool
 	// dialCtx is the context of the shared dials, canceled by Close.
 	dialCtx     context.Context
 	cancelDials context.CancelFunc
@@ -67,6 +75,10 @@ type Transport struct {
 
 // ErrClosed reports a request on a closed Transport.
 var ErrClosed = errors.New("eidolon: transport closed")
+
+// ErrProtocolPolicy reports a protocol outside the enabled set: negotiated
+// by the server, required by it, or needed by the URL.
+var ErrProtocolPolicy = errors.New("eidolon: protocol outside the enabled set")
 
 // RoundTrip implements http.RoundTripper.
 //
@@ -149,6 +161,10 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 	// the origin and the endpoint dialed.
 	key := tgt.Origin() + " " + tgt.Addr()
 	if tgt.Scheme == "http" {
+		if !t.allows(tlsdial.ProtoHTTP1) {
+			closeBody(req)
+			return nil, fmt.Errorf("%w: http:// needs HTTP/1.1", ErrProtocolPolicy)
+		}
 		dial := func(ctx context.Context) (net.Conn, *tls.ConnectionState, error) {
 			conn, err := t.dial(ctx, tgt.Addr())
 			return conn, nil, err
@@ -179,9 +195,32 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 	for dials, replays := 0, 0; ; {
 		got = httptrace.GotConnInfo{}
 		watched, body := watchBody(req)
-		resp, next, err := h2.RoundTripPooled(watched, key)
+		var resp *http.Response
+		next, err := watched, error(http2.ErrNoCachedConn)
+		if !t.h1Only(key) {
+			resp, next, err = h2.RoundTripPooled(watched, key)
+		}
 		if err == nil {
 			return resp, nil
+		}
+		if http11Required(err) {
+			// RFC 9113 section 7: the server wants HTTP/1.1. Chrome
+			// remembers it for the origin and sends the request again
+			// over HTTP/1.1, whatever the method: it was refused.
+			if !t.allows(tlsdial.ProtoHTTP1) {
+				return nil, fmt.Errorf("%w: the server requires HTTP/1.1: %w", ErrProtocolPolicy, err)
+			}
+			t.requireH1(key)
+			if replays == maxDials || body.failed() || ctx.Err() != nil || t.isClosed() {
+				return nil, err
+			}
+			r, ok := rewindBody(req)
+			if !ok {
+				return nil, err
+			}
+			replays++
+			req = r
+			continue
 		}
 		if !errors.Is(err, http2.ErrNoCachedConn) {
 			// Section 6.3: a request is sent again on a new connection
@@ -309,16 +348,89 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 	}
 	cfg = cfg.Clone()
 	cfg.ServerName = tgt.ServerName()
+	t.mu.Lock()
+	protos := t.offerLocked(key)
+	t.mu.Unlock()
+	spec := t.Spec
+	if protos != nil {
+		spec = func() (*utls.ClientHelloSpec, error) {
+			s, err := t.Spec()
+			if err != nil || s == nil {
+				return s, err
+			}
+			if err := tlsdial.RestrictALPN(s, protos); err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrProtocolPolicy, err)
+			}
+			return s, nil
+		}
+	}
 	conn, err := tlsdial.Dial(ctx, "tcp", tgt.Addr(), tlsdial.Config{
-		Spec:        t.Spec,
+		Spec:        spec,
 		TLS:         cfg,
 		DialContext: t.trackedDial,
 	})
 	if err != nil {
 		return nil, err
 	}
-	t.learn(key, conn.ConnectionState().NegotiatedProtocol)
+	proto := conn.ConnectionState().NegotiatedProtocol
+	if proto == "" {
+		proto = tlsdial.ProtoHTTP1 // no ALPN is served by HTTP/1.1
+	}
+	if protos != nil && !slices.Contains(protos, proto) {
+		conn.Close()
+		return nil, fmt.Errorf("%w: the server negotiated %s", ErrProtocolPolicy, proto)
+	}
+	t.learn(key, proto)
 	return conn, nil
+}
+
+// offerLocked returns the protocols a new connection of key offers, or nil
+// for the spec as it is.
+func (t *Transport) offerLocked(key string) []string {
+	if t.h1Required[key] && t.allows(tlsdial.ProtoHTTP1) {
+		return []string{tlsdial.ProtoHTTP1}
+	}
+	return t.Protocols
+}
+
+// allows reports whether proto is enabled.
+func (t *Transport) allows(proto string) bool {
+	return t.Protocols == nil || slices.Contains(t.Protocols, proto)
+}
+
+// h1Only reports whether requests of key skip the HTTP/2 pool.
+func (t *Transport) h1Only(key string) bool {
+	if !t.allows(tlsdial.ProtoH2) {
+		return true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.h1Required[key]
+}
+
+// requireH1 records that the server of key requires HTTP/1.1.
+func (t *Transport) requireH1(key string) {
+	t.mu.Lock()
+	if t.h1Required == nil {
+		t.h1Required = make(map[string]bool)
+	}
+	t.h1Required[key] = true
+	if t.protos == nil {
+		t.protos = make(map[string]string)
+	}
+	t.protos[key] = tlsdial.ProtoHTTP1
+	t.mu.Unlock()
+}
+
+// http11Required reports an HTTP_1_1_REQUIRED from the server, in
+// RST_STREAM or GOAWAY.
+func http11Required(err error) bool {
+	var se http2.StreamError
+	if errors.As(err, &se) && se.Code == http2.ErrCodeHTTP11Required {
+		return true
+	}
+	var ge http2.GoAwayError
+	return errors.As(err, &ge) && ge.ErrCode == http2.ErrCodeHTTP11Required
 }
 
 func (t *Transport) dial(ctx context.Context, addr string) (net.Conn, error) {
