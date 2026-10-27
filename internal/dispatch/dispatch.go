@@ -127,7 +127,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if merged != nil {
 		sent = *sent.WithContext(order.WithOrder(req.Context(), *merged))
 	}
-	sent.Header = order.WithoutKeys(req.Header)
+	sent.Header = redirectHeader(req, order.WithoutKeys(req.Header))
 	if q := target.EncodeQuery(req.URL.RawQuery); q != req.URL.RawQuery {
 		u := *req.URL
 		u.RawQuery = q
