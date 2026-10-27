@@ -10,6 +10,11 @@ import (
 // HTTP/1.1. Names are compared case-insensitively; a name listed twice keeps
 // its first position, and a listed name without a value in the request
 // creates nothing.
+//
+// The order of a request (WithOrder) comes first; the names of the client
+// order (WithDefaultOrder) not listed yet follow, then the others in
+// alphabetical order. Each list falls back the same way on its own: a
+// request order without Pseudo uses the client's.
 type Order struct {
 	// Pseudo orders the HTTP/2 pseudo-headers (":method", ":authority",
 	// ":scheme", ":path"). Nil keeps the engine's order.
@@ -23,4 +28,36 @@ type Order struct {
 // The lists are copied. The order is never sent as a header.
 func WithOrder(ctx context.Context, o Order) context.Context {
 	return order.WithOrder(ctx, order.Order(o))
+}
+
+// HeaderField is one header field of exact mode.
+type HeaderField struct {
+	Name, Value string
+}
+
+// WithExactHeaders returns a context whose requests send exactly fields as
+// their regular headers: in this order, repeated names where they are, and
+// nothing else. Request.Header is ignored, and no field of the client, the
+// cookie jar or the engines is added: not User-Agent, Accept-Encoding,
+// Cookie or Connection. An empty list changes nothing. The list is copied.
+//
+// Over HTTP/1.1 the names are sent spelled as given, and a Host field is
+// required. Over HTTP/2 the names are lowercased, Host becomes :authority,
+// connection-specific fields such as Connection are left out, and Cookie is
+// not split. Pseudo-headers still follow the order (WithOrder).
+//
+// Framing is checked, never corrected: a body needs a Content-Length field
+// with its length over HTTP/1.1, and over HTTP/2 a Content-Length field, if
+// any, must match it.
+//
+// A redirect of such a request fails with ErrExactHeadersRedirect without
+// sending anything: http.Client filters credentials out of Header only.
+// Use CheckRedirect with http.ErrUseLastResponse and send the next request
+// with its own fields.
+func WithExactHeaders(ctx context.Context, fields ...HeaderField) context.Context {
+	out := make([]order.Field, len(fields))
+	for i, f := range fields {
+		out[i] = order.Field(f)
+	}
+	return order.WithExact(ctx, out)
 }

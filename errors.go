@@ -22,4 +22,7 @@ var (
 	// by it (HTTP_1_1_REQUIRED), or needed by the URL (http:// needs
 	// HTTP/1.1).
 	ErrProtocolPolicy = dispatch.ErrProtocolPolicy
+	// ErrExactHeadersRedirect reports a redirect of a request sent with
+	// WithExactHeaders; see there.
+	ErrExactHeadersRedirect = dispatch.ErrExactHeadersRedirect
 )

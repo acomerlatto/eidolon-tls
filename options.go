@@ -4,10 +4,18 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
+	"slices"
+	"strings"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
+
 	utls "github.com/acomerlatto/utls"
+
+	"github.com/acomerlatto/eidolon-tls/internal/http1"
+	"github.com/acomerlatto/eidolon-tls/internal/order"
 )
 
 // Option configures a client in New. Options fill a private configuration
@@ -19,6 +27,9 @@ type config struct {
 	rootCAs     *x509.CertPool
 	timeout     time.Duration
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	order    *order.Order
+	spelling http1.Spelling
 
 	protocols    []Protocol // WithProtocols; nil if not used
 	force        int        // bits 1<<HTTP1 and 1<<HTTP2 of WithForceHTTP*
@@ -72,6 +83,39 @@ func WithDialContext(dial func(ctx context.Context, network, addr string) (net.C
 			return errors.New("WithDialContext: nil function")
 		}
 		c.dialContext = dial
+		return nil
+	}
+}
+
+// WithDefaultOrder sets the header order of the client's requests. The
+// order of a request (WithOrder) takes precedence; see Order. The lists are
+// copied.
+func WithDefaultOrder(o Order) Option {
+	return func(c *config) error {
+		c.order = &order.Order{Pseudo: slices.Clone(o.Pseudo), Header: slices.Clone(o.Header)}
+		return nil
+	}
+}
+
+// WithHeaderSpelling sets how header names are spelled over HTTP/1.1, such
+// as "sec-ch-ua" in lowercase next to "User-Agent". http.Header
+// canonicalizes its keys, so the spelling of a name comes from here; names
+// not listed are sent in canonical form. Over HTTP/2 names are always
+// lowercase.
+func WithHeaderSpelling(names ...string) Option {
+	return func(c *config) error {
+		sp := make(http1.Spelling, len(names))
+		for _, n := range names {
+			if !httpguts.ValidHeaderFieldName(n) {
+				return fmt.Errorf("WithHeaderSpelling: invalid name %q", n)
+			}
+			key := strings.ToLower(n)
+			if prev, ok := sp[key]; ok && prev != n {
+				return fmt.Errorf("WithHeaderSpelling: %q and %q spell one name", prev, n)
+			}
+			sp[key] = n
+		}
+		c.spelling = sp
 		return nil
 	}
 }

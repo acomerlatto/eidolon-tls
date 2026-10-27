@@ -67,6 +67,8 @@ func New(opts ...Option) (HttpClient, error) {
 		Spec:        cfg.clientHello,
 		TLS:         &utls.Config{RootCAs: cfg.rootCAs},
 		DialContext: cfg.dialContext,
+		Spelling:    cfg.spelling,
+		Order:       cfg.order,
 		Protocols:   alpn,
 	}
 	return &client{
