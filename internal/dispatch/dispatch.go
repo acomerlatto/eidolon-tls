@@ -44,6 +44,9 @@ type Transport struct {
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Spelling is the HTTP/1.1 name spelling table.
 	Spelling http1.Spelling
+	// MaxConnsPerHost bounds the HTTP/1.1 connections per origin and
+	// endpoint. Zero means DefaultMaxConnsPerHost.
+	MaxConnsPerHost int
 
 	h2once sync.Once
 	h2     *http2.Transport
@@ -55,6 +58,8 @@ type Transport struct {
 	// dial in progress per key.
 	protos  map[string]string
 	dialing map[string]*dialCall
+	// h1 holds the HTTP/1.1 pool per key.
+	h1 map[string]*h1Host
 	// dialCtx is the context of the shared dials, canceled by Close.
 	dialCtx     context.Context
 	cancelDials context.CancelFunc
@@ -107,9 +112,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// CloseIdleConnections closes the pooled HTTP/2 connections that carry no
+// CloseIdleConnections closes the pooled connections that carry no
 // request. It never interrupts a response in progress.
-func (t *Transport) CloseIdleConnections() { t.h2t().CloseIdleConnections() }
+func (t *Transport) CloseIdleConnections() {
+	t.h2t().CloseIdleConnections()
+	t.closeIdleH1()
+}
 
 // Close stops the transport: new requests fail with ErrClosed and every
 // open connection is closed, including responses still being read.
@@ -121,6 +129,7 @@ func (t *Transport) Close() error {
 	if t.cancelDials != nil {
 		t.cancelDials()
 	}
+	t.stopH1Locked()
 	t.mu.Unlock()
 	for c := range conns {
 		c.Conn.Close()
@@ -136,18 +145,28 @@ func (t *Transport) isClosed() bool {
 
 func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Response, error) {
 	ctx := req.Context()
-	if tgt.Scheme == "http" {
-		conn, err := t.dial(ctx, tgt.Addr())
-		if err != nil {
-			closeBody(req)
-			return nil, err
-		}
-		return t.roundTripHTTP1(conn, req, nil)
-	}
-
 	// The key holds what can differ between requests of one Transport:
 	// the origin and the endpoint dialed.
 	key := tgt.Origin() + " " + tgt.Addr()
+	if tgt.Scheme == "http" {
+		dial := func(ctx context.Context) (net.Conn, *tls.ConnectionState, error) {
+			conn, err := t.dial(ctx, tgt.Addr())
+			return conn, nil, err
+		}
+		for replays := 0; ; replays++ {
+			c, err := t.h1Get(ctx, key, dial)
+			if err != nil {
+				closeBody(req)
+				return nil, err
+			}
+			resp, again, err := t.sendH1(c, req)
+			if again == nil || replays == maxDials {
+				return resp, err
+			}
+			req = again
+		}
+	}
+
 	h2 := t.h2t()
 
 	// The engine reports through GotConn which connection each attempt
@@ -189,29 +208,20 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 		}
 
 		dials++
-		conn, err := t.connFor(ctx, tgt, key)
+		c, err := t.connFor(ctx, tgt, key)
 		if err != nil {
 			closeBody(req)
 			return nil, err
 		}
-		if conn == nil {
-			continue // a shared dial pooled an h2 connection
+		if c == nil {
+			continue // an h2 connection was pooled
 		}
-		std := tlsdial.StdConn{UConn: conn}
-		if conn.ConnectionState().NegotiatedProtocol != tlsdial.ProtoH2 {
-			state := std.ConnectionState()
-			return t.roundTripHTTP1(std, req, &state)
+		resp, again, err := t.sendH1(c, req)
+		if again == nil || replays == maxDials {
+			return resp, err
 		}
-		used, err := h2.AddConn(key, std)
-		if err != nil {
-			std.Close()
-			closeBody(req)
-			return nil, err
-		}
-		if !used {
-			// Another request pooled a usable connection first.
-			std.Close()
-		}
+		replays++
+		req = again
 	}
 }
 
@@ -270,6 +280,12 @@ func rewind(req *http.Request) (*http.Request, bool) {
 			return nil, false
 		}
 	}
+	return rewindBody(req)
+}
+
+// rewindBody returns req with its body obtained again, whatever the
+// method: for a request that never reached the server.
+func rewindBody(req *http.Request) (*http.Request, bool) {
 	if req.Body == nil || req.Body == http.NoBody {
 		return req, true
 	}
@@ -365,46 +381,6 @@ func (t *Transport) h2t() *http2.Transport {
 		t.h2.StrictMaxConcurrentStreams = true
 	})
 	return t.h2
-}
-
-func (t *Transport) roundTripHTTP1(conn net.Conn, req *http.Request, state *tls.ConnectionState) (*http.Response, error) {
-	stop := context.AfterFunc(req.Context(), func() { conn.Close() })
-	resp, err := http1.RoundTrip(conn, req, t.Spelling)
-	closeBody(req)
-	if err != nil {
-		stop()
-		conn.Close()
-		if ctxErr := req.Context().Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		return nil, err
-	}
-	resp.TLS = state
-	resp.Body = &connBody{ReadCloser: resp.Body, conn: conn, stop: stop}
-	return resp, nil
-}
-
-// connBody closes the connection with the response body.
-type connBody struct {
-	io.ReadCloser
-	conn interface{ Close() error }
-	stop func() bool
-	once sync.Once
-}
-
-// Close closes the connection before the body: an HTTP/1.1 body from
-// http.ReadResponse reads to the end on Close, which never returns for a
-// body the server does not finish. Without an HTTP/1.1 pool the connection is
-// discarded anyway (section 6.3: no unbounded drain).
-func (b *connBody) Close() error {
-	b.once.Do(func() {
-		if b.stop != nil {
-			b.stop()
-		}
-		b.conn.Close()
-	})
-	b.ReadCloser.Close()
-	return nil
 }
 
 func closeBody(req *http.Request) {

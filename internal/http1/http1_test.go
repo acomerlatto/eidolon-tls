@@ -144,7 +144,7 @@ func TestWriteRequestRejects(t *testing.T) {
 func roundTrip(t *testing.T, conn net.Conn, req *http.Request) {
 	t.Helper()
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	resp, err := http1.RoundTrip(conn, req, spell)
+	resp, err := http1.NewConn(conn).RoundTrip(req, spell)
 	if err != nil {
 		t.Fatal(err)
 	}

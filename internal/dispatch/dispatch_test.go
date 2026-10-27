@@ -197,19 +197,19 @@ func TestDispatchUnsupportedScheme(t *testing.T) {
 	}
 }
 
-// Without a pool, each request opens its own connection and closing the
-// body closes it: two requests give two lab connections, each with one
-// request.
-func TestDispatchOneConnectionPerRequest(t *testing.T) {
+// Sequential HTTP/1.1 requests reuse the connection once the body reached
+// EOF: one lab connection carries both requests.
+func TestDispatchH1Reuse(t *testing.T) {
 	srv := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}})
 	client := &http.Client{Transport: transport(srv)}
 	get(t, client, "https://example.com/1")
 	get(t, client, "https://example.com/2")
-	for _, path := range []string{"/1", "/2"} {
-		raw := string(srv.NextConn(t).Bytes())
-		if strings.Count(raw, " HTTP/1.1\r\n") != 1 || !strings.HasPrefix(raw, "GET "+path+" ") {
-			t.Errorf("connection for %s carried %q", path, raw)
-		}
+	if n := srv.Accepted(); n != 1 {
+		t.Fatalf("%d connections, want 1", n)
+	}
+	raw := string(srv.NextConn(t).Bytes())
+	if strings.Count(raw, " HTTP/1.1\r\n") != 2 || !strings.HasPrefix(raw, "GET /1 ") {
+		t.Fatalf("connection carried %q", raw)
 	}
 }
 

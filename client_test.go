@@ -91,6 +91,7 @@ func TestDoAndTransportSamePath(t *testing.T) {
 	srv := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}})
 	c := newClient(t, srv)
 	viaDo := send(t, srv, c.Do)
+	c.CloseIdleConnections() // the second request on a connection of its own
 	viaTransport := send(t, srv, (&http.Client{Transport: c.Transport()}).Do)
 	if string(viaDo) != string(viaTransport) {
 		t.Fatalf("Do sent %q\nTransport sent %q", viaDo, viaTransport)
@@ -122,6 +123,7 @@ func TestShortcuts(t *testing.T) {
 			}
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
+			c.CloseIdleConnections() // one connection per subtest
 			if got := string(srv.NextConn(t).Bytes()); !strings.HasPrefix(got, tt.line+"\r\n") {
 				t.Fatalf("sent %q, want request line %q", got, tt.line)
 			}

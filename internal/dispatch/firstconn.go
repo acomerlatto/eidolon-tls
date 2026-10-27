@@ -2,10 +2,13 @@ package dispatch
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
 	"time"
 
 	utls "github.com/acomerlatto/utls"
 
+	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/target"
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
@@ -30,15 +33,15 @@ type dialCall struct {
 	taken   bool
 }
 
-// connFor returns a new connection for a request of key: one of its own,
-// http/1.1 or h2 still to be pooled, or nil when a shared dial put an h2
-// connection in the pool.
+// connFor returns an HTTP/1.1 connection for a request of key, or nil
+// when an h2 connection was put in the pool.
 //
-// An origin learned as http/1.1 dials at once, in parallel with its other
-// requests. Otherwise the requests wait for one shared dial, as Chrome does:
-// with h2 they all multiplex on it; with http/1.1 one waiter takes the
-// connection and the others dial their own.
-func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string) (*utls.UConn, error) {
+// An origin learned as http/1.1 takes its connection from the HTTP/1.1
+// pool, which dials in parallel up to the limit. Otherwise the requests
+// wait for one shared dial, as Chrome does: with h2 they all multiplex on
+// it; with http/1.1 one waiter takes the connection and the others go to
+// the HTTP/1.1 pool.
+func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string) (*h1Conn, error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -46,7 +49,7 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string) 
 	}
 	if t.protos[key] == tlsdial.ProtoHTTP1 {
 		t.mu.Unlock()
-		return t.dialTLS(ctx, tgt, key)
+		return t.h1Get(ctx, key, t.h1DialTLS(tgt, key))
 	}
 	call := t.dialing[key]
 	if call == nil {
@@ -87,12 +90,47 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string) 
 	case !call.taken:
 		call.taken = true
 		t.mu.Unlock()
-		return call.conn, nil
+		t.h1Adopt(key)
+		return t.newH1Conn(key, call.conn), nil
 	}
 	t.mu.Unlock()
 	// Another waiter took the http/1.1 connection: the origin is now
-	// learned as http/1.1 and this request dials its own.
-	return t.dialTLS(ctx, tgt, key)
+	// learned as http/1.1.
+	return t.h1Get(ctx, key, t.h1DialTLS(tgt, key))
+}
+
+// h1DialTLS returns the dial of the HTTP/1.1 pool for key. A connection
+// that negotiates h2 goes to the HTTP/2 pool, and the dial returns nil.
+func (t *Transport) h1DialTLS(tgt target.Target, key string) func(context.Context) (net.Conn, *tls.ConnectionState, error) {
+	return func(ctx context.Context) (net.Conn, *tls.ConnectionState, error) {
+		conn, err := t.dialTLS(ctx, tgt, key)
+		if err != nil {
+			return nil, nil, err
+		}
+		if conn.ConnectionState().NegotiatedProtocol == tlsdial.ProtoH2 {
+			return nil, nil, t.addH2(key, conn)
+		}
+		std := tlsdial.StdConn{UConn: conn}
+		state := std.ConnectionState()
+		return std, &state, nil
+	}
+}
+
+func (t *Transport) newH1Conn(key string, conn *utls.UConn) *h1Conn {
+	std := tlsdial.StdConn{UConn: conn}
+	state := std.ConnectionState()
+	return &h1Conn{Conn: http1.NewConn(std), t: t, key: key, state: &state}
+}
+
+// addH2 puts an h2 connection in the pool. A connection the pool does not
+// take, because a usable one is already there, is closed.
+func (t *Transport) addH2(key string, conn *utls.UConn) error {
+	std := tlsdial.StdConn{UConn: conn}
+	used, err := t.h2t().AddConn(key, std)
+	if err != nil || !used {
+		std.Close()
+	}
+	return err
 }
 
 // sharedDial runs one dial for the waiters of key. An h2 connection enters
@@ -103,14 +141,7 @@ func (t *Transport) sharedDial(call *dialCall, tgt target.Target, key string) {
 	defer cancel()
 	conn, err := t.dialTLS(ctx, tgt, key)
 	if err == nil && conn.ConnectionState().NegotiatedProtocol == tlsdial.ProtoH2 {
-		std := tlsdial.StdConn{UConn: conn}
-		used, aerr := t.h2t().AddConn(key, std)
-		if aerr != nil {
-			std.Close()
-			err = aerr
-		} else if !used {
-			std.Close()
-		}
+		err = t.addH2(key, conn)
 		conn = nil
 	}
 

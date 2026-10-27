@@ -107,10 +107,17 @@ func TestFirstConnH2SharedDial(t *testing.T) {
 
 // When the first connection negotiates http/1.1, one waiter takes it and
 // the others dial their own: every connection carries one request, none is
-// left unused.
+// left unused. The server answers once all of them arrived, so no request
+// finds an idle connection to reuse.
 func TestFirstConnHTTP1OwnConnections(t *testing.T) {
 	const n = 5
-	srv := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}})
+	var arrived sync.WaitGroup
+	arrived.Add(n)
+	srv := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived.Done()
+		arrived.Wait()
+		io.WriteString(w, "ok")
+	})})
 	d := newGatedDialer(srv.Addr)
 	tr := d.transport(srv.RootCAs)
 	defer tr.Close()
@@ -291,6 +298,9 @@ func TestFirstConnExtraH2Closed(t *testing.T) {
 	if err := getCtx(context.Background(), tr, "https://example.com/"); err != nil {
 		t.Fatal(err)
 	}
+	// The origin stays learned as http/1.1; without its idle connection,
+	// each request dials.
+	tr.CloseIdleConnections()
 
 	var wg sync.WaitGroup
 	for range n {

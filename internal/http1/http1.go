@@ -1,22 +1,25 @@
 // Package http1 is the HTTP/1.1 engine. It writes requests with controlled
 // header order and name spelling, and reads responses with http.ReadResponse.
 //
-// One request per call on a connection the caller owns. Pooling, keep-alive
-// reuse and the framing checks of section 6.3 of the specification come in
-// later M1 steps.
+// A Conn carries one request at a time and keeps its reader between
+// requests, so it can be pooled. The pool itself belongs to the caller.
 package http1
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/textproto"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/net/http/httpguts"
 
@@ -60,15 +63,48 @@ func WriteRequest(w io.Writer, req *http.Request, spell Spelling) error {
 	return bw.Flush()
 }
 
-// RoundTrip writes req on rw and reads the final response, skipping 1xx
-// informational responses. The response body reads from rw.
-func RoundTrip(rw io.ReadWriter, req *http.Request, spell Spelling) (*http.Response, error) {
-	if err := WriteRequest(rw, req, spell); err != nil {
+// Conn is an HTTP/1.1 connection. Its reader lives as long as the
+// connection, so a byte read past one response is never lost.
+type Conn struct {
+	conn net.Conn
+	tap  tap
+	br   *bufio.Reader
+	sent int64 // bytes written by the last RoundTrip
+	// mixed: the last response had both Transfer-Encoding and
+	// Content-Length.
+	mixed bool
+	idle  chan error // the error of the idle watch, when one runs
+}
+
+// NewConn returns a Conn over c.
+func NewConn(c net.Conn) *Conn {
+	hc := &Conn{conn: c, tap: tap{r: c}}
+	hc.br = bufio.NewReader(&hc.tap)
+	return hc
+}
+
+// Close closes the connection.
+func (c *Conn) Close() error { return c.conn.Close() }
+
+// Sent returns the bytes the last RoundTrip wrote to the connection. Zero
+// means the request never reached the wire and the connection is unchanged.
+func (c *Conn) Sent() int64 { return c.sent }
+
+// RoundTrip writes req and reads the final response, skipping 1xx
+// informational responses. The response body reads from the connection;
+// the next request may start only after the body reached EOF.
+func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, error) {
+	c.sent = 0
+	if err := WriteRequest(writeCounter{c}, req, spell); err != nil {
 		return nil, err
 	}
-	br := bufio.NewReader(rw)
 	for {
-		resp, err := http.ReadResponse(br, req)
+		// The raw head is recorded because ReadResponse drops
+		// Content-Length when the response is chunked.
+		c.tap.rec = append(c.tap.rec[:0], peekBuffered(c.br)...)
+		c.tap.on = true
+		resp, err := http.ReadResponse(c.br, req)
+		c.tap.on = false
 		if err != nil {
 			return nil, err
 		}
@@ -80,8 +116,95 @@ func RoundTrip(rw io.ReadWriter, req *http.Request, spell Spelling) (*http.Respo
 			resp.Body.Close()
 			continue
 		}
+		c.mixed = bothFramings(c.tap.rec)
 		return resp, nil
 	}
+}
+
+// KeepAlive reports whether the connection may carry another request once
+// the body of resp reached EOF. A response with both Transfer-Encoding and
+// Content-Length is read by Transfer-Encoding and ends the connection (RFC
+// 9112 section 6.3, specification section 6.3).
+func (c *Conn) KeepAlive(resp *http.Response) bool { return !resp.Close && !c.mixed }
+
+// Watch starts watching the idle connection: dead runs if the server sends
+// anything or closes it. Reuse stops the watch.
+func (c *Conn) Watch(dead func()) {
+	c.idle = make(chan error, 1)
+	go func() {
+		_, err := c.br.Peek(1)
+		c.idle <- err
+		// Reuse is the only one to set a deadline on an idle connection.
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			dead()
+		}
+	}()
+}
+
+// Reuse stops the idle watch and reports whether the connection can carry
+// a new request: the server neither sent anything nor closed it.
+func (c *Conn) Reuse() bool {
+	if c.idle == nil {
+		return true
+	}
+	c.conn.SetReadDeadline(time.Unix(1, 0)) // in the past: unblocks the peek
+	err := <-c.idle
+	c.idle = nil
+	c.conn.SetReadDeadline(time.Time{})
+	return errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+// tap records what the reader takes from the connection while on.
+type tap struct {
+	r   io.Reader
+	on  bool
+	rec []byte
+}
+
+func (t *tap) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if t.on {
+		t.rec = append(t.rec, p[:n]...)
+	}
+	return n, err
+}
+
+func peekBuffered(br *bufio.Reader) []byte {
+	b, _ := br.Peek(br.Buffered())
+	return b
+}
+
+// bothFramings reports whether the head of a response, as received, has
+// both Transfer-Encoding and Content-Length fields.
+func bothFramings(raw []byte) bool {
+	var te, cl bool
+	lines := bytes.Split(raw, []byte("\n"))
+	for _, line := range lines[1:] { // after the status line
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		if len(line) == 0 {
+			break // end of the head
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			continue // obsolete line folding: not a field name
+		}
+		name, _, _ := bytes.Cut(line, []byte(":"))
+		switch strings.ToLower(string(name)) {
+		case "transfer-encoding":
+			te = true
+		case "content-length":
+			cl = true
+		}
+	}
+	return te && cl
+}
+
+// writeCounter counts the bytes written to the connection.
+type writeCounter struct{ c *Conn }
+
+func (w writeCounter) Write(p []byte) (int, error) {
+	n, err := w.c.conn.Write(p)
+	w.c.sent += int64(n)
+	return n, err
 }
 
 // encodeHead returns the request line and the header block.
