@@ -101,3 +101,55 @@ func TestSortDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestMerge(t *testing.T) {
+	request := &Order{Header: []string{"x-b", "accept"}}
+	client := &Order{Pseudo: []string{":method", ":authority"}, Header: []string{"user-agent", "accept", "x-a"}}
+	// Example from section 7 of the specification: the request leads, the
+	// client completes, the rest is alphabetical.
+	m := Merge(request, client)
+	fields := []Field{{"accept", "1"}, {"x-a", "2"}, {"x-b", "3"}, {"x-z", "4"}, {":authority", "h"}, {":method", "GET"}}
+	want := []string{":method", ":authority", "x-b", "accept", "x-a", "x-z"}
+	if got := names(m.Sort(fields)); !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	// Each list falls back on its own: the request has no Pseudo.
+	if !slices.Equal(m.Pseudo, client.Pseudo) {
+		t.Fatalf("Pseudo = %v, want the client's", m.Pseudo)
+	}
+	// The inputs are not modified.
+	if !slices.Equal(request.Header, []string{"x-b", "accept"}) || !slices.Equal(client.Header, []string{"user-agent", "accept", "x-a"}) {
+		t.Fatalf("inputs changed: %v, %v", request.Header, client.Header)
+	}
+	if Merge(nil, nil) != nil {
+		t.Fatal("Merge of nothing is not nil")
+	}
+	if got := Merge(nil, client); !slices.Equal(got.Header, client.Header) {
+		t.Fatalf("Merge(nil, client) = %v", got.Header)
+	}
+}
+
+func TestSortPseudo(t *testing.T) {
+	o := &Order{Pseudo: []string{":method", ":path"}, Header: []string{"a"}}
+	fields := []Field{{"x-a", "1"}, {":path", "/"}, {"x-b", "2"}, {":method", "GET"}, {"x-a", "3"}, {"a", "4"}}
+	want := []Field{{":method", "GET"}, {":path", "/"}, {"x-a", "1"}, {"x-b", "2"}, {"x-a", "3"}, {"a", "4"}}
+	if got := o.SortPseudo(fields); !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestWithExact(t *testing.T) {
+	ctx := context.Background()
+	if WithExact(ctx, nil) != ctx || WithExact(ctx, []Field{}) != ctx {
+		t.Fatal("an empty list changed the context")
+	}
+	fields := []Field{{"x-a", "1"}}
+	got := ExactFromContext(WithExact(ctx, fields))
+	fields[0].Value = "changed"
+	if !slices.Equal(got, []Field{{"x-a", "1"}}) {
+		t.Fatalf("got %v, want a copy", got)
+	}
+	if ExactFromContext(ctx) != nil {
+		t.Fatal("exact fields in an empty context")
+	}
+}

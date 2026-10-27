@@ -42,6 +42,47 @@ func FromContext(ctx context.Context) *Order {
 	return o
 }
 
+// Merge combines orders by precedence, highest first (request, client,
+// profile). Each list leads with the names of the first order that has
+// one; the names of the following ones, not yet listed, come next in their
+// own order. Nil orders are skipped; Merge returns nil if all are nil.
+func Merge(orders ...*Order) *Order {
+	var out *Order
+	for _, o := range orders {
+		if o == nil {
+			continue
+		}
+		if out == nil {
+			out = &Order{}
+		}
+		if o.Pseudo != nil {
+			out.Pseudo = append(slices.Clip(out.Pseudo), o.Pseudo...)
+		}
+		if o.Header != nil {
+			out.Header = append(slices.Clip(out.Header), o.Header...)
+		}
+	}
+	return out
+}
+
+type exactKey struct{}
+
+// WithExact returns a context carrying the exact header fields of a
+// request: they replace the regular headers, in this order, with the names
+// as given. An empty list leaves ctx as it is. The list is copied.
+func WithExact(ctx context.Context, fields []Field) context.Context {
+	if len(fields) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, exactKey{}, slices.Clone(fields))
+}
+
+// ExactFromContext returns the exact header fields carried by ctx, or nil.
+func ExactFromContext(ctx context.Context) []Field {
+	f, _ := ctx.Value(exactKey{}).([]Field)
+	return f
+}
+
 // Sort returns fields with the pseudo-headers first, each group in the
 // order of o. Values of the same name keep their relative order. fields is
 // not modified.
@@ -56,6 +97,22 @@ func (o *Order) Sort(fields []Field) []Field {
 	}
 	sortByList(pseudo, o.Pseudo, false)
 	sortByList(regular, o.Header, true)
+	return append(pseudo, regular...)
+}
+
+// SortPseudo returns fields with the pseudo-headers first, in the order of
+// o, and the regular fields after them as given: the order of exact mode.
+// fields is not modified.
+func (o *Order) SortPseudo(fields []Field) []Field {
+	var pseudo, regular []Field
+	for _, f := range fields {
+		if strings.HasPrefix(f.Name, ":") {
+			pseudo = append(pseudo, f)
+		} else {
+			regular = append(regular, f)
+		}
+	}
+	sortByList(pseudo, o.Pseudo, false)
 	return append(pseudo, regular...)
 }
 
