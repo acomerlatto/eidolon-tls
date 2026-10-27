@@ -49,6 +49,9 @@ func TestReferenceALPNChangeBetweenConnections(t *testing.T) {
 			client := &http.Client{Transport: tr}
 
 			for i, srv := range []*lab.Server{first, second} {
+				// The pooled h2 connection would take the second request;
+				// ALPN only changes on a new connection.
+				tr.CloseIdleConnections()
 				resp := get(t, client, "https://example.com/x")
 				want := order[i]
 				if got := resp.TLS.NegotiatedProtocol; got != want {

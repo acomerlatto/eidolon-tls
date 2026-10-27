@@ -1,0 +1,73 @@
+diff --git a/internal/http2/eidolon_pool.go b/internal/http2/eidolon_pool.go
+new file mode 100644
+index 0000000..f5ad142
+--- /dev/null
++++ b/internal/http2/eidolon_pool.go
+@@ -0,0 +1,37 @@
++// Pool fed by a caller that dials and reads ALPN itself, as net/http does
++// through ConfigureTransports.
++
++package http2
++
++import (
++	"net"
++	"net/http"
++)
++
++// NewPooledTransport returns a Transport whose pool never dials:
++// connections enter it through AddConn.
++func NewPooledTransport() *Transport {
++	pool := new(clientConnPool)
++	t := &Transport{ConnPool: noDialClientConnPool{pool}}
++	pool.t = t
++	return t
++}
++
++// AddConn hands c, which negotiated h2, to the pool under key. If the pool
++// already has a connection for key that can take a new request, c is not
++// used and the caller closes it. Concurrent calls for the same key are
++// coalesced. t must come from NewPooledTransport.
++func (t *Transport) AddConn(key string, c net.Conn) (used bool, err error) {
++	return t.connPool().(noDialClientConnPool).addConnIfNeeded(key, t, c)
++}
++
++// RoundTripPooled sends req on a pooled connection for key, retrying on
++// another pooled connection when the engine judges it safe. When no pooled
++// connection can take the request, it returns ErrNoCachedConn and the
++// request to send on a new connection: req itself, or a copy with a fresh
++// body after a failure the engine can retry.
++func (t *Transport) RoundTripPooled(req *http.Request, key string) (*http.Response, *http.Request, error) {
++	next := req
++	res, err := t.roundTripOpt(req, RoundTripOpt{key: key, next: &next})
++	return res, next, err
++}
+diff --git a/internal/http2/transport_common.go b/internal/http2/transport_common.go
+index 4f0333a..6ca8249 100644
+--- a/internal/http2/transport_common.go
++++ b/internal/http2/transport_common.go
+@@ -272,6 +272,9 @@ type RoundTripOpt struct {
+ 	OnlyCachedConn bool
+ 
+ 	allowHTTP bool // allow http:// URLs
++
++	key  string         // pool key; empty derives it from the URL (eidolon)
++	next **http.Request // receives the request to send elsewhere on ErrNoCachedConn (eidolon)
+ }
+ 
+ // Deprecated: Use [http.Transport.RoundTrip] instead.
+@@ -335,9 +338,15 @@ func authorityAddr(scheme string, authority string) (addr string) {
+ 
+ func (t *Transport) roundTripViaPool(req *http.Request, opt RoundTripOpt, pool ClientConnPool) (*http.Response, error) {
+ 	addr := authorityAddr(req.URL.Scheme, req.URL.Host)
++	if opt.key != "" {
++		addr = opt.key
++	}
+ 	for retry := 0; ; retry++ {
+ 		cc, err := pool.GetClientConn(req, addr)
+ 		if err != nil {
++			if opt.next != nil {
++				*opt.next = req
++			}
+ 			t.vlogf("http2: Transport failed to get client conn for %s: %v", addr, err)
+ 			return nil, err
+ 		}

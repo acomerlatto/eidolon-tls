@@ -272,6 +272,9 @@ type RoundTripOpt struct {
 	OnlyCachedConn bool
 
 	allowHTTP bool // allow http:// URLs
+
+	key  string         // pool key; empty derives it from the URL (eidolon)
+	next **http.Request // receives the request to send elsewhere on ErrNoCachedConn (eidolon)
 }
 
 // Deprecated: Use [http.Transport.RoundTrip] instead.
@@ -335,9 +338,15 @@ func authorityAddr(scheme string, authority string) (addr string) {
 
 func (t *Transport) roundTripViaPool(req *http.Request, opt RoundTripOpt, pool ClientConnPool) (*http.Response, error) {
 	addr := authorityAddr(req.URL.Scheme, req.URL.Host)
+	if opt.key != "" {
+		addr = opt.key
+	}
 	for retry := 0; ; retry++ {
 		cc, err := pool.GetClientConn(req, addr)
 		if err != nil {
+			if opt.next != nil {
+				*opt.next = req
+			}
 			t.vlogf("http2: Transport failed to get client conn for %s: %v", addr, err)
 			return nil, err
 		}
