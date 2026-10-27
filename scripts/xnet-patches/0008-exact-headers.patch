@@ -1,0 +1,125 @@
+diff --git a/internal/httpcommon/request.go b/internal/httpcommon/request.go
+index 0f9c46e..852d894 100644
+--- a/internal/httpcommon/request.go
++++ b/internal/httpcommon/request.go
+@@ -67,8 +67,19 @@ type EncodeHeadersResult struct {
+ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(name, value string)) (res EncodeHeadersResult, _ error) {
+ 	req := param.Request
+ 
++	// [eidolon] In exact mode the fields of the context replace req.Header,
++	// which is neither checked nor sent. A Host field gives :authority.
++	exact := order.ExactFromContext(ctx)
++	header := req.Header
++	if exact != nil {
++		header = make(map[string][]string)
++		for _, f := range exact {
++			header[f.Name] = append(header[f.Name], f.Value)
++		}
++	}
++
+ 	// Check for invalid connection-level headers.
+-	if err := checkConnHeaders(req.Header); err != nil {
++	if err := checkConnHeaders(header); err != nil {
+ 		return res, err
+ 	}
+ 
+@@ -80,6 +91,11 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
+ 	if host == "" {
+ 		host = req.URL.Host
+ 	}
++	if exact != nil {
++		if err := checkExact(exact, req.ActualContentLength, &host); err != nil {
++			return res, err
++		}
++	}
+ 	host, err := httpguts.PunycodeHostPort(host)
+ 	if err != nil {
+ 		return res, err
+@@ -91,7 +107,7 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
+ 	// isNormalConnect is true if this is a non-extended CONNECT request.
+ 	isNormalConnect := false
+ 	var protocol string
+-	if vv := req.Header[":protocol"]; len(vv) > 0 {
++	if vv := header[":protocol"]; len(vv) > 0 {
+ 		protocol = vv[0]
+ 	}
+ 	if req.Method == "CONNECT" && protocol == "" {
+@@ -120,7 +136,7 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
+ 	// Check for any invalid headers+trailers and return an error before we
+ 	// potentially pollute our hpack state. (We want to be able to
+ 	// continue to reuse the hpack encoder for future requests)
+-	if err := validateHeaders(req.Header); err != "" {
++	if err := validateHeaders(header); err != "" {
+ 		return res, fmt.Errorf("invalid HTTP header %s", err)
+ 	}
+ 	if err := validateHeaders(req.Trailer); err != "" {
+@@ -146,7 +162,11 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
+ 			fields = append(fields, order.Field{Name: name, Value: value})
+ 		}
+ 		defer func() {
+-			for _, hf := range o.Sort(fields) {
++			sorted := o.Sort
++			if exact != nil {
++				sorted = o.SortPseudo // the exact fields keep their order
++			}
++			for _, hf := range sorted(fields) {
+ 				emit(hf.Name, hf.Value)
+ 			}
+ 		}()
+@@ -173,6 +193,26 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
+ 			f("trailer", trailers)
+ 		}
+ 
++		// [eidolon] Exact mode: the fields as given, Cookie not split, and
++		// nothing of the engine (content-length, accept-encoding,
++		// user-agent). Host is :authority; connection-specific fields,
++		// valid in HTTP/1.1, are left out as below.
++		if exact != nil {
++			for _, hf := range exact {
++				switch {
++				case asciiEqualFold(hf.Name, "host"),
++					asciiEqualFold(hf.Name, "connection"),
++					asciiEqualFold(hf.Name, "proxy-connection"),
++					asciiEqualFold(hf.Name, "transfer-encoding"),
++					asciiEqualFold(hf.Name, "upgrade"),
++					asciiEqualFold(hf.Name, "keep-alive"):
++					continue
++				}
++				f(hf.Name, hf.Value)
++			}
++			return
++		}
++
+ 		var didUA bool
+ 		// [eidolon] Keys in byte order: two keys of one name in different
+ 		// case ("X-A", "x-a") are merged the same way every time.
+@@ -398,6 +438,29 @@ func validateHeaders(hdrs map[string][]string) string {
+ 	return ""
+ }
+ 
++// checkExact checks the framing of exact fields before anything is sent:
++// at most one Host, which replaces host, and a Content-Length, if any, equal
++// to the body length. Nothing is corrected.
++func checkExact(exact []order.Field, contentLength int64, host *string) error {
++	var hosts, lengths int
++	for _, f := range exact {
++		switch {
++		case asciiEqualFold(f.Name, "host"):
++			hosts++
++			*host = f.Value
++		case asciiEqualFold(f.Name, "content-length"):
++			lengths++
++			if n, err := strconv.ParseInt(f.Value, 10, 64); err != nil || n != contentLength || n < 0 {
++				return fmt.Errorf("exact headers: content-length %q does not match the body", f.Value)
++			}
++		}
++	}
++	if hosts > 1 || lengths > 1 {
++		return errors.New("exact headers: Host or Content-Length repeated")
++	}
++	return nil
++}
++
+ // shouldSendReqContentLength reports whether we should send
+ // a "content-length" request header. This logic is basically a copy of the net/http
+ // transferWriter.shouldSendContentLength.
