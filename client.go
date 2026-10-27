@@ -4,6 +4,9 @@
 //
 // The API uses the standard net/http types. New returns an HttpClient; its
 // Transport also works inside any http.Client.
+//
+// Response.TLS is converted from the uTLS connection state. Its
+// ExportKeyingMaterial cannot reach the connection and panics if called.
 package eidolon
 
 import (
@@ -35,6 +38,8 @@ type HttpClient interface {
 
 	// Transport returns the RoundTripper used by the client, for code that
 	// builds its own http.Client. It shares connections with the client.
+	// WithTimeout is not part of it: the http.Client that uses it sets
+	// its own timeout.
 	Transport() http.RoundTripper
 }
 

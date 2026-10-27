@@ -48,7 +48,8 @@ func WithRootCAs(pool *x509.CertPool) Option {
 }
 
 // WithTimeout limits the whole request, including reading the body, as
-// http.Client.Timeout does. Zero means no limit.
+// http.Client.Timeout does. Zero means no limit. It applies to the client's
+// own methods, not to an http.Client built on Transport().
 func WithTimeout(d time.Duration) Option {
 	return func(c *config) error {
 		if d < 0 {
