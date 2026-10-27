@@ -186,7 +186,11 @@ func (c *trackedConn) Close() error {
 }
 
 func (t *Transport) roundTripH2(conn net.Conn, req *http.Request) (*http.Response, error) {
-	t.h2once.Do(func() { t.h2 = &http2.Transport{} })
+	t.h2once.Do(func() {
+		// DisableCompression: the engine neither adds accept-encoding nor
+		// decompresses the response; both belong to the profile (C9).
+		t.h2 = &http2.Transport{DisableCompression: true}
+	})
 	cc, err := t.h2.NewClientConn(conn)
 	if err != nil {
 		conn.Close()

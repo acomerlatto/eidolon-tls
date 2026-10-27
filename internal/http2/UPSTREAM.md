@@ -19,6 +19,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 ## Local patches
 
 - `scripts/xnet-patches/0001-header-order.patch`
+- `scripts/xnet-patches/0002-no-default-user-agent.patch`
 
 ## Excluded files
 

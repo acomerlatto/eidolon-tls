@@ -235,7 +235,7 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 		if param.AddGzipHeader {
 			f("accept-encoding", "gzip")
 		}
-		if !didUA {
+		if !didUA && param.DefaultUserAgent != "" {
 			f("user-agent", param.DefaultUserAgent)
 		}
 	}

@@ -1,0 +1,109 @@
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index 0adb7d2..a7df4bc 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -46,7 +46,8 @@ const (
+ 	// we buffer per stream.
+ 	transportDefaultStreamFlow = 4 << 20
+ 
+-	defaultUserAgent = "Go-http-client/2.0"
++	// defaultUserAgent is empty: the engine sends no User-Agent of its own.
++	defaultUserAgent = ""
+ 
+ 	// initialMaxConcurrentStreams is a connections maxConcurrentStreams until
+ 	// it's received servers initial SETTINGS frame, which corresponds with the
+diff --git a/internal/http2/transport_test.go b/internal/http2/transport_test.go
+index 5c29408..cd1795f 100644
+--- a/internal/http2/transport_test.go
++++ b/internal/http2/transport_test.go
+@@ -1927,9 +1927,8 @@ func testTransportWindowUpdateBeyondLimit(t testing.TB) {
+ func TestTransportDisableCompression(t *testing.T) {
+ 	const body = "sup"
+ 	ts := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+-		want := http.Header{
+-			"User-Agent": []string{"Go-http-client/2.0"},
+-		}
++		// The engine sends no default User-Agent (eidolon).
++		want := http.Header{}
+ 		if !reflect.DeepEqual(r.Header, want) {
+ 			t.Errorf("request headers = %v; want %v", r.Header, want)
+ 		}
+@@ -1984,12 +1983,12 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
+ 		{
+ 			key:   "Connection",
+ 			value: []string{"close"},
+-			want:  "Accept-Encoding,User-Agent",
++			want:  "Accept-Encoding",
+ 		},
+ 		{
+ 			key:   "Connection",
+ 			value: []string{"CLoSe"},
+-			want:  "Accept-Encoding,User-Agent",
++			want:  "Accept-Encoding",
+ 		},
+ 		{
+ 			key:   "Connection",
+@@ -1999,22 +1998,22 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
+ 		{
+ 			key:   "Connection",
+ 			value: []string{"keep-alive"},
+-			want:  "Accept-Encoding,User-Agent",
++			want:  "Accept-Encoding",
+ 		},
+ 		{
+ 			key:   "Connection",
+ 			value: []string{"Keep-ALIVE"},
+-			want:  "Accept-Encoding,User-Agent",
++			want:  "Accept-Encoding",
+ 		},
+ 		{
+ 			key:   "Proxy-Connection", // just deleted and ignored
+ 			value: []string{"keep-alive"},
+-			want:  "Accept-Encoding,User-Agent",
++			want:  "Accept-Encoding",
+ 		},
+ 		{
+ 			key:   "Transfer-Encoding",
+ 			value: []string{""},
+-			want:  "Accept-Encoding,User-Agent",
++			want:  "Accept-Encoding",
+ 		},
+ 		{
+ 			key:   "Transfer-Encoding",
+@@ -2024,7 +2023,7 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
+ 		{
+ 			key:   "Transfer-Encoding",
+ 			value: []string{"chunked"},
+-			want:  "Accept-Encoding,User-Agent",
++			want:  "Accept-Encoding",
+ 		},
+ 		{
+ 			key:   "Transfer-Encoding",
+@@ -2039,12 +2038,12 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
+ 		{
+ 			key:   "Content-Length",
+ 			value: []string{"123"},
+-			want:  "Accept-Encoding,User-Agent",
++			want:  "Accept-Encoding",
+ 		},
+ 		{
+ 			key:   "Keep-Alive",
+ 			value: []string{"doop"},
+-			want:  "Accept-Encoding,User-Agent",
++			want:  "Accept-Encoding",
+ 		},
+ 	}
+ 
+diff --git a/internal/httpcommon/request.go b/internal/httpcommon/request.go
+index a3043a9..44e11e1 100644
+--- a/internal/httpcommon/request.go
++++ b/internal/httpcommon/request.go
+@@ -235,7 +235,7 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
+ 		if param.AddGzipHeader {
+ 			f("accept-encoding", "gzip")
+ 		}
+-		if !didUA {
++		if !didUA && param.DefaultUserAgent != "" {
+ 			f("user-agent", param.DefaultUserAgent)
+ 		}
+ 	}

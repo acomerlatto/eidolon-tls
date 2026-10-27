@@ -1927,9 +1927,8 @@ func testTransportWindowUpdateBeyondLimit(t testing.TB) {
 func TestTransportDisableCompression(t *testing.T) {
 	const body = "sup"
 	ts := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		want := http.Header{
-			"User-Agent": []string{"Go-http-client/2.0"},
-		}
+		// The engine sends no default User-Agent (eidolon).
+		want := http.Header{}
 		if !reflect.DeepEqual(r.Header, want) {
 			t.Errorf("request headers = %v; want %v", r.Header, want)
 		}
@@ -1984,12 +1983,12 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
 		{
 			key:   "Connection",
 			value: []string{"close"},
-			want:  "Accept-Encoding,User-Agent",
+			want:  "Accept-Encoding",
 		},
 		{
 			key:   "Connection",
 			value: []string{"CLoSe"},
-			want:  "Accept-Encoding,User-Agent",
+			want:  "Accept-Encoding",
 		},
 		{
 			key:   "Connection",
@@ -1999,22 +1998,22 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
 		{
 			key:   "Connection",
 			value: []string{"keep-alive"},
-			want:  "Accept-Encoding,User-Agent",
+			want:  "Accept-Encoding",
 		},
 		{
 			key:   "Connection",
 			value: []string{"Keep-ALIVE"},
-			want:  "Accept-Encoding,User-Agent",
+			want:  "Accept-Encoding",
 		},
 		{
 			key:   "Proxy-Connection", // just deleted and ignored
 			value: []string{"keep-alive"},
-			want:  "Accept-Encoding,User-Agent",
+			want:  "Accept-Encoding",
 		},
 		{
 			key:   "Transfer-Encoding",
 			value: []string{""},
-			want:  "Accept-Encoding,User-Agent",
+			want:  "Accept-Encoding",
 		},
 		{
 			key:   "Transfer-Encoding",
@@ -2024,7 +2023,7 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
 		{
 			key:   "Transfer-Encoding",
 			value: []string{"chunked"},
-			want:  "Accept-Encoding,User-Agent",
+			want:  "Accept-Encoding",
 		},
 		{
 			key:   "Transfer-Encoding",
@@ -2039,12 +2038,12 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
 		{
 			key:   "Content-Length",
 			value: []string{"123"},
-			want:  "Accept-Encoding,User-Agent",
+			want:  "Accept-Encoding",
 		},
 		{
 			key:   "Keep-Alive",
 			value: []string{"doop"},
-			want:  "Accept-Encoding,User-Agent",
+			want:  "Accept-Encoding",
 		},
 	}
 

@@ -3,6 +3,7 @@ package dispatch_test
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/x509"
 	"errors"
@@ -146,12 +147,11 @@ func TestDispatchByALPN(t *testing.T) {
 				t.Errorf("Response.TLS ServerName %q, %d chains, %d certificates", st.ServerName, len(st.VerifiedChains), len(st.PeerCertificates))
 			}
 
-			// The H2 engine adds accept-encoding (implicit defaults are M1);
-			// unlisted names follow in alphabetical order.
+			// Both engines send the same names, in the same order.
 			var got, want []string
 			if tt.proto == "h2" {
 				got = h2Names(t, c)
-				want = []string{"sec-ch-ua", "user-agent", "accept", "x-a", "accept-encoding"}
+				want = []string{"sec-ch-ua", "user-agent", "accept", "x-a"}
 			} else {
 				got = h1Names(t, c.Bytes())
 				want = []string{"Host", "sec-ch-ua", "User-Agent", "Accept", "X-A"}
@@ -346,5 +346,57 @@ func TestDispatchDialAfterClose(t *testing.T) {
 	dialed.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := dialed.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("connection dialed after Close is still open: read err = %v", err)
+	}
+}
+
+// The engines add no header of their own: a request without User-Agent or
+// Accept-Encoding goes out without them, and a compressed response comes
+// back as sent.
+func TestDispatchNoImplicitHeaders(t *testing.T) {
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	io.WriteString(zw, "ok")
+	zw.Close()
+
+	for proto, want := range map[string][]string{
+		"h2":       {"x-a"},
+		"http/1.1": {"Host", "X-A"},
+	} {
+		t.Run(proto, func(t *testing.T) {
+			srv := lab.Start(t, lab.Options{
+				NextProtos: []string{proto},
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Encoding", "gzip")
+					w.Write(gz.Bytes())
+				}),
+			})
+			client := &http.Client{Transport: transport(srv)}
+			req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+			req.Header.Set("X-A", "a")
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			c := srv.NextConn(t)
+			var names []string
+			if proto == "h2" {
+				names = h2Names(t, c)
+			} else {
+				names = h1Names(t, c.Bytes())
+			}
+			if !slices.Equal(names, want) {
+				t.Errorf("headers sent = %q, want %q", names, want)
+			}
+			if !bytes.Equal(body, gz.Bytes()) || resp.Uncompressed || resp.Header.Get("Content-Encoding") != "gzip" {
+				t.Errorf("body %q, Uncompressed %v, Content-Encoding %q; want the gzip bytes untouched",
+					body, resp.Uncompressed, resp.Header.Get("Content-Encoding"))
+			}
+		})
 	}
 }

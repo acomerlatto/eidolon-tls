@@ -46,7 +46,8 @@ const (
 	// we buffer per stream.
 	transportDefaultStreamFlow = 4 << 20
 
-	defaultUserAgent = "Go-http-client/2.0"
+	// defaultUserAgent is empty: the engine sends no User-Agent of its own.
+	defaultUserAgent = ""
 
 	// initialMaxConcurrentStreams is a connections maxConcurrentStreams until
 	// it's received servers initial SETTINGS frame, which corresponds with the
