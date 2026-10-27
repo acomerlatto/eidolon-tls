@@ -88,8 +88,8 @@ func WithDialContext(dial func(ctx context.Context, network, addr string) (net.C
 }
 
 // WithDefaultOrder sets the header order of the client's requests. The
-// order of a request (WithOrder) takes precedence; see Order. The lists are
-// copied.
+// order of a request (HeaderOrderKey, PHeaderOrderKey) takes precedence;
+// see Order. The lists are copied.
 func WithDefaultOrder(o Order) Option {
 	return func(c *config) error {
 		c.order = &order.Order{Pseudo: slices.Clone(o.Pseudo), Header: slices.Clone(o.Header)}

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -39,8 +41,8 @@ func TestDefaultOrderAndSpelling(t *testing.T) {
 		eidolon.WithDefaultOrder(eidolon.Order{Header: list}),
 		eidolon.WithHeaderSpelling("x-a", "X-B", "X-B"))
 	list[0] = "x-z"
-	ctx := eidolon.WithOrder(context.Background(), eidolon.Order{Header: []string{"x-b", "accept"}})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
+	req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+	req.Header[eidolon.HeaderOrderKey] = []string{"x-b", "accept"}
 	for _, h := range []string{"Accept", "X-A", "X-B", "X-Z", "User-Agent"} {
 		req.Header.Set(h, "1")
 	}
@@ -56,8 +58,8 @@ func TestDefaultOrderAndSpelling(t *testing.T) {
 	}
 }
 
-// http.Client follows a redirect with the context of the request: the
-// order applies to the next request as well.
+// http.Client copies the order keys to a redirected request: the order
+// applies to the next request as well.
 func TestOrderFollowsRedirect(t *testing.T) {
 	srv := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/start" {
@@ -65,8 +67,8 @@ func TestOrderFollowsRedirect(t *testing.T) {
 		}
 	})})
 	c := newClient(t, srv, eidolon.WithDefaultOrder(eidolon.Order{Header: []string{"x-b", "host"}}))
-	ctx := eidolon.WithOrder(context.Background(), eidolon.Order{Header: []string{"x-c"}})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/start", nil)
+	req, _ := http.NewRequest(http.MethodGet, "https://example.com/start", nil)
+	req.Header[eidolon.HeaderOrderKey] = []string{"x-c"}
 	req.Header.Set("X-A", "1")
 	req.Header.Set("X-B", "1")
 	req.Header.Set("X-C", "1")
@@ -80,6 +82,117 @@ func TestOrderFollowsRedirect(t *testing.T) {
 	want := "GET /next HTTP/1.1\r\nX-C: 1\r\nX-B: 1\r\nHost: example.com\r\n"
 	if !strings.Contains(got, want) {
 		t.Fatalf("sent %q\nwant a request starting with %q", got, want)
+	}
+}
+
+// The keys of a request take precedence over the client order, each list
+// on its own, are never sent and stay in the caller's Header.
+func TestHeaderOrderKeys(t *testing.T) {
+	client := eidolon.WithDefaultOrder(eidolon.Order{
+		Pseudo: []string{":method", ":path", ":authority", ":scheme"},
+		Header: []string{"x-a", "x-b", "x-c"},
+	})
+	for _, tt := range []struct {
+		name   string
+		pseudo []string
+		header []string
+		want   []string
+	}{
+		{"both", []string{":method", ":authority", ":scheme", ":path"}, []string{"x-c", "x-b"},
+			[]string{":method", ":authority", ":scheme", ":path", "x-c", "x-b", "x-a"}},
+		{"header only", nil, []string{"x-b"},
+			[]string{":method", ":path", ":authority", ":scheme", "x-b", "x-a", "x-c"}},
+		{"pseudo only", []string{":authority", ":method", ":path", ":scheme"}, nil,
+			[]string{":authority", ":method", ":path", ":scheme", "x-a", "x-b", "x-c"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := lab.Start(t, lab.Options{})
+			c := newClient(t, srv, client)
+			req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+			for _, h := range []string{"X-A", "X-B", "X-C"} {
+				req.Header.Set(h, "1")
+			}
+			if tt.pseudo != nil {
+				req.Header[eidolon.PHeaderOrderKey] = tt.pseudo
+			}
+			if tt.header != nil {
+				req.Header[eidolon.HeaderOrderKey] = tt.header
+			}
+			before := req.Header.Clone()
+			resp, err := c.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if !reflect.DeepEqual(req.Header, before) {
+				t.Fatalf("Header changed to %v", req.Header)
+			}
+			if got := headerNames(t, srv.NextConn(t)); !slices.Equal(got, tt.want) {
+				t.Fatalf("sent %q\nwant %q", got, tt.want)
+			}
+		})
+	}
+	t.Run("http/1.1", func(t *testing.T) {
+		srv := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}})
+		c := newClient(t, srv, client)
+		req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+		req.Header.Set("X-A", "1")
+		req.Header.Set("X-B", "1")
+		req.Header[eidolon.HeaderOrderKey] = []string{"x-b", "host"}
+		req.Header[eidolon.PHeaderOrderKey] = []string{":path"}
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		want := "GET / HTTP/1.1\r\nX-B: 1\r\nHost: example.com\r\nX-A: 1\r\n\r\n"
+		if got := string(srv.NextConn(t).Bytes()); got != want {
+			t.Fatalf("got %q\nwant %q", got, want)
+		}
+	})
+}
+
+// headerNames returns the names of the first HEADERS frame c received.
+func headerNames(t *testing.T, c *lab.Conn) []string {
+	t.Helper()
+	frames, err := c.H2Frames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range frames {
+		if f.Type == "HEADERS" {
+			var names []string
+			for _, h := range f.Headers {
+				names = append(names, h.Name)
+			}
+			return names
+		}
+	}
+	t.Fatal("no HEADERS frame")
+	return nil
+}
+
+// In exact mode PHeaderOrderKey still orders the pseudo-headers; the rest
+// of Header is ignored.
+func TestWithExactHeadersPseudoKey(t *testing.T) {
+	srv := lab.Start(t, lab.Options{})
+	c := newClient(t, srv)
+	ctx := eidolon.WithExactHeaders(context.Background(), eidolon.HeaderField{Name: "accept", Value: "*/*"})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
+	req.Header[eidolon.PHeaderOrderKey] = []string{":method", ":authority", ":scheme", ":path"}
+	req.Header[eidolon.HeaderOrderKey] = []string{"x-a"}
+	req.Header.Set("X-A", "ignored")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	want := []string{":method", ":authority", ":scheme", ":path", "accept"}
+	if got := headerNames(t, srv.NextConn(t)); !slices.Equal(got, want) {
+		t.Fatalf("sent %q\nwant %q", got, want)
 	}
 }
 

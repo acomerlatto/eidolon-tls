@@ -68,8 +68,8 @@ func TestNewValidatesOptions(t *testing.T) {
 // received after the handshake.
 func send(t *testing.T, srv *lab.Server, do func(*http.Request) (*http.Response, error)) []byte {
 	t.Helper()
-	ctx := eidolon.WithOrder(context.Background(), eidolon.Order{Header: []string{"host", "user-agent", "accept", "x-a"}})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/same", nil)
+	req, _ := http.NewRequest(http.MethodGet, "https://example.com/same", nil)
+	req.Header[eidolon.HeaderOrderKey] = []string{"host", "user-agent", "accept", "x-a"}
 	req.Header.Set("X-A", "a")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", "eidolon-test")
@@ -131,15 +131,13 @@ func TestShortcuts(t *testing.T) {
 	}
 }
 
-// WithOrder reaches the HTTP/2 engine through the public API.
-func TestWithOrderH2(t *testing.T) {
+// The order keys reach the HTTP/2 engine through the public API.
+func TestHeaderOrderKeysH2(t *testing.T) {
 	srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
 	c := newClient(t, srv)
-	ctx := eidolon.WithOrder(context.Background(), eidolon.Order{
-		Pseudo: []string{":method", ":authority", ":scheme", ":path"},
-		Header: []string{"x-b", "x-a"},
-	})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/o", nil)
+	req, _ := http.NewRequest(http.MethodGet, "https://example.com/o", nil)
+	req.Header[eidolon.PHeaderOrderKey] = []string{":method", ":authority", ":scheme", ":path"}
+	req.Header[eidolon.HeaderOrderKey] = []string{"x-b", "x-a"}
 	req.Header.Set("X-A", "a")
 	req.Header.Set("X-B", "b")
 	resp, err := c.Do(req)
