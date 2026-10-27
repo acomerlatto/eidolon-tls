@@ -50,7 +50,8 @@ type Transport struct {
 	// endpoint. Zero means DefaultMaxConnsPerHost.
 	MaxConnsPerHost int
 	// Order is the header order of the client, below the order of the
-	// request in precedence (order.Merge). Nil leaves the request's.
+	// request (the keys of Header, then the context) in precedence
+	// (order.Merge). Nil leaves the request's.
 	Order *order.Order
 	// Protocols restricts the protocols offered by ALPN, and accepted
 	// from it, to tlsdial.ProtoHTTP1 and tlsdial.ProtoH2 as listed. Nil
@@ -120,10 +121,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		sent.Host = h.Authority()
 	}
-	if t.Order != nil {
-		merged := order.Merge(order.FromContext(req.Context()), t.Order)
+	// The order keys of Header are never sent; the order travels to the
+	// engines in the context.
+	merged := order.Merge(order.FromHeader(req.Header), order.FromContext(req.Context()), t.Order)
+	if merged != nil {
 		sent = *sent.WithContext(order.WithOrder(req.Context(), *merged))
 	}
+	sent.Header = order.WithoutKeys(req.Header)
 	if q := target.EncodeQuery(req.URL.RawQuery); q != req.URL.RawQuery {
 		u := *req.URL
 		u.RawQuery = q
