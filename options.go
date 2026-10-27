@@ -23,6 +23,8 @@ type config struct {
 
 // WithClientHello sets the function that returns a new ClientHello spec for
 // each connection. It is required: there is no default browser profile.
+// The SNI extension must leave ServerName empty: the name sent and verified
+// is always the host of the URL, and a spec that sets one fails the request.
 func WithClientHello(spec func() (*utls.ClientHelloSpec, error)) Option {
 	return func(c *config) error {
 		if spec == nil {

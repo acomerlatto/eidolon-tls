@@ -27,7 +27,8 @@ var ErrALPN = errors.New("tlsdial: unsupported ALPN protocol")
 // Config describes how to dial one destination.
 type Config struct {
 	// Spec returns a new ClientHello spec. It is called once per
-	// connection, because uTLS writes into the spec while applying it.
+	// connection. Its SNI extension must leave ServerName empty: the name
+	// comes from TLS.ServerName.
 	Spec func() (*utls.ClientHelloSpec, error)
 
 	// TLS holds ServerName, RootCAs and the other verification settings.
@@ -52,6 +53,17 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 	spec, err := cfg.Spec()
 	if err != nil {
 		return nil, fmt.Errorf("tlsdial: ClientHello spec: %w", err)
+	}
+	if spec == nil {
+		return nil, errors.New("tlsdial: ClientHello spec is nil")
+	}
+	// uTLS copies a name set in the SNI extension into Config.ServerName,
+	// which is also the name the certificate is verified against: the spec
+	// would choose which certificate is accepted for the URL.
+	for _, ext := range spec.Extensions {
+		if sni, ok := ext.(*utls.SNIExtension); ok && sni.ServerName != "" {
+			return nil, fmt.Errorf("tlsdial: ClientHello spec sets the SNI name %q; it must come from the URL", sni.ServerName)
+		}
 	}
 
 	dial := cfg.DialContext

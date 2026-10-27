@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -287,7 +288,7 @@ func TestDialSpecErrorOpensNoConnection(t *testing.T) {
 	}
 }
 
-// Each connection gets a new spec, because uTLS writes into it.
+// Each connection gets a new spec, so a generator can vary it per connection.
 func TestDialCallsSpecPerConnection(t *testing.T) {
 	srv, _ := newTLSServer(t, []string{ProtoH2}, http.NotFoundHandler())
 	var calls atomic.Int32
@@ -307,5 +308,49 @@ func TestDialCallsSpecPerConnection(t *testing.T) {
 	}
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("Spec called %d times for 2 connections", n)
+	}
+}
+
+// The certificate is verified against Config.TLS.ServerName, the host of
+// the URL. A spec that carries its own SNI name would replace it in uTLS, so
+// a certificate for that name would be accepted for any URL: such a spec is
+// refused before dialing.
+func TestDialRefusesSpecServerName(t *testing.T) {
+	srv, _ := newTLSServer(t, []string{ProtoH2}, http.NotFoundHandler())
+	var cc closeCounter
+	_, err := Dial(context.Background(), "tcp", srv.Listener.Addr().String(), Config{
+		Spec: func() (*utls.ClientHelloSpec, error) {
+			spec, err := chromeSpec()
+			for _, ext := range spec.Extensions {
+				if sni, ok := ext.(*utls.SNIExtension); ok {
+					sni.ServerName = "example.com" // valid for the test certificate
+				}
+			}
+			return spec, err
+		},
+		TLS:         tlsConfig(srv, "other.test"),
+		DialContext: cc.dial,
+	})
+	if err == nil || !strings.Contains(err.Error(), "SNI") {
+		t.Fatalf("err = %v, want the spec refused for its SNI name", err)
+	}
+	if n := cc.dialed.Load(); n != 0 {
+		t.Fatalf("dialed %d connections, want 0", n)
+	}
+}
+
+func TestDialNilSpecOpensNoConnection(t *testing.T) {
+	srv, _ := newTLSServer(t, []string{ProtoH2}, http.NotFoundHandler())
+	var cc closeCounter
+	_, err := Dial(context.Background(), "tcp", srv.Listener.Addr().String(), Config{
+		Spec:        func() (*utls.ClientHelloSpec, error) { return nil, nil },
+		TLS:         &utls.Config{ServerName: "example.com"},
+		DialContext: cc.dial,
+	})
+	if err == nil {
+		t.Fatal("Dial accepted a nil spec")
+	}
+	if n := cc.dialed.Load(); n != 0 {
+		t.Fatalf("dialed %d connections, want 0", n)
 	}
 }
