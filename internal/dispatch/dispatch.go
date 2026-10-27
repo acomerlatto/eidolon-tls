@@ -19,7 +19,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	utls "github.com/acomerlatto/utls"
@@ -59,7 +61,8 @@ var ErrClosed = errors.New("eidolon: transport closed")
 // The destination is normalized by internal/target: the URL decides the
 // endpoint and the verification name; Host (HTTP/1.1) and :authority
 // (HTTP/2) use the normalized authority unless req.Host overrides it, as in
-// net/http. The caller's request is not modified.
+// net/http, and the override is normalized the same way. The query is
+// percent-encoded as Chrome sends it. The caller's request is not modified.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.isClosed() {
 		closeBody(req)
@@ -70,20 +73,31 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		closeBody(req)
 		return nil, err
 	}
-	sent := req
-	if req.Host == "" {
-		r := *req
-		r.Host = tgt.Authority()
-		sent = &r
+	sent := *req
+	sent.Host = tgt.Authority()
+	if req.Host != "" {
+		h, err := target.Parse(&url.URL{Scheme: tgt.Scheme, Host: req.Host})
+		if err != nil {
+			closeBody(req)
+			return nil, fmt.Errorf("eidolon: invalid Host %q: %w", req.Host, err)
+		}
+		sent.Host = h.Authority()
 	}
-	resp, err := t.roundTrip(sent, tgt)
-	if err != nil && t.isClosed() {
-		return nil, ErrClosed
+	if q := target.EncodeQuery(req.URL.RawQuery); q != req.URL.RawQuery {
+		u := *req.URL
+		u.RawQuery = q
+		sent.URL = &u
 	}
-	if resp != nil {
-		resp.Request = req
+	resp, err := t.roundTrip(&sent, tgt)
+	if err != nil && t.isClosed() && !errors.Is(err, ErrClosed) {
+		// Keep the cause, such as context.Canceled.
+		err = fmt.Errorf("%w: %w", ErrClosed, err)
 	}
-	return resp, err
+	if err != nil {
+		return nil, err
+	}
+	resp.Request = req
+	return resp, nil
 }
 
 // CloseIdleConnections closes the pooled HTTP/2 connections that carry no
@@ -135,15 +149,18 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 
 	for dials, replays := 0, 0; ; {
 		got = httptrace.GotConnInfo{}
-		resp, next, err := h2.RoundTripPooled(req, key)
+		watched, body := watchBody(req)
+		resp, next, err := h2.RoundTripPooled(watched, key)
 		if err == nil {
 			return resp, nil
 		}
 		if !errors.Is(err, http2.ErrNoCachedConn) {
 			// Section 6.3: a request is sent again on a new connection
 			// only if the reused idle connection was lost and the
-			// request can be replayed. WasIdle implies Reused.
-			if replays == maxDials || !got.WasIdle || !connLost(err) ||
+			// request can be replayed. WasIdle implies Reused. An error
+			// of the request body is not a lost connection, whatever it
+			// looks like.
+			if replays == maxDials || !got.WasIdle || !connLost(err) || body.failed() ||
 				ctx.Err() != nil || t.isClosed() {
 				return nil, err
 			}
@@ -155,7 +172,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			req = r
 			continue
 		}
-		req = next
+		req = next // watched, or a copy whose body GetBody rewound
 		if dials == maxDials {
 			closeBody(req)
 			return nil, fmt.Errorf("eidolon: no usable connection to %s after %d dials", tgt.Origin(), dials)
@@ -196,6 +213,35 @@ func connLost(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ECONNRESET) ||
 		errors.Is(err, syscall.EPIPE)
+}
+
+// watchedBody records an error of the request body, so a body that fails
+// is not taken for a lost connection.
+type watchedBody struct {
+	io.ReadCloser
+	err atomic.Pointer[error]
+}
+
+func (b *watchedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && err != io.EOF {
+		b.err.Store(&err)
+	}
+	return n, err
+}
+
+func (b *watchedBody) failed() bool { return b != nil && b.err.Load() != nil }
+
+// watchBody returns req with its body wrapped in a watchedBody, or req
+// itself and nil if it has no body.
+func watchBody(req *http.Request) (*http.Request, *watchedBody) {
+	if req.Body == nil || req.Body == http.NoBody {
+		return req, nil
+	}
+	r := *req
+	b := &watchedBody{ReadCloser: req.Body}
+	r.Body = b
+	return &r, b
 }
 
 // rewind returns req ready to be sent again, as net/http decides: a safe
