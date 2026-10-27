@@ -1,0 +1,36 @@
+diff --git a/internal/httpcommon/request.go b/internal/httpcommon/request.go
+index 44e11e1..9a6cdb8 100644
+--- a/internal/httpcommon/request.go
++++ b/internal/httpcommon/request.go
+@@ -321,6 +321,18 @@ func checkConnHeaders(h map[string][]string) error {
+ 	if vv := h["Connection"]; len(vv) > 0 && (len(vv) > 1 || vv[0] != "" && !asciiEqualFold(vv[0], "close") && !asciiEqualFold(vv[0], "keep-alive")) {
+ 		return fmt.Errorf("invalid Connection request header: %q", vv)
+ 	}
++	// [eidolon] TE may only be "trailers" (RFC 9113 section 8.2.2); the
++	// name is matched in any case because it is sent lowercased.
++	for k, vv := range h {
++		if !asciiEqualFold(k, "te") {
++			continue
++		}
++		for _, v := range vv {
++			if !asciiEqualFold(v, "trailers") {
++				return fmt.Errorf("invalid TE request header: %q", vv)
++			}
++		}
++	}
+ 	return nil
+ }
+ 
+@@ -364,7 +376,11 @@ func validateHeaders(hdrs map[string][]string) string {
+ 			return fmt.Sprintf("name %q", k)
+ 		}
+ 		for _, v := range vv {
+-			if !httpguts.ValidHeaderFieldValue(v) {
++			// [eidolon] Leading and trailing whitespace is forbidden too
++			// (RFC 9113 section 8.2.1). Cookie is split into crumbs that
++			// drop the space after ';', so it is left to the crumbling.
++			if !httpguts.ValidHeaderFieldValue(v) ||
++				v != strings.Trim(v, " \t") && !asciiEqualFold(k, "cookie") {
+ 				// Don't include the value in the error,
+ 				// because it may be sensitive.
+ 				return fmt.Sprintf("value for header %q", k)

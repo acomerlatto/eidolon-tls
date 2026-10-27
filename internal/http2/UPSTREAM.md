@@ -21,6 +21,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0001-header-order.patch`
 - `scripts/xnet-patches/0002-no-default-user-agent.patch`
 - `scripts/xnet-patches/0003-pooled-transport.patch`
+- `scripts/xnet-patches/0004-h2-field-validity.patch`
 
 ## Excluded files
 
