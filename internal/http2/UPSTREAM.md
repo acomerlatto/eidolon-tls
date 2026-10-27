@@ -24,6 +24,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0004-h2-field-validity.patch`
 - `scripts/xnet-patches/0005-deterministic-header-order.patch`
 - `scripts/xnet-patches/0006-strict-slot-ignores-reservations.patch`
+- `scripts/xnet-patches/0007-goaway-http11-required.patch`
 
 ## Excluded files
 

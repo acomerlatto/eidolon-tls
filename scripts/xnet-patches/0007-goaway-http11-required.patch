@@ -1,0 +1,22 @@
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index 757dc8c..55f1505 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -599,7 +599,16 @@ func (cc *ClientConn) setGoAway(f *GoAwayFrame) {
+ 			// without doing so. Either way, leave the stream alone for now.
+ 			continue
+ 		}
+-		if streamID == 1 && cc.goAway.ErrCode != ErrCodeNo {
++		if cc.goAway.ErrCode == ErrCodeHTTP11Required {
++			// [eidolon] Not retried on another HTTP/2 connection: the
++			// caller sees the code and sends the request over HTTP/1.1,
++			// as Chrome does.
++			cs.abortStreamLocked(GoAwayError{
++				LastStreamID: last,
++				ErrCode:      cc.goAway.ErrCode,
++				DebugData:    cc.goAwayDebug,
++			})
++		} else if streamID == 1 && cc.goAway.ErrCode != ErrCodeNo {
+ 			// Don't retry the first stream on a connection if we get a non-NO error.
+ 			// If the server is sending an error on a new connection,
+ 			// retrying the request on a new one probably isn't going to work.
