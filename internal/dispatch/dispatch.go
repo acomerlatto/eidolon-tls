@@ -29,6 +29,7 @@ import (
 
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/http2"
+	"github.com/acomerlatto/eidolon-tls/internal/order"
 	"github.com/acomerlatto/eidolon-tls/internal/target"
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
@@ -48,6 +49,9 @@ type Transport struct {
 	// MaxConnsPerHost bounds the HTTP/1.1 connections per origin and
 	// endpoint. Zero means DefaultMaxConnsPerHost.
 	MaxConnsPerHost int
+	// Order is the header order of the client, below the order of the
+	// request in precedence (order.Merge). Nil leaves the request's.
+	Order *order.Order
 	// Protocols restricts the protocols offered by ALPN, and accepted
 	// from it, to tlsdial.ProtoHTTP1 and tlsdial.ProtoH2 as listed. Nil
 	// keeps the spec as it is and accepts both.
@@ -76,6 +80,11 @@ type Transport struct {
 // ErrClosed reports a request on a closed Transport.
 var ErrClosed = errors.New("eidolon: transport closed")
 
+// ErrExactHeadersRedirect reports a redirect of a request in exact mode.
+// http.Client filters credentials out of Header on redirects, but the
+// exact fields travel in the context and would escape that filter.
+var ErrExactHeadersRedirect = errors.New("eidolon: redirect of a request with exact headers")
+
 // ErrProtocolPolicy reports a protocol outside the enabled set: negotiated
 // by the server, required by it, or needed by the URL.
 var ErrProtocolPolicy = errors.New("eidolon: protocol outside the enabled set")
@@ -92,6 +101,10 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		closeBody(req)
 		return nil, ErrClosed
 	}
+	if req.Response != nil && order.ExactFromContext(req.Context()) != nil {
+		closeBody(req)
+		return nil, ErrExactHeadersRedirect
+	}
 	tgt, err := target.Parse(req.URL)
 	if err != nil {
 		closeBody(req)
@@ -106,6 +119,10 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, fmt.Errorf("eidolon: invalid Host %q: %w", req.Host, err)
 		}
 		sent.Host = h.Authority()
+	}
+	if t.Order != nil {
+		merged := order.Merge(order.FromContext(req.Context()), t.Order)
+		sent = *sent.WithContext(order.WithOrder(req.Context(), *merged))
 	}
 	if q := target.EncodeQuery(req.URL.RawQuery); q != req.URL.RawQuery {
 		u := *req.URL
