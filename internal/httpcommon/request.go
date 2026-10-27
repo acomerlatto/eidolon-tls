@@ -8,9 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps" // [eidolon]
 	"net/http/httptrace"
 	"net/textproto"
 	"net/url"
+	"slices" // [eidolon]
 	"sort"
 	"strconv"
 	"strings"
@@ -131,20 +133,23 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 	}
 
 	enumerateHeaders := func(f func(name, value string)) {
-		// [eidolon] With an order in the context, collect the fields and
-		// emit them sorted once enumeration ends.
-		if o := order.FromContext(ctx); o != nil {
-			emit := f
-			var fields []order.Field
-			f = func(name, value string) {
-				fields = append(fields, order.Field{Name: name, Value: value})
-			}
-			defer func() {
-				for _, hf := range o.Sort(fields) {
-					emit(hf.Name, hf.Value)
-				}
-			}()
+		// [eidolon] Collect the fields and emit them sorted once
+		// enumeration ends. Without an order in the context, the regular
+		// headers are sorted alphabetically, never in map order.
+		o := order.FromContext(ctx)
+		if o == nil {
+			o = &order.Order{}
 		}
+		emit := f
+		var fields []order.Field
+		f = func(name, value string) {
+			fields = append(fields, order.Field{Name: name, Value: value})
+		}
+		defer func() {
+			for _, hf := range o.Sort(fields) {
+				emit(hf.Name, hf.Value)
+			}
+		}()
 
 		// 8.1.2.3 Request Pseudo-Header Fields
 		// The :path pseudo-header field includes the path and query parts of the
@@ -169,7 +174,10 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 		}
 
 		var didUA bool
-		for k, vv := range req.Header {
+		// [eidolon] Keys in byte order: two keys of one name in different
+		// case ("X-A", "x-a") are merged the same way every time.
+		for _, k := range slices.Sorted(maps.Keys(req.Header)) {
+			vv := req.Header[k]
 			if asciiEqualFold(k, "host") || asciiEqualFold(k, "content-length") {
 				// Host is :authority, already sent.
 				// Content-Length is automatic, set below.

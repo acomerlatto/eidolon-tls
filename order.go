@@ -15,7 +15,7 @@ type Order struct {
 	// ":scheme", ":path"). Nil keeps the engine's order.
 	Pseudo []string
 	// Header orders the regular headers. Names not listed follow in
-	// alphabetical order. Nil keeps the default order.
+	// alphabetical order; nil sorts them all alphabetically.
 	Header []string
 }
 

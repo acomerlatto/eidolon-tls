@@ -53,10 +53,10 @@ func TestSort(t *testing.T) {
 			want:   []Field{{":method", "GET"}, {":authority", "h"}, {":scheme", "https"}, {":path", "/"}, {"accept", "1"}},
 		},
 		{
-			name:   "nil lists keep the engine order",
+			name:   "nil lists keep the pseudo order and sort the rest alphabetically",
 			order:  Order{},
-			fields: []Field{{":authority", "h"}, {":method", "GET"}, {"z", "1"}, {"a", "2"}},
-			want:   []Field{{":authority", "h"}, {":method", "GET"}, {"z", "1"}, {"a", "2"}},
+			fields: []Field{{":method", "GET"}, {":authority", "h"}, {"z", "1"}, {"a", "2"}},
+			want:   []Field{{":method", "GET"}, {":authority", "h"}, {"a", "2"}, {"z", "1"}},
 		},
 		{
 			name:   "unlisted pseudo-headers keep the engine order after the listed ones",

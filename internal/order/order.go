@@ -22,7 +22,8 @@ type Order struct {
 	// the engine's order.
 	Pseudo []string
 	// Header orders the regular headers. Names not listed follow the listed
-	// ones in alphabetical order. Nil keeps the engine's order.
+	// ones in alphabetical order; nil sorts them all alphabetically, so the
+	// order never depends on map iteration.
 	Header []string
 }
 
@@ -62,7 +63,7 @@ func (o *Order) Sort(fields []Field) []Field {
 // follow in alphabetical order if alphabetical is set, else in their
 // original order.
 func sortByList(fields []Field, list []string, alphabetical bool) {
-	if list == nil {
+	if list == nil && !alphabetical {
 		return
 	}
 	rank := make(map[string]int, len(list))

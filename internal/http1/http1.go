@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/textproto"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -108,7 +110,10 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 	}
 
 	fields := []order.Field{{Name: "host", Value: host}}
-	for name, values := range req.Header {
+	// Keys in byte order: two keys of one name in different case ("X-A",
+	// "x-a") are merged the same way every time.
+	for _, name := range slices.Sorted(maps.Keys(req.Header)) {
+		values := req.Header[name]
 		switch strings.ToLower(name) {
 		case "host":
 			continue // req.Host and the URL decide Host, as in net/http
