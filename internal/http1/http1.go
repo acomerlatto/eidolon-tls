@@ -1,9 +1,9 @@
 // Package http1 is the HTTP/1.1 engine. It writes requests with controlled
 // header order and name spelling, and reads responses with http.ReadResponse.
 //
-// This is the M0 skeleton: one request per call on a connection the caller
-// owns. Pooling, keep-alive reuse and the framing checks of section 6.3 of
-// the specification come in M1.
+// One request per call on a connection the caller owns. Pooling, keep-alive
+// reuse and the framing checks of section 6.3 of the specification come in
+// later M1 steps.
 package http1
 
 import (
@@ -53,6 +53,9 @@ func WriteRequest(w io.Writer, req *http.Request, spell Spelling) error {
 		if n != req.ContentLength {
 			return fmt.Errorf("http1: body has %d bytes, ContentLength is %d", n, req.ContentLength)
 		}
+		if extra, _ := io.CopyN(io.Discard, req.Body, 1); extra > 0 {
+			return fmt.Errorf("http1: body is longer than ContentLength %d", req.ContentLength)
+		}
 	}
 	return bw.Flush()
 }
@@ -93,6 +96,14 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 	if !validMethod(method) {
 		return "", fmt.Errorf("http1: invalid method %q", method)
 	}
+	// CONNECT needs authority-form (RFC 9112 section 3.2.3); tunnels,
+	// trailers and Upgrade are outside phase 1.
+	if method == http.MethodConnect {
+		return "", errors.New("http1: CONNECT is not supported")
+	}
+	if len(req.Trailer) > 0 {
+		return "", errors.New("http1: trailers are not supported")
+	}
 	target := req.URL.RequestURI()
 	if !validTarget(target) {
 		return "", fmt.Errorf("http1: invalid request target %q", target)
@@ -110,6 +121,8 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 	}
 
 	fields := []order.Field{{Name: "host", Value: host}}
+	var cookieName string
+	var cookies []string
 	// Keys in byte order: two keys of one name in different case ("X-A",
 	// "x-a") are merged the same way every time.
 	for _, name := range slices.Sorted(maps.Keys(req.Header)) {
@@ -119,10 +132,30 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 			continue // req.Host and the URL decide Host, as in net/http
 		case "content-length", "transfer-encoding":
 			return "", fmt.Errorf("http1: %s is set from the body, not from Header", name)
+		case "upgrade":
+			return "", errors.New("http1: Upgrade is not supported")
+		case "cookie":
+			// One Cookie field (RFC 6265 section 5.4), placed by the order
+			// like any other name.
+			if cookieName == "" {
+				cookieName = name
+			}
+			cookies = append(cookies, values...)
+			continue
+		case "user-agent":
+			// As the H2 engine and net/http: the first value only, and none
+			// if it is empty.
+			if len(values) == 0 || values[0] == "" {
+				continue
+			}
+			values = values[:1]
 		}
 		for _, v := range values {
 			fields = append(fields, order.Field{Name: name, Value: v})
 		}
+	}
+	if cookies != nil {
+		fields = append(fields, order.Field{Name: cookieName, Value: strings.Join(cookies, "; ")})
 	}
 	hasBody := req.Body != nil && req.Body != http.NoBody
 	if hasBody && req.ContentLength <= 0 {
@@ -131,8 +164,13 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 	if !hasBody && req.ContentLength > 0 {
 		return "", errors.New("http1: ContentLength set without a body")
 	}
-	if req.ContentLength > 0 {
+	switch {
+	case req.ContentLength > 0:
 		fields = append(fields, order.Field{Name: "content-length", Value: strconv.FormatInt(req.ContentLength, 10)})
+	case method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch:
+		// RFC 9110 section 8.6: the method defines content, so its absence
+		// is stated; the H2 engine does the same.
+		fields = append(fields, order.Field{Name: "content-length", Value: "0"})
 	}
 
 	o := order.FromContext(req.Context())
@@ -146,7 +184,10 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if !httpguts.ValidHeaderFieldValue(f.Value) {
+		// No leading or trailing whitespace, as in the H2 engine; Cookie
+		// is exempt there because it is split into crumbs.
+		if !httpguts.ValidHeaderFieldValue(f.Value) ||
+			f.Value != strings.Trim(f.Value, " \t") && !strings.EqualFold(f.Name, "cookie") {
 			return "", fmt.Errorf("http1: invalid value for header %s", name)
 		}
 		b.WriteString(name + ": " + f.Value + "\r\n")
@@ -174,6 +215,16 @@ func validMethod(m string) bool {
 	return m != "" && strings.IndexFunc(m, func(r rune) bool { return !httpguts.IsTokenRune(r) }) < 0
 }
 
+// validTarget accepts origin-form made of visible ASCII only: the URL is
+// percent-encoded before the engine, and raw bytes are never sent.
 func validTarget(t string) bool {
-	return strings.HasPrefix(t, "/") && !strings.ContainsAny(t, " \t\r\n")
+	if !strings.HasPrefix(t, "/") {
+		return false
+	}
+	for i := 0; i < len(t); i++ {
+		if t[i] <= ' ' || t[i] >= 0x7f {
+			return false
+		}
+	}
+	return true
 }

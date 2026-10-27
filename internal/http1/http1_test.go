@@ -111,6 +111,20 @@ func TestWriteRequestRejects(t *testing.T) {
 		}},
 		{name: "spelling of another name", spell: http1.Spelling{"accept": "Accept-Language"}, modify: func(r *http.Request) { r.Header.Set("Accept", "1") }},
 		{name: "spelling with CRLF", spell: http1.Spelling{"accept": "Accept\r\n"}, modify: func(r *http.Request) { r.Header.Set("Accept", "1") }},
+		// RFC 9112 section 3.2.3: CONNECT needs authority-form; tunnels are
+		// outside phase 1.
+		{name: "CONNECT", modify: func(r *http.Request) { r.Method = http.MethodConnect }},
+		{name: "trailers", modify: func(r *http.Request) { r.Trailer = http.Header{"X-T": nil} }},
+		{name: "Upgrade", modify: func(r *http.Request) { r.Header.Set("Upgrade", "websocket") }},
+		{name: "upgrade non-canonical", modify: func(r *http.Request) { r.Header["upgrade"] = []string{"h2c"} }},
+		// The query is percent-encoded before the engine; raw bytes outside
+		// the grammar are refused, not sent.
+		{name: "non-ASCII in query", modify: func(r *http.Request) { r.URL.RawQuery = "q=\u00e7" }},
+		{name: "control in query", modify: func(r *http.Request) { r.URL.RawQuery = "q=\x01" }},
+		{name: "DEL in query", modify: func(r *http.Request) { r.URL.RawQuery = "q=\x7f" }},
+		// RFC 9110 section 5.5 grammar: no leading or trailing whitespace.
+		{name: "leading space", modify: func(r *http.Request) { r.Header.Set("X-A", " a") }},
+		{name: "trailing tab", modify: func(r *http.Request) { r.Header.Set("X-A", "a\t") }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -199,4 +213,62 @@ func TestRoundTripSkipsInformational(t *testing.T) {
 	}
 	defer conn.Close()
 	roundTrip(t, conn, newRequest(t, context.Background()))
+}
+
+// The body must match ContentLength: a longer body is an error, not
+// silently truncated.
+func TestWriteRequestBodyLongerThanContentLength(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "http://example.com/", strings.NewReader("abcdef"))
+	req.ContentLength = 3
+	var buf bytes.Buffer
+	if err := http1.WriteRequest(&buf, req, nil); err == nil {
+		t.Fatalf("no error; wrote %q", buf.String())
+	}
+}
+
+// Header normalizations shared with the H2 engine.
+func TestWriteRequestNormalizes(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		header http.Header
+		want   string
+	}{
+		// RFC 6265 section 5.4: one Cookie field, values joined with "; ",
+		// keys merged in byte order.
+		{name: "one cookie line", header: http.Header{"Cookie": {"a=1", "b=2"}, "cookie": {"c=3"}},
+			want: "Cookie: a=1; b=2; c=3\r\n"},
+		// RFC 9110 section 8.6: Content-Length for methods that define
+		// content, as the H2 engine does.
+		{name: "POST without body", method: http.MethodPost, want: "Content-Length: 0\r\n"},
+		{name: "PUT without body", method: http.MethodPut, want: "Content-Length: 0\r\n"},
+		{name: "PATCH without body", method: http.MethodPatch, want: "Content-Length: 0\r\n"},
+		{name: "GET without body", method: http.MethodGet, want: ""},
+		{name: "DELETE without body", method: http.MethodDelete, want: ""},
+		// User-Agent as in the H2 engine and net/http: one value, and an
+		// empty one omits the field.
+		{name: "repeated User-Agent", header: http.Header{"User-Agent": {"a", "b"}}, want: "User-Agent: a\r\n"},
+		{name: "empty User-Agent", header: http.Header{"User-Agent": {""}}, want: ""},
+		{name: "cookie keeps its spaces", header: http.Header{"Cookie": {"a=1; "}}, want: "Cookie: a=1; \r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(tt.method, "http://example.com/", nil)
+			if tt.header != nil {
+				req.Header = tt.header
+			}
+			var buf bytes.Buffer
+			if err := http1.WriteRequest(&buf, req, nil); err != nil {
+				t.Fatal(err)
+			}
+			method := tt.method
+			if method == "" {
+				method = http.MethodGet
+			}
+			want := method + " / HTTP/1.1\r\nHost: example.com\r\n" + tt.want + "\r\n"
+			if got := buf.String(); got != want {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+		})
+	}
 }
