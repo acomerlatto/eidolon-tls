@@ -251,6 +251,10 @@ func TestDispatchTargetIdentity(t *testing.T) {
 		{name: "explicit port", url: "https://example.com:8443/x", wantSNI: "example.com", wantHost: "example.com:8443"},
 		// No SNI for an IP address; the certificate is verified against its IP SAN.
 		{name: "IP address", url: "https://127.0.0.1:8443/x", wantSNI: "", wantHost: "127.0.0.1:8443"},
+		// IPv4 in a short form or with a trailing dot is still an IP: no
+		// SNI (RFC 6066 section 3) and the dotted form in Host.
+		{name: "short IPv4", url: "https://127.1/x", wantSNI: "", wantHost: "127.0.0.1"},
+		{name: "IPv4 with trailing dot", url: "https://127.0.0.1./x", wantSNI: "", wantHost: "127.0.0.1"},
 		// req.Host changes the header only; the URL decides SNI.
 		{name: "Host override", url: "https://example.com/x", host: "other.example", wantSNI: "example.com", wantHost: "other.example"},
 	}
