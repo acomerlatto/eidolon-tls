@@ -19,6 +19,10 @@ type config struct {
 	rootCAs     *x509.CertPool
 	timeout     time.Duration
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	protocols    []Protocol // WithProtocols; nil if not used
+	force        int        // bits 1<<HTTP1 and 1<<HTTP2 of WithForceHTTP*
+	disableHTTP3 bool
 }
 
 // WithClientHello sets the function that returns a new ClientHello spec for

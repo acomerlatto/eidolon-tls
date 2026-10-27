@@ -58,11 +58,16 @@ func New(opts ...Option) (HttpClient, error) {
 	if cfg.clientHello == nil {
 		return nil, fmt.Errorf("%w: %w", ErrConfig, errors.New("WithClientHello is required"))
 	}
+	alpn, err := cfg.alpn()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
+	}
 
 	tr := &dispatch.Transport{
 		Spec:        cfg.clientHello,
 		TLS:         &utls.Config{RootCAs: cfg.rootCAs},
 		DialContext: cfg.dialContext,
+		Protocols:   alpn,
 	}
 	return &client{
 		hc: &http.Client{Transport: tr, Timeout: cfg.timeout},

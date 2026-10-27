@@ -17,4 +17,9 @@ var (
 	ErrClosed = dispatch.ErrClosed
 	// ErrALPN reports a protocol negotiated by ALPN that no engine handles.
 	ErrALPN = tlsdial.ErrALPN
+	// ErrProtocolPolicy reports a protocol outside the ones enabled by
+	// WithProtocols or WithForceHTTP*: negotiated by the server, required
+	// by it (HTTP_1_1_REQUIRED), or needed by the URL (http:// needs
+	// HTTP/1.1).
+	ErrProtocolPolicy = dispatch.ErrProtocolPolicy
 )
