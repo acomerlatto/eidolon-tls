@@ -23,6 +23,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0003-pooled-transport.patch`
 - `scripts/xnet-patches/0004-h2-field-validity.patch`
 - `scripts/xnet-patches/0005-deterministic-header-order.patch`
+- `scripts/xnet-patches/0006-strict-slot-ignores-reservations.patch`
 
 ## Excluded files
 

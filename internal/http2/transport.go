@@ -1421,7 +1421,11 @@ func (cc *ClientConn) awaitOpenSlotForStreamLocked(cs *clientStream) error {
 			return errClientConnUnusable
 		}
 		cc.lastIdle = time.Time{}
-		if cc.currentRequestCountLocked() < int(cc.maxConcurrentStreams) {
+		// [eidolon] Reservations are left out: with
+		// StrictMaxConcurrentStreams every request waiting for a slot
+		// holds one, so counting them made the first waiter wait for its
+		// peers forever. Open streams and unconfirmed resets still count.
+		if len(cc.streams)+cc.pendingResets < int(cc.maxConcurrentStreams) {
 			return nil
 		}
 		cc.pendingRequests++
