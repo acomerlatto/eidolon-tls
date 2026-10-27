@@ -53,6 +53,9 @@ type Transport struct {
 	// request (the keys of Header, then the context) in precedence
 	// (order.Merge). Nil leaves the request's.
 	Order *order.Order
+	// DisableDecompression delivers gzip and deflate bodies as they came,
+	// with Content-Encoding. By default they are decoded (decompress).
+	DisableDecompression bool
 	// Protocols restricts the protocols offered by ALPN, and accepted
 	// from it, to tlsdial.ProtoHTTP1 and tlsdial.ProtoH2 as listed. Nil
 	// keeps the spec as it is and accepts both.
@@ -142,6 +145,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	resp.Request = req
+	if !t.DisableDecompression {
+		decompress(resp)
+	}
 	return resp, nil
 }
 

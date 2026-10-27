@@ -356,8 +356,8 @@ func TestDispatchDialAfterClose(t *testing.T) {
 }
 
 // The engines add no header of their own: a request without User-Agent or
-// Accept-Encoding goes out without them, and a compressed response comes
-// back as sent.
+// Accept-Encoding goes out without them, and with DisableDecompression a
+// compressed response comes back as sent.
 func TestDispatchNoImplicitHeaders(t *testing.T) {
 	var gz bytes.Buffer
 	zw := gzip.NewWriter(&gz)
@@ -376,7 +376,9 @@ func TestDispatchNoImplicitHeaders(t *testing.T) {
 					w.Write(gz.Bytes())
 				}),
 			})
-			client := &http.Client{Transport: transport(srv)}
+			tr := transport(srv)
+			tr.DisableDecompression = true
+			client := &http.Client{Transport: tr}
 			req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
 			req.Header.Set("X-A", "a")
 			resp, err := client.Do(req)
