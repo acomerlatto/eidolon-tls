@@ -14,6 +14,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/textproto"
 	"os"
 	"slices"
@@ -48,7 +49,14 @@ func WriteRequest(w io.Writer, req *http.Request, spell Spelling) error {
 	}
 	bw := bufio.NewWriter(w)
 	bw.WriteString(head)
-	if req.Body != nil && req.ContentLength > 0 {
+	if unknownLength(req) {
+		cw := httputil.NewChunkedWriter(bw)
+		if _, err := io.Copy(cw, req.Body); err != nil {
+			return err
+		}
+		cw.Close() // the last chunk; no trailers
+		bw.WriteString("\r\n")
+	} else if req.Body != nil && req.ContentLength > 0 {
 		n, err := io.Copy(bw, io.LimitReader(req.Body, req.ContentLength))
 		if err != nil {
 			return err
@@ -61,6 +69,13 @@ func WriteRequest(w io.Writer, req *http.Request, spell Spelling) error {
 		}
 	}
 	return bw.Flush()
+}
+
+// unknownLength reports whether req has a body of unknown length, sent
+// chunked (RFC 9112 section 7.1), as net/http does; the H2 engine sends it
+// without content-length.
+func unknownLength(req *http.Request) bool {
+	return req.Body != nil && req.Body != http.NoBody && req.ContentLength <= 0
 }
 
 // Conn is an HTTP/1.1 connection. Its reader lives as long as the
@@ -256,8 +271,17 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 		switch strings.ToLower(name) {
 		case "host":
 			continue // req.Host and the URL decide Host, as in net/http
-		case "content-length", "transfer-encoding":
-			return "", fmt.Errorf("http1: %s is set from the body, not from Header", name)
+		case "content-length":
+			// The body decides the framing, as in net/http and the H2
+			// engine; exact mode sends a Content-Length as given.
+			continue
+		case "transfer-encoding":
+			// As the H2 engine: "chunked" is left to the body, anything
+			// else is refused.
+			if len(values) > 1 || len(values) == 1 && values[0] != "" && values[0] != "chunked" {
+				return "", fmt.Errorf("http1: unsupported Transfer-Encoding %q", values)
+			}
+			continue
 		case "upgrade":
 			return "", errors.New("http1: Upgrade is not supported")
 		case "cookie":
@@ -284,13 +308,12 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 		fields = append(fields, order.Field{Name: cookieName, Value: strings.Join(cookies, "; ")})
 	}
 	hasBody := req.Body != nil && req.Body != http.NoBody
-	if hasBody && req.ContentLength <= 0 {
-		return "", errors.New("http1: body without a known ContentLength")
-	}
 	if !hasBody && req.ContentLength > 0 {
 		return "", errors.New("http1: ContentLength set without a body")
 	}
 	switch {
+	case unknownLength(req):
+		fields = append(fields, order.Field{Name: "transfer-encoding", Value: "chunked"})
 	case req.ContentLength > 0:
 		fields = append(fields, order.Field{Name: "content-length", Value: strconv.FormatInt(req.ContentLength, 10)})
 	case method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch:

@@ -103,12 +103,8 @@ func TestWriteRequestRejects(t *testing.T) {
 		{name: "invalid name", modify: func(r *http.Request) { r.Header["X A"] = []string{"v"} }},
 		{name: "CRLF in Host", modify: func(r *http.Request) { r.Host = "example.com\r\nX: 1" }},
 		{name: "space in method", modify: func(r *http.Request) { r.Method = "GET /x" }},
-		{name: "Content-Length in Header", modify: func(r *http.Request) { r.Header.Set("Content-Length", "5") }},
-		{name: "Transfer-Encoding in Header", modify: func(r *http.Request) { r.Header.Set("Transfer-Encoding", "chunked") }},
-		{name: "body of unknown length", modify: func(r *http.Request) {
-			r.Body = io.NopCloser(strings.NewReader("x"))
-			r.ContentLength = -1
-		}},
+		{name: "Transfer-Encoding gzip in Header", modify: func(r *http.Request) { r.Header.Set("Transfer-Encoding", "gzip") }},
+		{name: "two Transfer-Encodings in Header", modify: func(r *http.Request) { r.Header["Transfer-Encoding"] = []string{"chunked", "chunked"} }},
 		{name: "spelling of another name", spell: http1.Spelling{"accept": "Accept-Language"}, modify: func(r *http.Request) { r.Header.Set("Accept", "1") }},
 		{name: "spelling with CRLF", spell: http1.Spelling{"accept": "Accept\r\n"}, modify: func(r *http.Request) { r.Header.Set("Accept", "1") }},
 		// RFC 9112 section 3.2.3: CONNECT needs authority-form; tunnels are
@@ -268,6 +264,49 @@ func TestWriteRequestNormalizes(t *testing.T) {
 			want := method + " / HTTP/1.1\r\nHost: example.com\r\n" + tt.want + "\r\n"
 			if got := buf.String(); got != want {
 				t.Fatalf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// The body decides the framing: a known length gives Content-Length, an
+// unknown one chunked, and the framing fields of Header are ignored.
+func TestWriteRequestFraming(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   io.Reader
+		length int64
+		header http.Header
+		want   string
+	}{
+		{"unknown length", io.NopCloser(strings.NewReader("hello world")), -1, nil,
+			"POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\nb\r\nhello world\r\n0\r\n\r\n"},
+		{"zero length with a body", io.NopCloser(strings.NewReader("")), 0, nil,
+			"POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"},
+		{"Content-Length in Header", strings.NewReader("abc"), 3, http.Header{"Content-Length": {"99"}},
+			"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 3\r\n\r\nabc"},
+		{"chunked in Header with a length", strings.NewReader("abc"), 3, http.Header{"Transfer-Encoding": {"chunked"}},
+			"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 3\r\n\r\nabc"},
+		{"no body", http.NoBody, 0, http.Header{"Content-Length": {"5"}},
+			"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, "http://example.com/", nil)
+			req.Body = io.NopCloser(tt.body)
+			if tt.body == http.NoBody {
+				req.Body = http.NoBody
+			}
+			req.ContentLength = tt.length
+			for k, v := range tt.header {
+				req.Header[k] = v
+			}
+			var buf bytes.Buffer
+			if err := http1.WriteRequest(&buf, req, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := buf.String(); got != tt.want {
+				t.Fatalf("got %q\nwant %q", got, tt.want)
 			}
 		})
 	}
