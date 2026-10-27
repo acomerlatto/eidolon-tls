@@ -46,6 +46,10 @@ type Options struct {
 
 	// TLS adjusts the server TLS config (versions, curves) before use.
 	TLS func(*tls.Config)
+
+	// H2 adjusts the HTTP/2 server (MaxConcurrentStreams, ...) before each
+	// connection is served.
+	H2 func(*http2.Server)
 }
 
 // Server is a running lab server.
@@ -157,8 +161,9 @@ func (s *Server) accept() {
 }
 
 func (s *Server) serve(raw net.Conn) {
+	c := &Conn{done: make(chan struct{})}
+	defer close(c.done)
 	defer raw.Close()
-	c := &Conn{}
 	if s.opts.Plain {
 		s.conns <- c
 		serveHTTP1(&recordingConn{Conn: raw, rec: &c.stream}, s.opts.Handler)
@@ -182,7 +187,11 @@ func (s *Server) serve(raw net.Conn) {
 
 	app := &recordingTLSConn{recordingConn: recordingConn{Conn: tc, rec: &c.stream}, tc: tc}
 	if c.State.NegotiatedProtocol == "h2" {
-		(&http2.Server{}).ServeConn(app, &http2.ServeConnOpts{Handler: s.opts.Handler})
+		h2 := &http2.Server{}
+		if s.opts.H2 != nil {
+			s.opts.H2(h2)
+		}
+		h2.ServeConn(app, &http2.ServeConnOpts{Handler: s.opts.Handler})
 		return
 	}
 	serveHTTP1(app, s.opts.Handler)
@@ -215,7 +224,11 @@ type Conn struct {
 	State tls.ConnectionState
 
 	handshake, stream recorder
+	done              chan struct{}
 }
+
+// Done is closed when the connection ends, closed by either side.
+func (c *Conn) Done() <-chan struct{} { return c.done }
 
 // Bytes returns the bytes the client sent after the handshake, decrypted,
 // as received so far.
