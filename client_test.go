@@ -189,8 +189,12 @@ func TestTimeout(t *testing.T) {
 	c := newClient(t, srv, eidolon.WithTimeout(200*time.Millisecond))
 	start := time.Now()
 	_, err := c.Get("https://example.com/slow")
-	if err == nil || !strings.Contains(err.Error(), "Client.Timeout") {
-		t.Fatalf("err = %v, want a client timeout", err)
+	// http.Client arms a context deadline and a timer for the same instant
+	// when the transport is not its own; whichever fires first decides the
+	// message, so only Timeout() is checked.
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Fatalf("err = %v, want a timeout", err)
 	}
 	if d := time.Since(start); d > 5*time.Second {
 		t.Fatalf("returned after %v", d)
