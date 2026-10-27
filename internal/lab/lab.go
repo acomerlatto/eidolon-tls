@@ -67,6 +67,13 @@ type Server struct {
 	wg   sync.WaitGroup
 }
 
+// Accepted returns how many connections the server has accepted so far.
+func (s *Server) Accepted() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.open)
+}
+
 // Start starts a lab server that is closed when the test ends.
 func Start(tb testing.TB, opts Options) *Server {
 	tb.Helper()
