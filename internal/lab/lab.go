@@ -50,6 +50,11 @@ type Options struct {
 	// H2 adjusts the HTTP/2 server (MaxConcurrentStreams, ...) before each
 	// connection is served.
 	H2 func(*http2.Server)
+
+	// H2Conn, if set, serves the connections that negotiate h2 instead of
+	// the HTTP/2 server, with raw frames. It gets the decrypted connection
+	// and closes it.
+	H2Conn func(net.Conn)
 }
 
 // Server is a running lab server.
@@ -186,6 +191,10 @@ func (s *Server) serve(raw net.Conn) {
 	s.conns <- c
 
 	app := &recordingTLSConn{recordingConn: recordingConn{Conn: tc, rec: &c.stream}, tc: tc}
+	if c.State.NegotiatedProtocol == "h2" && s.opts.H2Conn != nil {
+		s.opts.H2Conn(app)
+		return
+	}
 	if c.State.NegotiatedProtocol == "h2" {
 		h2 := &http2.Server{}
 		if s.opts.H2 != nil {
