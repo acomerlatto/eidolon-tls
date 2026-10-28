@@ -1789,6 +1789,7 @@ func (fr *Framer) readMetaFrame(hf *HeadersFrame) (Frame, error) {
 			if VerboseLogs {
 				log.Printf("http2: header list too large")
 			}
+			fr.errDetail = errHeaderListTooLarge // [eidolon] see ClientConn.readLoop
 			// It would be nice to send a RST_STREAM before sending the GOAWAY,
 			// but the structure of the server's frame writer makes this difficult.
 			return mh, ConnectionError(ErrCodeProtocol)
@@ -1807,6 +1808,7 @@ func (fr *Framer) readMetaFrame(hf *HeadersFrame) (Frame, error) {
 		}
 
 		if _, err := hdec.Write(frag); err != nil {
+			fr.errDetail = err // [eidolon] see ClientConn.readLoop
 			return mh, ConnectionError(ErrCodeCompression)
 		}
 

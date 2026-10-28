@@ -1,0 +1,59 @@
+diff --git a/internal/http2/eidolon_errors.go b/internal/http2/eidolon_errors.go
+new file mode 100644
+index 0000000..949aabd
+--- /dev/null
++++ b/internal/http2/eidolon_errors.go
+@@ -0,0 +1,15 @@
++// Errors of the engine that the dispatcher reports with its own.
++
++package http2
++
++import "errors"
++
++// errHeaderListTooLarge is the detail of the connection error of a header
++// block that goes on in CONTINUATION frames after exceeding the limit.
++var errHeaderListTooLarge = errors.New("http2: header list too large")
++
++// ErrHeaderListSize reports a response whose header list exceeds
++// MaxHeaderListSize: the cause of its StreamError, or in the chain of the
++// connection error when the excess takes the connection down
++// (ClientConn.readLoop).
++var ErrHeaderListSize = errResponseHeaderListSize
+diff --git a/internal/http2/frame.go b/internal/http2/frame.go
+index 5296eb4..9718bbc 100644
+--- a/internal/http2/frame.go
++++ b/internal/http2/frame.go
+@@ -1789,6 +1789,7 @@ func (fr *Framer) readMetaFrame(hf *HeadersFrame) (Frame, error) {
+ 			if VerboseLogs {
+ 				log.Printf("http2: header list too large")
+ 			}
++			fr.errDetail = errHeaderListTooLarge // [eidolon] see ClientConn.readLoop
+ 			// It would be nice to send a RST_STREAM before sending the GOAWAY,
+ 			// but the structure of the server's frame writer makes this difficult.
+ 			return mh, ConnectionError(ErrCodeProtocol)
+@@ -1807,6 +1808,7 @@ func (fr *Framer) readMetaFrame(hf *HeadersFrame) (Frame, error) {
+ 		}
+ 
+ 		if _, err := hdec.Write(frag); err != nil {
++			fr.errDetail = err // [eidolon] see ClientConn.readLoop
+ 			return mh, ConnectionError(ErrCodeCompression)
+ 		}
+ 
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index df479c6..281af16 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -1907,6 +1907,13 @@ func (cc *ClientConn) readLoop() {
+ 		cc.wmu.Lock()
+ 		cc.fr.WriteGoAway(0, ErrCode(ce), nil)
+ 		cc.wmu.Unlock()
++		if d := cc.fr.errDetail; errors.Is(d, hpack.ErrStringLength) || d == errHeaderListTooLarge {
++			// [eidolon] A header list over the limit takes the connection
++			// down when a field alone exceeds it, which stops the HPACK
++			// decoder, or when CONTINUATION frames follow the excess;
++			// the streams learn why.
++			cc.readerErr = fmt.Errorf("%w: %w", errResponseHeaderListSize, ce)
++		}
+ 	}
+ }
+ 

@@ -30,6 +30,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0010-no-reset-after-headers-end-stream.patch`
 - `scripts/xnet-patches/0011-pooled-retry-by-caller.patch`
 - `scripts/xnet-patches/0012-goaway-error-not-retried.patch`
+- `scripts/xnet-patches/0013-report-header-list-size.patch`
 
 ## Excluded files
 

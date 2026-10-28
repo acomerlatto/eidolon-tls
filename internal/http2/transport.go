@@ -1907,6 +1907,13 @@ func (cc *ClientConn) readLoop() {
 		cc.wmu.Lock()
 		cc.fr.WriteGoAway(0, ErrCode(ce), nil)
 		cc.wmu.Unlock()
+		if d := cc.fr.errDetail; errors.Is(d, hpack.ErrStringLength) || d == errHeaderListTooLarge {
+			// [eidolon] A header list over the limit takes the connection
+			// down when a field alone exceeds it, which stops the HPACK
+			// decoder, or when CONTINUATION frames follow the excess;
+			// the streams learn why.
+			cc.readerErr = fmt.Errorf("%w: %w", errResponseHeaderListSize, ce)
+		}
 	}
 }
 
