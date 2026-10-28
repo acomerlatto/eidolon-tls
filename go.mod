@@ -3,7 +3,7 @@ module github.com/acomerlatto/eidolon-tls
 go 1.27.2
 
 require (
-	github.com/acomerlatto/utls v0.0.1
+	github.com/acomerlatto/utls v0.0.2
 	golang.org/x/net v0.61.1-0.20261020135414-4af4fce62e93
 )
 

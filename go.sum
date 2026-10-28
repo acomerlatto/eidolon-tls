@@ -1,5 +1,5 @@
-github.com/acomerlatto/utls v0.0.1 h1:tC+nDqNQZ7LPXVsV3lB88AhQtg4z6RWM4rtswbdamDY=
-github.com/acomerlatto/utls v0.0.1/go.mod h1:AnRkdKrFVepqV0Zpm4qbJE4fDMOFCwsCrkg8v+6PgAY=
+github.com/acomerlatto/utls v0.0.2 h1:C0d+IPM47y1jqq9AodTJDHPslBkfzzgolMShy30b3Ak=
+github.com/acomerlatto/utls v0.0.2/go.mod h1:AnRkdKrFVepqV0Zpm4qbJE4fDMOFCwsCrkg8v+6PgAY=
 github.com/klauspost/compress v1.20.1 h1:T7kKElXUMXrUJ2E9QhQhxFtcK5rPyLdsGZvdbLMPdiQ=
 github.com/klauspost/compress v1.20.1/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
 github.com/molecule-man/go-brrr v1.2.0 h1:dOJU45BC3Gc2WXoxAW0rgCAgVuu2gruAOGncfieA0Jw=
