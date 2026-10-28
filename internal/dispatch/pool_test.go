@@ -174,15 +174,36 @@ func TestPoolH2ServerClosedConnection(t *testing.T) {
 
 // dropConn closes itself right after the next write once armed: the
 // request reaches the wire and the connection is lost before the response.
+// Reads fail from that write on, so a response that comes back before the
+// Close is never seen. A write of a frame without payload, such as the
+// SETTINGS ACK the read loop of a new connection may send after GotConn,
+// is not the request and does not count.
 type dropConn struct {
 	net.Conn
-	armed *atomic.Bool
+	armed   *atomic.Bool
+	dropped atomic.Bool
 }
 
+// frameOnlyRecord is a TLS 1.3 record carrying a 9-byte frame header and
+// nothing else: 5 bytes of header, 1 of content type and a 16-byte tag.
+const frameOnlyRecord = 5 + 9 + 1 + 16
+
 func (c *dropConn) Write(p []byte) (int, error) {
+	drop := len(p) > frameOnlyRecord && c.armed.CompareAndSwap(true, false)
+	if drop {
+		c.dropped.Store(true)
+	}
 	n, err := c.Conn.Write(p)
-	if c.armed.CompareAndSwap(true, false) {
+	if drop {
 		c.Conn.Close()
+	}
+	return n, err
+}
+
+func (c *dropConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if c.dropped.Load() {
+		return 0, net.ErrClosed
 	}
 	return n, err
 }
