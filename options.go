@@ -62,13 +62,19 @@ func WithClientHello(spec func() (*utls.ClientHelloSpec, error)) Option {
 }
 
 // WithRootCAs sets the certificate authorities trusted for server
-// certificates. The pool is copied. Without it, the system roots are used.
+// certificates. The pool is copied when WithRootCAs is called. Without it,
+// the system roots are used.
 func WithRootCAs(pool *x509.CertPool) Option {
+	// Cloned now: the pool is the caller's.
+	var clone *x509.CertPool
+	if pool != nil {
+		clone = pool.Clone()
+	}
 	return func(c *config) error {
-		if pool == nil {
+		if clone == nil {
 			return errors.New("WithRootCAs: nil pool")
 		}
-		c.rootCAs = pool.Clone()
+		c.rootCAs = clone
 		return nil
 	}
 }
@@ -158,10 +164,13 @@ func WithDisableDecompression() Option {
 
 // WithDefaultOrder sets the header order of the client's requests. The
 // order of a request (HeaderOrderKey, PHeaderOrderKey) takes precedence;
-// see Order. The lists are copied.
+// see Order. The lists are copied when WithDefaultOrder is called.
 func WithDefaultOrder(o Order) Option {
+	// Copied now: the slices of o are the caller's. The Order is new on
+	// each use, since a profile may fill its Pseudo.
+	pseudo, header := slices.Clone(o.Pseudo), slices.Clone(o.Header)
 	return func(c *config) error {
-		c.order = &order.Order{Pseudo: slices.Clone(o.Pseudo), Header: slices.Clone(o.Header)}
+		c.order = &order.Order{Pseudo: pseudo, Header: header}
 		return nil
 	}
 }
@@ -170,10 +179,11 @@ func WithDefaultOrder(o Order) Option {
 // as "sec-ch-ua" in lowercase next to "User-Agent". http.Header
 // canonicalizes its keys, so the spelling of a name comes from here; names
 // not listed are sent in canonical form. Over HTTP/2 names are always
-// lowercase.
+// lowercase. The names are copied when WithHeaderSpelling is called.
 func WithHeaderSpelling(names ...string) Option {
+	// Validated now: names may be the caller's slice.
+	sp, err := spelling(names)
 	return func(c *config) error {
-		sp, err := spelling(names)
 		if err != nil {
 			return fmt.Errorf("WithHeaderSpelling: %w", err)
 		}

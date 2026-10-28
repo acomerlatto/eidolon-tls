@@ -38,8 +38,11 @@ func (p Protocol) String() string {
 // Leaving HTTP/1.1 or HTTP/2 out changes the ClientHello: ALPN offers only
 // the enabled protocols, and ALPS only those ALPN still offers. The
 // fingerprint is then no longer the one of the spec. It cannot be combined
-// with WithForceHTTP1 or WithForceHTTP2.
+// with WithForceHTTP1 or WithForceHTTP2. The list is copied when
+// WithProtocols is called.
 func WithProtocols(ps ...Protocol) Option {
+	// Copied now: ps may be the caller's slice.
+	ps = slices.Clone(ps)
 	return func(c *config) error {
 		if len(ps) == 0 {
 			return errors.New("WithProtocols: no protocol")
@@ -49,7 +52,7 @@ func WithProtocols(ps ...Protocol) Option {
 				return fmt.Errorf("WithProtocols: unknown %v", p)
 			}
 		}
-		c.protocols = slices.Clone(ps)
+		c.protocols = ps
 		return nil
 	}
 }

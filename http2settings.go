@@ -74,9 +74,11 @@ type HTTP2Settings struct {
 // INITIAL_WINDOW_SIZE or MAX_HEADER_LIST_SIZE of 0, a connection window
 // above 2^31-1, an unknown Priority, or HTTP2PriorityChromium with
 // NO_RFC7540_PRIORITIES 1, which says the client sends no such priority.
+// The settings are copied when WithHTTP2Settings is called.
 func WithHTTP2Settings(s HTTP2Settings) Option {
+	// Converted now: the Settings slice is the caller's.
+	pre, err := h2Preface(s)
 	return func(c *config) error {
-		pre, err := h2Preface(s)
 		if err != nil {
 			return fmt.Errorf("WithHTTP2Settings: %w", err)
 		}
