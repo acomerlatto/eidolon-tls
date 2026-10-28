@@ -99,9 +99,27 @@ const (
 	HTTP2WindowUpdateChromium
 )
 
+// HTTP2Errors is how an HTTP/2 connection handles the errors of the
+// server: frames, header blocks, settings or windows it does not accept.
+type HTTP2Errors int
+
+const (
+	// HTTP2ErrorsGo handles them as Go: most close the connection with
+	// GOAWAY, without debug data.
+	HTTP2ErrorsGo HTTP2Errors = iota
+	// HTTP2ErrorsChromium handles them as Chromium: those it takes as
+	// connection errors close the connection with its GOAWAY code and
+	// debug data, such as "Framer error: 1 (INVALID_STREAM_ID).", those
+	// it takes as stream errors reset the stream, and those it ignores,
+	// such as an invalid INITIAL_WINDOW_SIZE, are ignored. A connection
+	// lost to PrefacePing is closed with GOAWAY "Failed ping.".
+	HTTP2ErrorsChromium
+)
+
 // HTTP2Settings is what a new HTTP/2 connection sends before its first
-// request, how its requests announce their priority, and how it sends
-// DATA frames, header fields, PINGs, window updates and resets.
+// request, how its requests announce their priority, how it sends DATA
+// frames, header fields, PINGs, window updates and resets, and how it
+// handles the errors of the server.
 type HTTP2Settings struct {
 	// Settings are sent exactly, in this order. Unknown IDs, such as
 	// GREASE values, are sent as given.
@@ -141,6 +159,8 @@ type HTTP2Settings struct {
 	// FirstStreamID, if non-zero, is the stream of the first request,
 	// above the streams of PriorityFrames; 0 is 1.
 	FirstStreamID uint32
+	// Errors is how the errors of the server are handled.
+	Errors HTTP2Errors
 }
 
 // WithHTTP2Settings sets the SETTINGS and the connection WINDOW_UPDATE of
@@ -148,8 +168,8 @@ type HTTP2Settings struct {
 // HEADER_TABLE_SIZE 65536, ENABLE_PUSH 0, INITIAL_WINDOW_SIZE 6291456 and
 // MAX_HEADER_LIST_SIZE 262144, then a WINDOW_UPDATE of 15663105, with
 // HTTP2PriorityChromium, DATA frames of at most 16375 bytes,
-// HTTP2HPACKChromium, a PrefacePing of 10 s, HTTP2WindowUpdateChromium and
-// CancelWithoutPing.
+// HTTP2HPACKChromium, a PrefacePing of 10 s, HTTP2WindowUpdateChromium,
+// CancelWithoutPing and HTTP2ErrorsChromium.
 //
 // The values announced are enforced: HEADER_TABLE_SIZE sizes the HPACK
 // decoder, INITIAL_WINDOW_SIZE the receive window of each stream, the
@@ -160,7 +180,7 @@ type HTTP2Settings struct {
 // return an error that wraps ErrConfig: a setting repeated, a value RFC
 // 9113 forbids, ENABLE_PUSH other than 0 (server push is refused),
 // INITIAL_WINDOW_SIZE or MAX_HEADER_LIST_SIZE of 0, a connection window
-// above 2^31-1, an unknown Priority, HPACK or WindowUpdate, a negative
+// above 2^31-1, an unknown Priority, HPACK, WindowUpdate or Errors, a negative
 // PrefacePing, a PRIORITY frame on stream 0 or on its own stream, a stream
 // ID above 2^31-1, an even FirstStreamID, a HeaderPriority without
 // HTTP2PriorityFixed or a zero one with it, or PriorityFrames,
@@ -244,6 +264,13 @@ func h2Preface(s HTTP2Settings) (*dispatch.H2Preface, error) {
 		pre.ChromiumWindowUpdate = true
 	default:
 		return nil, fmt.Errorf("unknown WindowUpdate %d", s.WindowUpdate)
+	}
+	switch s.Errors {
+	case HTTP2ErrorsGo:
+	case HTTP2ErrorsChromium:
+		pre.ChromiumErrors = true
+	default:
+		return nil, fmt.Errorf("unknown Errors %d", s.Errors)
 	}
 	return pre, nil
 }

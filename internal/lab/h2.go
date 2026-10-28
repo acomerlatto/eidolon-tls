@@ -45,6 +45,7 @@ type H2Frame struct {
 	Block     []byte        // HEADERS without CONTINUATION: the HPACK block
 	Ping      [8]byte       // PING
 	ErrCode   uint32        // RST_STREAM and GOAWAY
+	Debug     string        // GOAWAY: the debug data
 }
 
 // H2Frames decodes the client preface and the frames received so far. A
@@ -87,6 +88,7 @@ func (c *Conn) H2Frames() ([]H2Frame, error) {
 			out.ErrCode = uint32(f.ErrCode)
 		case *xhttp2.GoAwayFrame:
 			out.ErrCode = uint32(f.ErrCode)
+			out.Debug = string(f.DebugData())
 		case *xhttp2.PriorityFrame:
 			out.Priority = &Priority{StreamDep: f.StreamDep, Exclusive: f.Exclusive, Weight: f.Weight}
 		case *xhttp2.MetaHeadersFrame:

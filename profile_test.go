@@ -84,6 +84,7 @@ func TestChrome156Linux(t *testing.T) {
 		PrefacePing:            10 * time.Second,
 		WindowUpdate:           eidolon.HTTP2WindowUpdateChromium,
 		CancelWithoutPing:      true,
+		Errors:                 eidolon.HTTP2ErrorsChromium,
 	}
 	if p.Name != "chrome/156/linux" || !reflect.DeepEqual(p.HTTP2, h2) ||
 		!slices.Equal(p.PseudoOrder, []string{":method", ":authority", ":scheme", ":path"}) ||

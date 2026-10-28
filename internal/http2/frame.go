@@ -291,6 +291,15 @@ type Framer struct {
 	// lastFrameType holds the type of the last frame for verifying frame order.
 	lastFrameType FrameType
 
+	// [eidolon] chromium checks the frames read as quiche's
+	// Http2FrameDecoder and Http2DecoderAdapter, decodes header blocks as
+	// Chromium, and reports the errors as Chromium does
+	// (Transport.ChromiumErrors). unknownStreamOK, if set, is Chromium's
+	// SpdySession::OnUnknownFrame: whether a frame of an unknown type may
+	// be on a stream.
+	chromium        bool
+	unknownStreamOK func(streamID uint32) bool
+
 	maxReadSize uint32
 	headerBuf   [frameHeaderLen]byte
 
@@ -514,6 +523,9 @@ func (fr *Framer) ReadFrameHeader() (FrameHeader, error) {
 	if err != nil {
 		return fh, err
 	}
+	if fr.chromium {
+		return fh, fr.chromiumHeaderError(fh) // [eidolon]
+	}
 	if fh.Length > fr.maxReadSize {
 		if fh == invalidHTTP1LookingFrameHeader() {
 			return fh, fmt.Errorf("http2: failed reading the frame payload: %w, note that the frame header looked like an HTTP/1.1 header", ErrFrameTooLarge)
@@ -541,7 +553,16 @@ func (fr *Framer) ReadFrameForHeader(fh FrameHeader) (Frame, error) {
 		}
 		return nil, err
 	}
-	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, payload)
+	parse := typeFrameParser(fh.Type)
+	if fr.chromium {
+		if err := fr.chromiumPayloadError(fh, payload); err != nil {
+			return nil, err // [eidolon]
+		}
+		if fh.Type == FrameSettings {
+			parse = parseSettingsChromium
+		}
+	}
+	f, err := parse(fr.frameCache, fh, fr.countError, payload)
 	if err != nil {
 		if ce, ok := err.(connError); ok {
 			return nil, fr.connError(ce.Code, ce.Reason)
@@ -553,7 +574,13 @@ func (fr *Framer) ReadFrameForHeader(fh FrameHeader) (Frame, error) {
 		fr.debugReadLoggerf("http2: Framer %p: read %v", fr, summarizeFrame(f))
 	}
 	if fh.Type == FrameHeaders && fr.ReadMetaHeaders != nil {
+		if fr.chromium {
+			return fr.readMetaFrameChromium(f.(*HeadersFrame)) // [eidolon]
+		}
 		return fr.readMetaFrame(f.(*HeadersFrame))
+	}
+	if pp, ok := f.(*PushPromiseFrame); ok && fr.chromium && fr.ReadMetaHeaders != nil {
+		return nil, fr.readPushPromiseChromium(pp) // [eidolon]
 	}
 	return f, nil
 }

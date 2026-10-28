@@ -94,6 +94,11 @@ type Decoder struct {
 	saveBuf bytes.Buffer
 
 	firstField bool // processing the first field of the header block
+
+	// [eidolon] SetQuicheErrors; sizeUpdates counts the dynamic table
+	// size updates at the start of the header block, -1 after a field.
+	quiche      bool
+	sizeUpdates int
 }
 
 // NewDecoder returns a new decoder with the provided maximum dynamic
@@ -232,8 +237,12 @@ func (d *Decoder) DecodeFull(p []byte) ([]HeaderField, error) {
 // to be reused again for a new header block. If there is any remaining
 // data in the decoder's buffer, Close returns an error.
 func (d *Decoder) Close() error {
+	d.sizeUpdates = 0 // [eidolon]
 	if d.saveBuf.Len() > 0 {
 		d.saveBuf.Reset()
+		if d.quiche {
+			return QuicheTruncatedBlock // [eidolon]
+		}
 		return DecodingError{errors.New("truncated headers")}
 	}
 	d.firstField = true
@@ -258,7 +267,11 @@ func (d *Decoder) Write(p []byte) (n int, err error) {
 	}
 
 	for len(d.buf) > 0 {
-		err = d.parseHeaderFieldRepr()
+		if d.quiche {
+			err = d.parseQuiche() // [eidolon]
+		} else {
+			err = d.parseHeaderFieldRepr()
+		}
 		if err == errNeedMore {
 			// Extra paranoia, making sure saveBuf won't
 			// get too large. All the varint and string
@@ -396,7 +409,7 @@ func (d *Decoder) parseFieldLiteral(n uint8, it indexType) error {
 }
 
 func (d *Decoder) callEmit(hf HeaderField) error {
-	if d.maxStrLen != 0 {
+	if d.maxStrLen != 0 && !d.quiche { // [eidolon] quiche limits the encoded length
 		if len(hf.Name) > d.maxStrLen || len(hf.Value) > d.maxStrLen {
 			return ErrStringLength
 		}

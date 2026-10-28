@@ -193,6 +193,7 @@ type ClientConn struct {
 	lastRead      atomic.Int64         // [eidolon] time.Duration since born of the last frame read
 	prefacePing   prefacePing          // [eidolon] Transport.PrefacePing, under mu
 	firstStreamID uint32               // [eidolon] Transport.FirstStreamID
+	chromium      chromiumSettings     // [eidolon] Transport.ChromiumErrors, under mu
 	tconn         net.Conn             // usually *tls.Conn, except specialized impls
 	tlsState      *tls.ConnectionState // nil only for specialized impls
 	atomicReused  uint32               // whether conn is being reused; atomic
@@ -600,6 +601,12 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 	}
 	cc.fr.ReadMetaHeaders = hpack.NewDecoder(maxHeaderTableSize, nil)
 	cc.fr.MaxHeaderListSize = maxHeaderListSize
+	if t.ChromiumErrors {
+		// [eidolon]
+		cc.fr.chromium = true
+		cc.fr.unknownStreamOK = cc.unknownStreamOK
+		cc.fr.ReadMetaHeaders.SetQuicheErrors(true)
+	}
 
 	cc.henc = hpack.NewEncoder(&cc.hbuf)
 	cc.henc.SetMaxDynamicTableSizeLimit(conf.MaxEncoderHeaderTableSize)
@@ -1030,6 +1037,9 @@ func (cc *ClientConn) closeForLostPing() {
 	err := errors.New("http2: client connection lost")
 	if f := cc.t.CountError; f != nil {
 		f("conn_close_lost_ping")
+	}
+	if cc.t.ChromiumErrors {
+		cc.writeChromiumGoAway(chromiumError{ErrCodeProtocol, "Failed ping."}) // [eidolon]
 	}
 	cc.closeForError(err)
 }
@@ -1506,6 +1516,9 @@ func (cs *clientStream) cleanupWriteRequest(err error) {
 		cs.abortStream(err) // possibly redundant, but harmless
 		if ce, ok := err.(ConnectionError); ok {
 			cc.goAwayAndClose(ErrCode(ce))
+		} else if errors.As(err, new(chromiumError)) {
+			// [eidolon] ChromiumErrors: the GOAWAY is sent, and no
+			// RST_STREAM follows it.
 		} else if cs.sentHeaders {
 			if se, ok := err.(StreamError); ok {
 				if se.Cause != errFromPeer {
@@ -1975,7 +1988,9 @@ func (cc *ClientConn) readLoop() {
 	rl := &clientConnReadLoop{cc: cc}
 	defer rl.cleanup()
 	cc.readerErr = rl.run()
-	if ce, ok := cc.readerErr.(ConnectionError); ok {
+	if ce, ok := cc.readerErr.(chromiumError); ok {
+		cc.writeChromiumGoAway(ce) // [eidolon]
+	} else if ce, ok := cc.readerErr.(ConnectionError); ok {
 		cc.wmu.Lock()
 		cc.fr.WriteGoAway(0, ErrCode(ce), nil)
 		cc.wmu.Unlock()
@@ -2118,6 +2133,11 @@ func (rl *clientConnReadLoop) run() error {
 					se.Cause = cc.fr.errDetail
 				}
 				rl.endStreamError(cs, se)
+			} else if cc.t.ChromiumErrors && se.Code == ErrCodeProtocol {
+				// [eidolon] A header block Chromium's HeaderCoalescer
+				// refuses resets its stream, even one not open
+				// (SpdySession::OnStreamError).
+				cc.writeStreamReset(se.StreamID, se.Code, false, nil)
 			}
 			continue
 		} else if err != nil {
@@ -2127,7 +2147,7 @@ func (rl *clientConnReadLoop) run() error {
 		if VerboseLogs {
 			cc.vlogf("http2: Transport received %s", summarizeFrame(f))
 		}
-		if !gotSettings {
+		if !gotSettings && !cc.t.ChromiumErrors { // [eidolon] Chromium does not check
 			if _, ok := f.(*SettingsFrame); !ok {
 				cc.logf("protocol error: received %T before a SETTINGS frame", f)
 				return ConnectionError(ErrCodeProtocol)
@@ -2236,6 +2256,11 @@ func (rl *clientConnReadLoop) handleResponse(cs *clientStream, f *MetaHeadersFra
 		return nil, errResponseHeaderListSize
 	}
 
+	if rl.cc.t.ChromiumErrors {
+		if err := chromiumStatusError(f); err != nil {
+			return nil, err // [eidolon]
+		}
+	}
 	status := f.PseudoValue("status")
 	if status == "" {
 		return nil, errors.New("malformed response from server: missing status pseudo header")
@@ -2394,6 +2419,9 @@ func (rl *clientConnReadLoop) handleResponse(cs *clientStream, f *MetaHeadersFra
 }
 
 func (rl *clientConnReadLoop) processTrailers(cs *clientStream, f *MetaHeadersFrame) error {
+	if rl.cc.t.ChromiumErrors {
+		return rl.processTrailersChromium(cs, f) // [eidolon]
+	}
 	if cs.pastTrailers {
 		// Too many HEADERS frames for this stream.
 		return ConnectionError(ErrCodeProtocol)
@@ -2540,6 +2568,11 @@ func (b transportResponseBody) Close() error {
 
 func (rl *clientConnReadLoop) processData(f *DataFrame) error {
 	cc := rl.cc
+	if cc.t.ChromiumErrors {
+		if done, err := rl.checkDataChromium(f); done {
+			return err // [eidolon]
+		}
+	}
 	cs := rl.streamByID(f.StreamID, headerOrDataFrame)
 	data := f.Data()
 	if cs == nil {
@@ -2769,7 +2802,7 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
 	defer cc.mu.Unlock()
 
 	if f.IsAck() {
-		if cc.wantSettingsAck {
+		if cc.wantSettingsAck || cc.t.ChromiumErrors { // [eidolon] Chromium ignores it
 			cc.wantSettingsAck = false
 			return nil
 		}
@@ -2778,7 +2811,12 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
 
 	var seenMaxConcurrentStreams bool
 	err := f.ForeachSetting(func(s Setting) error {
-		if err := s.Valid(); err != nil {
+		if cc.t.ChromiumErrors {
+			// [eidolon]
+			if ignore, err := cc.chromiumSetting(s); ignore || err != nil {
+				return err
+			}
+		} else if err := s.Valid(); err != nil {
 			return err
 		}
 		switch s.ID {
@@ -2822,6 +2860,7 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
 		return err
 	}
 
+	cc.chromium.seenSettings = true // [eidolon] at the end of the frame
 	if !cc.seenSettings {
 		if !seenMaxConcurrentStreams {
 			// This was the servers initial SETTINGS frame and it
@@ -2842,6 +2881,10 @@ func (rl *clientConnReadLoop) processWindowUpdate(f *WindowUpdateFrame) error {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 	if f.StreamID == 0 {
+		if cc.t.ChromiumErrors && int64(cc.flow.n)+int64(f.Increment) > maxFlowWindow {
+			// [eidolon] SpdySession::IncreaseSendWindowSize
+			return chromiumError{ErrCodeProtocol, fmt.Sprintf("Received WINDOW_UPDATE [delta: %d] for session overflows session_send_window_size_ [current: %d]", f.Increment, cc.flow.n)}
+		}
 		if !cc.flow.add(int32(f.Increment)) {
 			return ConnectionError(ErrCodeFlowControl)
 		}
@@ -2945,10 +2988,15 @@ func (rl *clientConnReadLoop) processPing(f *PingFrame) error {
 		defer cc.maybeCallStateHook()
 		cc.mu.Lock()
 		defer cc.mu.Unlock()
+		if cc.t.ChromiumErrors && !cc.prefacePing.inFlight && len(cc.pings) == 0 {
+			return chromiumError{ErrCodeProtocol, "Unexpected PING ACK."} // [eidolon]
+		}
 		// If ack, notify listener if any
 		if c, ok := cc.pings[f.Data]; ok {
 			close(c)
 			delete(cc.pings, f.Data)
+		} else if cc.t.ChromiumErrors {
+			cc.prefacePing.inFlight = false // [eidolon] whatever its payload
 		}
 		cc.prefacePingAcked(f.Data) // [eidolon]
 		if cc.pendingResets > 0 {

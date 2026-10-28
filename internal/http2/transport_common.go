@@ -169,6 +169,14 @@ type Transport struct {
 	// keeps its place in the concurrency limit until the PING is answered.
 	CancelWithoutPing bool
 
+	// [eidolon] ChromiumErrors handles the errors of the server as
+	// Chromium (SpdySession with quiche's Http2DecoderAdapter and
+	// HpackDecoder): the connection errors it detects close the connection
+	// with its GOAWAY code and debug data, those it treats as stream
+	// errors reset the stream, and those it ignores are ignored. A lost
+	// connection is closed with GOAWAY PROTOCOL_ERROR "Failed ping.".
+	ChromiumErrors bool
+
 	// [eidolon] PriorityFrames are sent in order right after SETTINGS and
 	// the connection WINDOW_UPDATE, as some browsers build a priority tree
 	// with them (Firefox up to version 88). CheckPriorities validates them.
