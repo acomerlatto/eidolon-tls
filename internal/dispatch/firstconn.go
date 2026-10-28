@@ -40,7 +40,9 @@ type dialCall struct {
 // pool, which dials in parallel up to the limit. Otherwise the requests
 // wait for one shared dial, as Chrome does: with h2 they all multiplex on
 // it; with http/1.1 one waiter takes the connection and the others go to
-// the HTTP/1.1 pool.
+// the HTTP/1.1 pool. The shared dial holds an HTTP/1.1 slot from its start,
+// as a connection being opened counts in Chrome's limit; the slot passes
+// to the waiter that takes an http/1.1 connection, and is freed otherwise.
 func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string, fresh bool) (*h1Conn, error) {
 	t.mu.Lock()
 	if t.closed {
@@ -58,6 +60,7 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string, 
 			t.dialing = make(map[string]*dialCall)
 		}
 		t.dialing[key] = call
+		t.h1HostLocked(key).open++
 		go t.sharedDial(call, tgt, key)
 	}
 	call.waiters++
@@ -88,9 +91,8 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string, 
 		t.mu.Unlock()
 		return nil, nil
 	case !call.taken:
-		call.taken = true
+		call.taken = true // with the slot of the dial
 		t.mu.Unlock()
-		t.h1Adopt(key)
 		return t.newH1Conn(key, call.conn), nil
 	}
 	t.mu.Unlock()
@@ -152,6 +154,9 @@ func (t *Transport) sharedDial(call *dialCall, tgt target.Target, key string) {
 	if conn != nil && call.waiters == 0 {
 		call.taken = true
 		unused = conn
+	}
+	if conn == nil || unused != nil {
+		t.h1ReleaseLocked(key)
 	}
 	close(call.done)
 	t.mu.Unlock()

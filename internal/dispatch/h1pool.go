@@ -138,25 +138,21 @@ func (t *Transport) h1Acquire(ctx context.Context, key string, fresh bool) (*h1C
 	}
 }
 
-// h1Adopt counts a connection dialed outside a slot, such as the result
-// of a shared dial.
-func (t *Transport) h1Adopt(key string) {
-	t.mu.Lock()
-	t.h1HostLocked(key).open++
-	t.mu.Unlock()
-}
-
 // h1Release frees a slot that holds no connection: the dial failed or
 // negotiated h2.
 func (t *Transport) h1Release(key string) {
 	t.mu.Lock()
+	t.h1ReleaseLocked(key)
+	t.mu.Unlock()
+}
+
+func (t *Transport) h1ReleaseLocked(key string) {
 	h := t.h1HostLocked(key)
 	if len(h.waiters) > 0 {
 		t.grantLocked(h, nil) // the slot passes to the waiter
 	} else {
 		h.open--
 	}
-	t.mu.Unlock()
 }
 
 // h1Closed frees the slot of a closed connection.
