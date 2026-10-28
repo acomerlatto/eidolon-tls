@@ -9,15 +9,17 @@ import (
 
 // H2Preface is what a new HTTP/2 connection sends before its first
 // request: the SETTINGS, in order, and the increment of the WINDOW_UPDATE
-// on the connection, 0 for none.
+// on the connection, 0 for none. It also says how the requests announce
+// their priority: PriorityChain is http2.Transport.PriorityChain.
 type H2Preface struct {
 	Settings         []http2.Setting
 	ConnWindowUpdate uint32
+	PriorityChain    bool
 }
 
 // DefaultH2 is the preface of Chrome 156 (A10): a 64 KiB HPACK table, no
-// server push, windows of 6 MiB per stream and 15 MiB per connection, and
-// a header list of 256 KiB.
+// server push, windows of 6 MiB per stream and 15 MiB per connection, a
+// header list of 256 KiB, and the priority chain of Chromium.
 var DefaultH2 = H2Preface{
 	Settings: []http2.Setting{
 		{ID: http2.SettingHeaderTableSize, Val: 65536},
@@ -26,6 +28,7 @@ var DefaultH2 = H2Preface{
 		{ID: http2.SettingMaxHeaderListSize, Val: 262144},
 	},
 	ConnWindowUpdate: 15663105,
+	PriorityChain:    true,
 }
 
 // defaultH2 returns DefaultH2 with maxHeaderList as MAX_HEADER_LIST_SIZE,

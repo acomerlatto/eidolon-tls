@@ -649,6 +649,7 @@ func (t *Transport) h2t() *http2.Transport {
 		}
 		t.h2.Settings = append([]http2.Setting{}, pre.Settings...)
 		t.h2.ConnWindowUpdate = pre.ConnWindowUpdate
+		t.h2.PriorityChain = pre.PriorityChain
 	})
 	return t.h2
 }
