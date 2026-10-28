@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/http/httpguts"
 
@@ -18,6 +19,11 @@ import (
 // DefaultMaxConnsPerHost is the HTTP/1.1 connection limit per key, as in
 // Chrome.
 const DefaultMaxConnsPerHost = 6
+
+// DefaultIdleConnTimeout bounds how long an HTTP/1.1 connection stays idle,
+// as Chrome does for a connection that served a request (every idle one
+// here did).
+const DefaultIdleConnTimeout = 300 * time.Second
 
 // h1Conn is a pooled HTTP/1.1 connection of one key.
 type h1Conn struct {
@@ -29,6 +35,10 @@ type h1Conn struct {
 	// connection may have been lost while idle.
 	served int
 	once   sync.Once
+	// idleGen counts the times the connection went idle, and idleTimer
+	// ends the current one. Guarded by Transport.mu.
+	idleGen   int
+	idleTimer *time.Timer
 }
 
 // close closes the connection and frees its slot.
@@ -60,6 +70,13 @@ func (t *Transport) maxConnsPerHost() int {
 		return t.MaxConnsPerHost
 	}
 	return DefaultMaxConnsPerHost
+}
+
+func (t *Transport) idleConnTimeout() time.Duration {
+	if t.IdleConnTimeout > 0 {
+		return t.IdleConnTimeout
+	}
+	return DefaultIdleConnTimeout
 }
 
 func (t *Transport) h1HostLocked(key string) *h1Host {
@@ -94,6 +111,7 @@ func (t *Transport) h1Acquire(ctx context.Context, key string, fresh bool) (*h1C
 		if n := len(h.idle); n > 0 && !(fresh && free) {
 			c := h.idle[n-1]
 			h.idle = h.idle[:n-1]
+			c.idleTimer.Stop()
 			t.mu.Unlock()
 			if c.Reuse() && !fresh {
 				return c, nil
@@ -161,6 +179,7 @@ func (t *Transport) h1Closed(c *h1Conn) {
 	h := t.h1HostLocked(c.key)
 	if i := slices.Index(h.idle, c); i >= 0 {
 		h.idle = slices.Delete(h.idle, i, i+1)
+		c.idleTimer.Stop()
 	}
 	if len(h.waiters) > 0 && !t.closed {
 		t.grantLocked(h, nil)
@@ -196,7 +215,26 @@ func (t *Transport) h1Put(c *h1Conn) {
 		}
 	})
 	h.idle = append(h.idle, c)
+	c.idleGen++
+	gen := c.idleGen
+	c.idleTimer = time.AfterFunc(t.idleConnTimeout(), func() { t.h1Expire(c, gen) })
 	t.mu.Unlock()
+}
+
+// h1Expire closes c if it is still in the idle period gen: a timer that
+// fires while c is taken, and runs after c is idle again, does nothing.
+func (t *Transport) h1Expire(c *h1Conn, gen int) {
+	t.mu.Lock()
+	h := t.h1HostLocked(c.key)
+	i := slices.Index(h.idle, c)
+	if i < 0 || c.idleGen != gen {
+		t.mu.Unlock()
+		return
+	}
+	h.idle = slices.Delete(h.idle, i, i+1)
+	t.mu.Unlock()
+	c.Reuse() // stops the watch
+	c.close()
 }
 
 func (t *Transport) grantLocked(h *h1Host, c *h1Conn) {
@@ -221,6 +259,9 @@ func (t *Transport) closeIdleH1() {
 	t.mu.Lock()
 	var idle []*h1Conn
 	for _, h := range t.h1 {
+		for _, c := range h.idle {
+			c.idleTimer.Stop()
+		}
 		idle = append(idle, h.idle...)
 		h.idle = nil
 	}
@@ -232,8 +273,9 @@ func (t *Transport) closeIdleH1() {
 }
 
 // h1Get returns a connection of key for one request: idle, or dialed in a
-// free slot; with fresh, always dialed (h1Acquire). A dial that negotiates h2 pools the connection and returns
-// nil, so the request goes back to the HTTP/2 pool.
+// free slot; with fresh, always dialed (h1Acquire). A dial that negotiates
+// h2 pools the connection and returns nil, so the request goes back to the
+// HTTP/2 pool.
 func (t *Transport) h1Get(ctx context.Context, key string, fresh bool, dial func(context.Context) (net.Conn, *tls.ConnectionState, error)) (*h1Conn, error) {
 	c, err := t.h1Acquire(ctx, key, fresh)
 	if err != nil || c != nil {

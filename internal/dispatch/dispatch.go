@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	utls "github.com/acomerlatto/utls"
 
@@ -34,8 +35,8 @@ import (
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
 
-// Transport is an http.RoundTripper that reuses HTTP/2 connections and
-// sends each HTTP/1.1 request on a new connection.
+// Transport is an http.RoundTripper that pools HTTP/2 and HTTP/1.1
+// connections per origin and endpoint.
 type Transport struct {
 	// Spec returns a new ClientHello spec per connection.
 	Spec func() (*utls.ClientHelloSpec, error)
@@ -49,6 +50,10 @@ type Transport struct {
 	// MaxConnsPerHost bounds the HTTP/1.1 connections per origin and
 	// endpoint. Zero means DefaultMaxConnsPerHost.
 	MaxConnsPerHost int
+	// IdleConnTimeout bounds how long an HTTP/1.1 connection stays idle
+	// in the pool. Zero means DefaultIdleConnTimeout. HTTP/2 connections
+	// have no idle timeout, as in Chrome.
+	IdleConnTimeout time.Duration
 	// Order is the header order of the client, below the order of the
 	// request (the keys of Header, then the context) in precedence
 	// (order.Merge). Nil leaves the request's.

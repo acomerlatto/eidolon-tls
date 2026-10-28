@@ -408,3 +408,46 @@ func TestH1PoolCloseIdleConnections(t *testing.T) {
 		t.Fatal("idle connection kept open")
 	}
 }
+
+// An idle connection is closed when its idle timeout ends, and the next
+// request dials; a request before the end reuses it and starts the period
+// again.
+func TestH1PoolIdleTimeout(t *testing.T) {
+	t.Run("expires", func(t *testing.T) {
+		srv, base := h1Lab(t, false, nil)
+		tr := transport(srv)
+		tr.IdleConnTimeout = 300 * time.Millisecond
+		defer tr.Close()
+		fetch(t, tr, base+"/")
+		conn := srv.NextConn(t)
+		select {
+		case <-conn.Done():
+			t.Fatal("closed before the idle timeout")
+		case <-time.After(100 * time.Millisecond):
+		}
+		select {
+		case <-conn.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("idle connection kept open")
+		}
+		fetch(t, tr, base+"/")
+		if n := srv.Accepted(); n != 2 {
+			t.Fatalf("%d connections, want 2", n)
+		}
+	})
+	t.Run("restarted by reuse", func(t *testing.T) {
+		srv, base := h1Lab(t, false, nil)
+		tr := transport(srv)
+		tr.IdleConnTimeout = 600 * time.Millisecond
+		defer tr.Close()
+		for i := range 3 {
+			if i > 0 {
+				time.Sleep(350 * time.Millisecond)
+			}
+			fetch(t, tr, base+"/")
+		}
+		if n := srv.Accepted(); n != 1 {
+			t.Fatalf("%d connections, want 1", n)
+		}
+	})
+}

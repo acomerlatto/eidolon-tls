@@ -109,3 +109,53 @@ func TestH1AcquireFreshGranted(t *testing.T) {
 		t.Fatalf("%d open, want 1", open)
 	}
 }
+
+// The timer of an earlier idle period does not close the connection idle
+// again: it fired while the connection was taken.
+func TestH1ExpireEarlierPeriod(t *testing.T) {
+	tr := &Transport{}
+	defer tr.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const key = "https://example.com:443 example.com:443"
+	if c, err := tr.h1Acquire(ctx, key, false); c != nil || err != nil {
+		t.Fatalf("acquire: %v, %v; want a slot", c, err)
+	}
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close(); server.Close() })
+	c := &h1Conn{Conn: tr.newHTTP1(client), t: tr, key: key}
+	tr.h1Put(c)
+	tr.mu.Lock()
+	earlier := c.idleGen
+	tr.mu.Unlock()
+	if got, err := tr.h1Acquire(ctx, key, false); got != c || err != nil {
+		t.Fatalf("acquire: %v, %v; want the idle connection", got, err)
+	}
+	tr.h1Put(c)
+
+	tr.h1Expire(c, earlier)
+	tr.mu.Lock()
+	idle, current := len(tr.h1[key].idle), c.idleGen
+	tr.mu.Unlock()
+	if idle != 1 {
+		t.Fatal("closed by the timer of an earlier idle period")
+	}
+	tr.h1Expire(c, current)
+	server.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := server.Read(make([]byte, 1)); err == nil || isTimeout(err) {
+		t.Fatalf("not closed by the timer of its idle period: %v", err)
+	}
+}
+
+// The defaults are Chrome's: 6 connections per host
+// (client_socket_pool_manager.cc) and 300 s for an idle connection that
+// served a request (g_used_idle_socket_timeout_s).
+func TestH1PoolDefaults(t *testing.T) {
+	tr := &Transport{}
+	if n := tr.maxConnsPerHost(); n != 6 {
+		t.Errorf("%d connections per host, want 6", n)
+	}
+	if d := tr.idleConnTimeout(); d != 300*time.Second {
+		t.Errorf("idle timeout %v, want 5m0s", d)
+	}
+}
