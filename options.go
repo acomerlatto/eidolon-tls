@@ -33,6 +33,7 @@ type config struct {
 	jar         http.CookieJar
 
 	disableDecompression bool
+	strictTLS12          bool
 
 	maxConnsPerHost int
 	idleConnTimeout time.Duration
@@ -160,6 +161,18 @@ func WithCookieJar(jar http.CookieJar) Option {
 func WithDisableDecompression() Option {
 	return func(c *config) error {
 		c.disableDecompression = true
+		return nil
+	}
+}
+
+// WithStrictTLS12 refuses a TLS 1.2 connection, after its handshake and
+// before any HTTP byte, whose cipher suite lacks ECDHE or AEAD, or whose
+// server lacks extended master secret or secure renegotiation (RFC 9325),
+// with an error that wraps ErrTLS12Policy. By default these are accepted,
+// as Chrome does. The ClientHello does not change.
+func WithStrictTLS12() Option {
+	return func(c *config) error {
+		c.strictTLS12 = true
 		return nil
 	}
 }

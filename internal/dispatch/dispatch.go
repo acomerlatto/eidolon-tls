@@ -74,6 +74,8 @@ type Transport struct {
 	// they came, with Content-Encoding. By default they are decoded
 	// (decompress).
 	DisableDecompression bool
+	// StrictTLS12 is tlsdial.Config.StrictTLS12.
+	StrictTLS12 bool
 	// Protocols restricts the protocols offered by ALPN, and accepted
 	// from it, to tlsdial.ProtoHTTP1 and tlsdial.ProtoH2 as listed. Nil
 	// keeps the spec as it is and accepts both.
@@ -115,6 +117,12 @@ var ErrExactHeadersRedirect = errors.New("eidolon: redirect of a request with ex
 // ErrProtocolPolicy reports a protocol outside the enabled set: negotiated
 // by the server, required by it, or needed by the URL.
 var ErrProtocolPolicy = errors.New("eidolon: protocol outside the enabled set")
+
+// ErrHTTP2InadequateSecurity reports an HTTP/2 connection over TLS 1.2
+// with a cipher suite HTTP/2 forbids (RFC 9113 section 9.2.2): without
+// AEAD, or with RSA key exchange. As Chrome, the client sends its preface
+// and closes with GOAWAY INADEQUATE_SECURITY, and the request fails.
+var ErrHTTP2InadequateSecurity = errors.New("eidolon: HTTP/2 over a TLS cipher suite HTTP/2 forbids")
 
 // ErrRetryBudget reports a request that could have been sent again but
 // was not, because its budget ran out: maxRetries retries, maxDials
@@ -509,6 +517,7 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 		Spec:        t.spec(protos),
 		TLS:         cfg,
 		DialContext: t.trackedDial,
+		StrictTLS12: t.StrictTLS12,
 	})
 	if err != nil {
 		return nil, err
@@ -522,6 +531,10 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 		return nil, fmt.Errorf("%w: the server negotiated %s", ErrProtocolPolicy, proto)
 	}
 	t.learn(key, proto)
+	if st := conn.ConnectionState(); proto == tlsdial.ProtoH2 && !tlsdial.HTTP2Allowed(st.Version, st.CipherSuite) {
+		t.h2t().RefuseConn(tlsdial.StdConn{UConn: conn}, http2.ErrCodeInadequateSecurity)
+		return nil, fmt.Errorf("%w: %s", ErrHTTP2InadequateSecurity, utls.CipherSuiteName(st.CipherSuite))
+	}
 	return conn, nil
 }
 

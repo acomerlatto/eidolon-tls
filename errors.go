@@ -37,6 +37,14 @@ var (
 	// in the chain, for errors.As with x509.UnknownAuthorityError,
 	// x509.HostnameError or x509.CertificateInvalidError.
 	ErrCertificate = tlsdial.ErrCertificate
+	// ErrTLS12Policy reports a TLS 1.2 connection refused by
+	// WithStrictTLS12.
+	ErrTLS12Policy = tlsdial.ErrTLS12Policy
+	// ErrHTTP2InadequateSecurity reports a server that negotiated HTTP/2
+	// over TLS 1.2 with a cipher suite HTTP/2 forbids, without AEAD or
+	// with RSA key exchange. As Chrome, the client closes the connection
+	// with GOAWAY INADEQUATE_SECURITY.
+	ErrHTTP2InadequateSecurity = dispatch.ErrHTTP2InadequateSecurity
 	// ErrMalformedResponse reports an HTTP/1.1 response that cannot be
 	// read: a bad status line or header, conflicting Content-Length
 	// values, more than five 1xx responses. A connection lost while

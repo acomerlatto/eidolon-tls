@@ -32,6 +32,12 @@ var ErrALPN = errors.New("tlsdial: unsupported ALPN protocol")
 // the chain.
 var ErrCertificate = errors.New("eidolon: certificate verification failed")
 
+// ErrTLS12Policy reports a TLS 1.2 connection that StrictTLS12 refuses:
+// a cipher suite without ECDHE and AEAD, or a server without extended
+// master secret or secure renegotiation. The connection is closed after
+// the handshake, before any HTTP byte.
+var ErrTLS12Policy = errors.New("eidolon: TLS 1.2 connection below the strict policy")
+
 // ErrProfile reports a ClientHello spec that cannot be used: its function
 // failed or returned nil, it sets the SNI name, or uTLS refused to apply
 // it. No connection is opened for it.
@@ -50,11 +56,21 @@ type Config struct {
 
 	// DialContext opens the TCP connection. Nil uses a zero net.Dialer.
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	// StrictTLS12 refuses a TLS 1.2 connection with a cipher suite
+	// without ECDHE and AEAD, or a server without extended master secret
+	// or secure renegotiation (RFC 9325), with ErrTLS12Policy. Chrome
+	// accepts all of them; the ClientHello does not change.
+	StrictTLS12 bool
 }
 
 // Dial opens a TCP connection to addr, performs the TLS handshake with a new
 // spec and checks the negotiated ALPN protocol. The returned connection has
 // completed the handshake; its protocol is ConnectionState().NegotiatedProtocol.
+//
+// Renegotiation follows the spec (its renegotiation_info extension) over
+// HTTP/1.1 and without ALPN, and is refused over HTTP/2 (RFC 9113 section
+// 9.2.1), as Chrome does.
 func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, error) {
 	if cfg.Spec == nil {
 		return nil, errors.New("tlsdial: Config.Spec is nil")
@@ -68,7 +84,7 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 		cfg.TLS = tc
 	}
 	// Apply the spec before dialing, so a bad profile opens no connection.
-	uconn, err := prepare(cfg)
+	uconn, tc, err := prepare(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -91,13 +107,58 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 		}
 		return nil, err
 	}
-	switch proto := uconn.ConnectionState().NegotiatedProtocol; proto {
+	st := uconn.ConnectionState()
+	switch st.NegotiatedProtocol {
 	case ProtoH2, ProtoHTTP1, "":
-		return uconn, nil
 	default:
 		uconn.Close()
-		return nil, fmt.Errorf("%w: %q", ErrALPN, proto)
+		return nil, fmt.Errorf("%w: %q", ErrALPN, st.NegotiatedProtocol)
 	}
+	if cfg.StrictTLS12 && st.Version == utls.VersionTLS12 {
+		if err := strictTLS12(st.CipherSuite, uconn.HandshakeState.ServerHello); err != nil {
+			uconn.Close()
+			return nil, err
+		}
+	}
+	if st.NegotiatedProtocol == ProtoH2 {
+		// Read by the connection only when the server asks to
+		// renegotiate, after Dial returns.
+		tc.Renegotiation = utls.RenegotiateNever
+	}
+	return uconn, nil
+}
+
+// ecdheAEAD reports whether a TLS 1.2 suite has ECDHE and AEAD.
+func ecdheAEAD(suite uint16) bool {
+	switch suite {
+	case utls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, utls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+		utls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, utls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		utls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, utls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:
+		return true
+	}
+	return false
+}
+
+// HTTP2Allowed reports whether Chrome sends HTTP/2 over a connection of
+// version and suite (SpdySession::HasAcceptableTransportSecurity): TLS
+// 1.3, or TLS 1.2 with an AEAD suite without RSA key exchange.
+func HTTP2Allowed(version, suite uint16) bool {
+	return version >= utls.VersionTLS13 || version == utls.VersionTLS12 && ecdheAEAD(suite)
+}
+
+// strictTLS12 checks a TLS 1.2 handshake against StrictTLS12: ECDHE and
+// AEAD, extended master secret and secure renegotiation.
+func strictTLS12(suite uint16, sh *utls.PubServerHelloMsg) error {
+	if !ecdheAEAD(suite) {
+		return fmt.Errorf("%w: cipher suite %s", ErrTLS12Policy, utls.CipherSuiteName(suite))
+	}
+	if sh == nil || !sh.ExtendedMasterSecret {
+		return fmt.Errorf("%w: no extended master secret", ErrTLS12Policy)
+	}
+	if !sh.SecureRenegotiationSupported {
+		return fmt.Errorf("%w: no secure renegotiation", ErrTLS12Policy)
+	}
+	return nil
 }
 
 // exactIP returns a VerifyConnection that runs next and then requires an
@@ -139,31 +200,33 @@ func Check(cfg Config) error {
 		tc.ServerName = "eidolon.invalid"
 	}
 	cfg.TLS = tc
-	_, err := prepare(cfg)
+	_, _, err := prepare(cfg)
 	return err
 }
 
 // prepare builds a new spec and applies it to a client that has no
-// connection yet. Every error wraps ErrProfile.
-func prepare(cfg Config) (*utls.UConn, error) {
+// connection yet, and returns the config of the client, which the spec
+// changed. Every error wraps ErrProfile.
+func prepare(cfg Config) (*utls.UConn, *utls.Config, error) {
 	spec, err := cfg.Spec()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrProfile, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrProfile, err)
 	}
 	if spec == nil {
-		return nil, fmt.Errorf("%w: the spec function returned nil", ErrProfile)
+		return nil, nil, fmt.Errorf("%w: the spec function returned nil", ErrProfile)
 	}
 	// uTLS copies a name set in the SNI extension into Config.ServerName,
 	// which is also the name the certificate is verified against: the spec
 	// would choose which certificate is accepted for the URL.
 	for _, ext := range spec.Extensions {
 		if sni, ok := ext.(*utls.SNIExtension); ok && sni.ServerName != "" {
-			return nil, fmt.Errorf("%w: the spec sets the SNI name %q; it must come from the URL", ErrProfile, sni.ServerName)
+			return nil, nil, fmt.Errorf("%w: the spec sets the SNI name %q; it must come from the URL", ErrProfile, sni.ServerName)
 		}
 	}
-	uconn := utls.UClient(nil, cfg.TLS.Clone(), utls.HelloCustom)
+	tc := cfg.TLS.Clone()
+	uconn := utls.UClient(nil, tc, utls.HelloCustom)
 	if err := uconn.ApplyPreset(spec); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrProfile, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrProfile, err)
 	}
-	return uconn, nil
+	return uconn, tc, nil
 }

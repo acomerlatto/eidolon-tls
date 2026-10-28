@@ -97,7 +97,9 @@ type DestHeaders struct {
 // order :method, :authority, :scheme, :path, the headers of a navigation,
 // a fetch() and a stylesheet, image or script, over https:// and http://,
 // the client hints in lowercase and Connection: keep-alive over HTTP/1.1,
-// and 6 connections per host. Each call returns a new copy.
+// and 6 connections per host. Each call returns a new copy. Over TLS 1.2,
+// the server may renegotiate any number of times over HTTP/1.1, and never
+// over HTTP/2.
 //
 // Some positions of NavigationOrder were not captured: Content-Length,
 // Cache-Control, Origin and Content-Type, which a form submitted sends.
@@ -108,6 +110,13 @@ func Chrome156Linux() Profile {
 		Name: "chrome/156/linux",
 		ClientHello: func() (*utls.ClientHelloSpec, error) {
 			spec, err := utls.UTLSIdToSpec(utls.HelloChrome_155)
+			for _, e := range spec.Extensions {
+				if ri, ok := e.(*utls.RenegotiationInfoExtension); ok {
+					// Chrome renegotiates as often as the server asks
+					// (ssl_renegotiate_explicit); uTLS parrots it once.
+					ri.Renegotiation = utls.RenegotiateFreelyAsClient
+				}
+			}
 			return &spec, err
 		},
 		HTTP2: HTTP2Settings{

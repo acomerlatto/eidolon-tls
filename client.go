@@ -104,6 +104,7 @@ func New(opts ...Option) (HttpClient, error) {
 		IdleConnTimeout: cfg.idleConnTimeout,
 
 		DisableDecompression: cfg.disableDecompression,
+		StrictTLS12:          cfg.strictTLS12,
 	}
 	// A profile that cannot be applied fails here, not at the first
 	// request.

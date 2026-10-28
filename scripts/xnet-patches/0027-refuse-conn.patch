@@ -1,0 +1,21 @@
+diff --git a/internal/http2/eidolon_pool.go b/internal/http2/eidolon_pool.go
+index 7909755..6c73925 100644
+--- a/internal/http2/eidolon_pool.go
++++ b/internal/http2/eidolon_pool.go
+@@ -44,3 +44,16 @@ func (t *Transport) RoundTripPooled(req *http.Request, key string) (*http.Respon
+ 	}
+ 	return res, next, err
+ }
++
++// RefuseConn starts an HTTP/2 connection on c, preface, SETTINGS and
++// WINDOW_UPDATE included, and closes it at once with GOAWAY code, as
++// Chromium does with a session whose TLS HTTP/2 forbids
++// (ERR_HTTP2_INADEQUATE_TRANSPORT_SECURITY). c is closed.
++func (t *Transport) RefuseConn(c net.Conn, code ErrCode) {
++	cc, err := t.newClientConn(c, false, nil)
++	if err != nil {
++		c.Close()
++		return
++	}
++	cc.goAwayAndClose(code)
++}
