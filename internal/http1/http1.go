@@ -143,10 +143,11 @@ type Conn struct {
 	tap  tap
 	br   *bufio.Reader
 	sent int64 // bytes written by the last RoundTrip
-	// mixed: the last response had both Transfer-Encoding and
-	// Content-Length.
-	mixed bool
-	idle  chan error // the error of the idle watch, when one runs
+	// closing: the last response had both Transfer-Encoding and
+	// Content-Length, or was read from a normalized head; the connection
+	// ends with it.
+	closing bool
+	idle    chan error // the error of the idle watch, when one runs
 
 	// MaxHeaderBytes bounds the bytes read from the connection while the
 	// headers of a response, 1xx included, are read. Zero means
@@ -190,6 +191,18 @@ func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, err
 		c.tap.on = true
 		resp, err := http.ReadResponse(c.br, req)
 		c.tap.on = false
+		normalized := false
+		if err != nil && c.tap.left > 0 && !readFailed(err) {
+			// http.ReadResponse refuses framings RFC 9112 accepts. It
+			// fails after reading the whole head, so the body follows in
+			// c.br; the head is parsed again in the accepted form. The
+			// reader on top may take bytes past the response, so the
+			// connection ends with it.
+			if head, ok := normalizeHead(c.tap.rec); ok {
+				resp, err = http.ReadResponse(bufio.NewReader(io.MultiReader(bytes.NewReader(head), c.br)), req)
+				normalized = true
+			}
+		}
 		if err != nil {
 			if c.tap.left <= 0 {
 				return nil, fmt.Errorf("%w of %d bytes", ErrHeaderTooLarge, limit)
@@ -210,7 +223,7 @@ func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, err
 			}
 			continue
 		}
-		c.mixed = bothFramings(c.tap.rec)
+		c.closing = normalized || bothFramings(c.tap.rec)
 		return resp, nil
 	}
 }
@@ -218,8 +231,9 @@ func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, err
 // KeepAlive reports whether the connection may carry another request once
 // the body of resp reached EOF. A response with both Transfer-Encoding and
 // Content-Length is read by Transfer-Encoding and ends the connection (RFC
-// 9112 section 6.3, specification section 6.3).
-func (c *Conn) KeepAlive(resp *http.Response) bool { return !resp.Close && !c.mixed }
+// 9112 section 6.3, specification section 6.3), as does one whose head
+// was normalized (normalizeHead).
+func (c *Conn) KeepAlive(resp *http.Response) bool { return !resp.Close && !c.closing }
 
 // Watch starts watching the idle connection: dead runs if the server sends
 // anything or closes it. Reuse stops the watch.
@@ -311,6 +325,69 @@ func bothFramings(raw []byte) bool {
 		}
 	}
 	return te && cl
+}
+
+// normalizeHead returns the head at the start of raw in a form that
+// http.ReadResponse accepts, and false if a line is folded:
+//
+//   - a Content-Length list of one repeated value, "5, 5", becomes that
+//     value (RFC 9110 section 8.6);
+//   - a Transfer-Encoding whose last coding is chunked becomes "chunked",
+//     and the other codings stay in the body, as in Chrome;
+//   - a Transfer-Encoding whose last coding is not chunked is dropped, so
+//     the body is read until the server closes the connection (RFC 9112
+//     section 6.3).
+//
+// With a Transfer-Encoding, Content-Length is dropped: it does not frame
+// the body. Anything else is left for http.ReadResponse to refuse again,
+// the line that failed included when raw ends before the head does.
+func normalizeHead(raw []byte) ([]byte, bool) {
+	lines := bytes.Split(raw, []byte("\n"))
+	var out [][]byte
+	var lengths, codings []string
+	var te bool
+	for i, line := range lines {
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		if i == 0 {
+			out = append(out, line) // the status line
+			continue
+		}
+		if len(line) == 0 {
+			break
+		}
+		name, value, _ := bytes.Cut(line, []byte(":"))
+		switch strings.ToLower(string(name)) {
+		case "content-length":
+			for v := range strings.SplitSeq(string(value), ",") {
+				lengths = append(lengths, strings.Trim(v, " \t"))
+			}
+		case "transfer-encoding":
+			te = true
+			for v := range strings.SplitSeq(string(value), ",") {
+				if v = strings.Trim(v, " \t"); v != "" {
+					codings = append(codings, v)
+				}
+			}
+		default:
+			if line[0] == ' ' || line[0] == '\t' {
+				return nil, false // obsolete line folding: left to ReadResponse
+			}
+			out = append(out, line)
+		}
+	}
+	switch {
+	case te && len(codings) > 0 && strings.EqualFold(codings[len(codings)-1], "chunked"):
+		out = append(out, []byte("Transfer-Encoding: chunked"))
+	case te:
+		// Read until the connection closes.
+	case len(lengths) > 0:
+		if slices.ContainsFunc(lengths, func(v string) bool { return v != lengths[0] }) {
+			return nil, false // conflicting values
+		}
+		out = append(out, []byte("Content-Length: "+lengths[0]))
+	}
+	head := append(bytes.Join(out, []byte("\r\n")), "\r\n\r\n"...)
+	return head, true
 }
 
 // writeCounter counts the bytes written to the connection.

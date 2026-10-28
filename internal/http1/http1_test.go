@@ -403,6 +403,50 @@ func TestRoundTripHeaderLimits(t *testing.T) {
 
 var errAny = errors.New("any error")
 
+// Framings http.ReadResponse refuses and RFC 9112 accepts are read, and the
+// connection ends with the response. Conflicting ones stay malformed.
+func TestRoundTripFramings(t *testing.T) {
+	for _, tt := range []struct {
+		name, raw, body string // body "": ErrMalformedResponse
+	}{
+		{"Content-Length list", "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\nX-A: 1\r\n\r\nhelloEXTRA", "hello"},
+		{"Content-Length list and field", "HTTP/1.1 200 OK\r\nContent-Length: 5,5\r\nContent-Length: 5\r\n\r\nhello", "hello"},
+		{"Content-Length list conflict", "HTTP/1.1 200 OK\r\nContent-Length: 5, 6\r\n\r\nhello", ""},
+		{"Content-Length list empty", "HTTP/1.1 200 OK\r\nContent-Length: 5, \r\n\r\nhello", ""},
+		{"Content-Length list with a sign", "HTTP/1.1 200 OK\r\nContent-Length: +5, +5\r\n\r\nhello", ""},
+		{"coding then chunked", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", "hello"},
+		{"chunked then an empty element", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked,\r\n\r\n5\r\nhello\r\n0\r\n\r\n", "hello"},
+		{"chunked in a second field", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\n\r\n5\r\nhello\r\n0\r\n\r\n", "hello"},
+		{"last coding not chunked", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\nContent-Length: 2\r\n\r\nhello until close", "hello until close"},
+		{"only a coding", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nhello until close", "hello until close"},
+		{"empty Transfer-Encoding", "HTTP/1.1 200 OK\r\nTransfer-Encoding: \r\nContent-Length: 2\r\n\r\nhello until close", "hello until close"},
+		{"folded Transfer-Encoding", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip,\r\n chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", ""},
+		{"bad status line", "HTTP/1.1 OK\r\nContent-Length: 5, 5\r\n\r\nhello", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := http1.NewConn(rawResponse(t, tt.raw))
+			req, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
+			resp, err := c.RoundTrip(req, nil)
+			if tt.body == "" {
+				if !errors.Is(err, http1.ErrMalformedResponse) {
+					t.Fatalf("err = %v, want ErrMalformedResponse", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil || string(body) != tt.body || strings.Contains(tt.raw, "X-A: 1") && resp.Header.Get("X-A") != "1" {
+				t.Fatalf("body %q, %v; header %v", body, err, resp.Header)
+			}
+			if c.KeepAlive(resp) {
+				t.Error("connection kept after a normalized head")
+			}
+		})
+	}
+}
+
 // A response cut short by the connection is not malformed: closed, timed
 // out or closed on our side while the headers are read.
 func TestRoundTripLostNotMalformed(t *testing.T) {
