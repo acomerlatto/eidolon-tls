@@ -1950,6 +1950,21 @@ func (rl *clientConnReadLoop) cleanup() {
 	}
 	cc.closed = true
 
+	// [eidolon] The streams get the read error before the lock is released
+	// for MarkDead: a request body waiting for flow control would otherwise
+	// see cc.closed first and end its stream with errClientConnClosed,
+	// which does not say the connection was lost.
+	for _, cs := range cc.streams {
+		select {
+		case <-cs.peerClosed:
+			// The server closed the stream before closing the conn,
+			// so no need to interrupt it.
+		default:
+			cs.abortStreamLocked(err)
+		}
+	}
+	cc.cond.Broadcast()
+
 	// If the connection has never been used, and has been open for only a short time,
 	// leave it in the connection pool for a little while.
 	//
@@ -1971,16 +1986,6 @@ func (rl *clientConnReadLoop) cleanup() {
 		cc.mu.Lock()
 	}
 
-	for _, cs := range cc.streams {
-		select {
-		case <-cs.peerClosed:
-			// The server closed the stream before closing the conn,
-			// so no need to interrupt it.
-		default:
-			cs.abortStreamLocked(err)
-		}
-	}
-	cc.cond.Broadcast()
 	cc.mu.Unlock()
 
 	if !cc.seenSettings {

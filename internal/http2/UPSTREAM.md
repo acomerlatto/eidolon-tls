@@ -35,6 +35,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0015-http11-required-drains.patch`
 - `scripts/xnet-patches/0016-not-established-is-no-conn.patch`
 - `scripts/xnet-patches/0017-content-length-as-chrome.patch`
+- `scripts/xnet-patches/0018-lost-conn-read-error-first.patch`
 
 ## Excluded files
 
