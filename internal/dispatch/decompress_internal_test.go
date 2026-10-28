@@ -233,3 +233,16 @@ func TestDecompressReusesDecoders(t *testing.T) {
 		}
 	}
 }
+
+// A gzip body ends with its first member, as in Chrome: bytes after it,
+// another member included, are ignored. Pooled decoders keep the rule.
+func TestDecompressGzipOneMember(t *testing.T) {
+	for _, extra := range [][]byte{[]byte("\x00\x00 trailing junk"), compressed("gzip", "second")} {
+		for range 3 {
+			payload := append(compressed("gzip", "first"), extra...)
+			if got := decodeOnce(t, "gzip", payload); got != "first" {
+				t.Fatalf("extra %q: got %q", extra, got)
+			}
+		}
+	}
+}

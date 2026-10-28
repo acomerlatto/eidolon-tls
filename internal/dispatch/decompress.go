@@ -114,6 +114,11 @@ func (d *decodedBody) start() error {
 		} else if zr, err = gzip.NewReader(br); zr != nil {
 			dec = zr
 		}
+		if zr, _ := dec.(*gzip.Reader); zr != nil {
+			// One member, as Chrome's GzipSourceStream: bytes after it are
+			// ignored, not read as another member. Reset turns it back on.
+			zr.Multistream(false)
+		}
 	case isZlib(br):
 		// "deflate" is zlib (RFC 9110 section 8.4.1.2), but servers also
 		// send raw deflate; browsers accept both.
