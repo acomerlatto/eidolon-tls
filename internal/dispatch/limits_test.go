@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/net/http2/hpack"
 
@@ -138,6 +139,10 @@ func TestResponseHeaderLimitSet(t *testing.T) {
 	// The limit goes into a copy of DefaultH2.
 	if got := dispatch.DefaultH2.Settings[3]; got.ID != http2.SettingMaxHeaderListSize || got.Val != 262144 {
 		t.Fatalf("DefaultH2 changed: %v", got)
+	}
+	// Chromium's preface PING, which a test on the wire cannot wait for.
+	if dispatch.DefaultH2.PrefacePing != 10*time.Second {
+		t.Fatalf("DefaultH2.PrefacePing %v", dispatch.DefaultH2.PrefacePing)
 	}
 
 	// Above what the 32-bit setting announces, the limit is the largest

@@ -1,0 +1,371 @@
+diff --git a/internal/http2/eidolon_ping.go b/internal/http2/eidolon_ping.go
+new file mode 100644
+index 0000000..aa0eb27
+--- /dev/null
++++ b/internal/http2/eidolon_ping.go
+@@ -0,0 +1,79 @@
++package http2
++
++import (
++	"encoding/binary"
++	"time"
++)
++
++// prefacePing is the state of the preface PING of a connection
++// (Transport.PrefacePing), under ClientConn.mu.
++type prefacePing struct {
++	id       uint64  // of the last PING sent
++	data     [8]byte // payload of the PING in flight
++	inFlight bool    // sent, not acknowledged
++	checking bool    // a check of the PING pending
++}
++
++// readNow returns the time since cc was created, the clock of
++// ClientConn.lastRead.
++func (cc *ClientConn) readNow() time.Duration {
++	return time.Since(cc.born)
++}
++
++// maybePrefacePing sends a PING, as Chromium's MaybeSendPrefacePing, if
++// Transport.PrefacePing is set, nothing was read on cc for longer than it,
++// and no PING is in flight or being checked. The payload counts the PINGs
++// from 1. It is called with cc.wmu held, right after a HEADERS or a DATA
++// frame with payload, which the PING follows on the wire.
++func (cc *ClientConn) maybePrefacePing() {
++	d := cc.t.PrefacePing
++	if d == 0 {
++		return
++	}
++	cc.mu.Lock()
++	p := &cc.prefacePing
++	if p.checking || cc.readNow() <= time.Duration(cc.lastRead.Load())+d {
++		cc.mu.Unlock()
++		return
++	}
++	p.id++
++	binary.BigEndian.PutUint64(p.data[:], p.id)
++	p.inFlight, p.checking = true, true
++	data, sent := p.data, cc.readNow()
++	cc.mu.Unlock()
++	cc.fr.WritePing(false, data)
++	time.AfterFunc(d, func() { cc.checkPrefacePing(sent) })
++}
++
++// checkPrefacePing checks the PING in flight as Chromium's
++// CheckPingStatus, one PrefacePing after it was sent or after the last
++// check, at last: once acknowledged, it is done; if nothing was read since
++// then, or for PrefacePing, the connection is lost; otherwise it checks
++// again one PrefacePing after the last read.
++func (cc *ClientConn) checkPrefacePing(last time.Duration) {
++	d := cc.t.PrefacePing
++	cc.mu.Lock()
++	p := &cc.prefacePing
++	if !p.inFlight || cc.closed {
++		p.checking = false
++		cc.mu.Unlock()
++		return
++	}
++	now, read := cc.readNow(), time.Duration(cc.lastRead.Load())
++	if now > read+d || read < last {
++		p.checking = false
++		cc.mu.Unlock()
++		cc.closeForLostPing()
++		return
++	}
++	cc.mu.Unlock()
++	time.AfterFunc(read+d-now, func() { cc.checkPrefacePing(now) })
++}
++
++// prefacePingAcked records the acknowledgment of a PING with data. cc.mu
++// must be held.
++func (cc *ClientConn) prefacePingAcked(data [8]byte) {
++	if p := &cc.prefacePing; p.inFlight && data == p.data {
++		p.inFlight = false
++	}
++}
+diff --git a/internal/http2/eidolon_ping_test.go b/internal/http2/eidolon_ping_test.go
+new file mode 100644
+index 0000000..7442fb1
+--- /dev/null
++++ b/internal/http2/eidolon_ping_test.go
+@@ -0,0 +1,177 @@
++// Preface PING of Chromium (patch 0023).
++
++package http2
++
++import (
++	"context"
++	"encoding/binary"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"slices"
++	"testing"
++	"testing/synctest"
++	"time"
++)
++
++// pingConn returns a connection with PrefacePing of 10 s to a wireServer
++// with o, a function that sends a request with body (nil for a GET)
++// without waiting for it, and one that closes the connection and returns
++// the HEADERS, DATA with payload and PING frames the client sent, as
++// "H1", "D1" and "P1" with the stream or the PING counter. It runs in a
++// synctest bubble.
++func pingConn(t *testing.T, o wireOptions) (*ClientConn, func(body io.Reader) <-chan error, func() []string) {
++	client, server := net.Pipe()
++	seen := wireServer(server, o)
++	cc, err := (&Transport{PrefacePing: 10 * time.Second}).newClientConn(client, false, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	send := func(body io.Reader) <-chan error {
++		method := http.MethodGet
++		if body != nil {
++			method = http.MethodPost
++		}
++		req, _ := http.NewRequest(method, "https://example.com/", body)
++		done := make(chan error, 1)
++		go func() {
++			resp, err := cc.RoundTrip(req)
++			if err == nil {
++				resp.Body.Close()
++			}
++			done <- err
++		}()
++		synctest.Wait()
++		return done
++	}
++	frames := func() []string {
++		client.Close()
++		var got []string
++		for f := range seen {
++			switch {
++			case f.typ == FrameHeaders:
++				got = append(got, fmt.Sprint("H", f.stream))
++			case f.typ == FrameData && f.length > 0:
++				got = append(got, fmt.Sprint("D", f.stream))
++			case f.typ == FramePing && f.flags&FlagPingAck == 0:
++				got = append(got, fmt.Sprint("P", binary.BigEndian.Uint64(f.ping[:])))
++			}
++		}
++		return got
++	}
++	return cc, send, frames
++}
++
++// No PING on a connection read from in the last 10 s, new or not; after
++// 10 s without a read, a PING right after the next HEADERS, or after the
++// next DATA with payload, counting from 1; never after an empty DATA.
++func TestPrefacePing(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		_, send, frames := pingConn(t, wireOptions{})
++		<-send(nil) // new connection
++		<-send(nil)
++		time.Sleep(11 * time.Second)
++		<-send(nil)
++		<-send(nil) // a response was just read
++		time.Sleep(11 * time.Second)
++		<-send(nil)
++		// The HEADERS go right after a read, the DATA 11 s later.
++		pr, pw := io.Pipe()
++		done := send(pr)
++		time.Sleep(11 * time.Second)
++		pw.Write([]byte("body"))
++		pw.Close()
++		<-done
++		// An empty DATA, only ending the stream, sends none.
++		pr, pw = io.Pipe()
++		done = send(pr)
++		time.Sleep(11 * time.Second)
++		pw.Close()
++		<-done
++		want := []string{"H1", "H3", "H5", "P1", "H7", "H9", "P2", "H11", "D11", "P3", "H13"}
++		if got := frames(); !slices.Equal(got, want) {
++			t.Errorf("frames %v, want %v", got, want)
++		}
++	})
++}
++
++// Without a read for 10 s while the PING is unanswered, the connection is
++// lost; meanwhile, no other PING is sent.
++func TestPrefacePingLost(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		cc, send, frames := pingConn(t, wireOptions{silent: true})
++		time.Sleep(11 * time.Second)
++		first := send(nil) // t=11: PING
++		time.Sleep(4 * time.Second)
++		second := send(nil) // t=15: no PING, one is being checked
++		time.Sleep(5900 * time.Millisecond)
++		synctest.Wait()
++		if cc.State().Closed {
++			t.Fatal("closed at 20.9 s")
++		}
++		time.Sleep(200 * time.Millisecond)
++		synctest.Wait()
++		if !cc.State().Closed {
++			t.Fatal("open at 21.1 s")
++		}
++		for _, done := range []<-chan error{first, second} {
++			if err := <-done; err == nil {
++				t.Error("request answered on a lost connection")
++			}
++		}
++		if got, want := frames(), []string{"H1", "P1", "H3"}; !slices.Equal(got, want) {
++			t.Errorf("frames %v, want %v", got, want)
++		}
++	})
++}
++
++// An unanswered PING is checked again while the connection reads: it is
++// lost 10 s after the last read, not 10 s after the PING.
++func TestPrefacePingRead(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		cc, send, frames := pingConn(t, wireOptions{noPings: true})
++		time.Sleep(11 * time.Second)
++		<-send(nil) // t=11: PING, response read
++		time.Sleep(4 * time.Second)
++		<-send(nil) // t=15: response read
++		time.Sleep(9900 * time.Millisecond)
++		synctest.Wait()
++		if cc.State().Closed {
++			t.Fatal("closed at 24.9 s")
++		}
++		time.Sleep(200 * time.Millisecond)
++		synctest.Wait()
++		if !cc.State().Closed {
++			t.Fatal("open at 25.1 s")
++		}
++		if got, want := frames(), []string{"H1", "P1", "H3"}; !slices.Equal(got, want) {
++			t.Errorf("frames %v, want %v", got, want)
++		}
++	})
++}
++
++// Without PrefacePing, no PING however long the connection was not read.
++func TestNoPrefacePing(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		client, server := net.Pipe()
++		seen := wireServer(server, wireOptions{})
++		cc, err := (&Transport{}).newClientConn(client, false, nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		time.Sleep(time.Minute)
++		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/", nil)
++		resp, err := cc.RoundTrip(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		resp.Body.Close()
++		client.Close()
++		for f := range seen {
++			if f.typ == FramePing {
++				t.Error("PING sent")
++			}
++		}
++	})
++}
+diff --git a/internal/http2/eidolon_wire_test.go b/internal/http2/eidolon_wire_test.go
+index b3f6711..dfcf403 100644
+--- a/internal/http2/eidolon_wire_test.go
++++ b/internal/http2/eidolon_wire_test.go
+@@ -26,6 +26,7 @@ type wireFrame struct {
+ type wireOptions struct {
+ 	settings []Setting
+ 	noPings  bool   // leave the client's PINGs unanswered
++	silent   bool   // and the requests too
+ 	body     []byte // of each response, in DATA frames of 16384 bytes
+ }
+ 
+@@ -64,7 +65,7 @@ func wireServer(c net.Conn, o wireOptions) <-chan wireFrame {
+ 				}
+ 			case *PingFrame:
+ 				w.ping = f.Data
+-				if !f.IsAck() && !o.noPings {
++				if !f.IsAck() && !o.noPings && !o.silent {
+ 					writes <- func() { fr.WritePing(true, f.Data) }
+ 				}
+ 			case *WindowUpdateFrame:
+@@ -76,7 +77,7 @@ func wireServer(c net.Conn, o wireOptions) <-chan wireFrame {
+ 				end = f.StreamEnded()
+ 			}
+ 			seen <- w
+-			if end {
++			if end && !o.silent {
+ 				respond(writes, fr, h.StreamID, o.body)
+ 			}
+ 		}
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index cb83dcf..812916d 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -189,6 +189,9 @@ func (t *Transport) initConnPool() {
+ type ClientConn struct {
+ 	t             *Transport
+ 	chain         [8][]uint32          // [eidolon] open streams by urgency (PriorityChain), under mu
++	born          time.Time            // [eidolon] creation, the clock of lastRead
++	lastRead      atomic.Int64         // [eidolon] time.Duration since born of the last frame read
++	prefacePing   prefacePing          // [eidolon] Transport.PrefacePing, under mu
+ 	tconn         net.Conn             // usually *tls.Conn, except specialized impls
+ 	tlsState      *tls.ConnectionState // nil only for specialized impls
+ 	atomicReused  uint32               // whether conn is being reused; atomic
+@@ -542,6 +545,7 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook
+ 		reqHeaderMu:                 make(chan struct{}, 1),
+ 		lastActive:                  time.Now(),
+ 		internalStateHook:           internalStateHook,
++		born:                        time.Now(),
+ 	}
+ 	if t.transportTestHooks != nil {
+ 		t.transportTestHooks.newclientconn(cc)
+@@ -1604,6 +1608,7 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
+ 			cc.fr.WriteContinuation(streamID, endHeaders, chunk)
+ 		}
+ 	}
++	cc.maybePrefacePing() // [eidolon]
+ 	cc.bw.Flush()
+ 	return cc.werr
+ }
+@@ -1751,6 +1756,7 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
+ 			}
+ 			err = cc.fr.WriteData(cs.ID, sentEnd, data)
+ 			if err == nil {
++				cc.maybePrefacePing() // [eidolon] data is never empty here
+ 				// TODO(bradfitz): this flush is for latency, not bandwidth.
+ 				// Most requests won't need this. Make this opt-in or
+ 				// opt-out?  Use some heuristic on the body type? Nagel-like
+@@ -2079,6 +2085,7 @@ func (rl *clientConnReadLoop) run() error {
+ 	}
+ 	for {
+ 		f, err := cc.fr.ReadFrame()
++		cc.lastRead.Store(int64(cc.readNow())) // [eidolon] PrefacePing
+ 		if t != nil {
+ 			t.Reset(readIdleTimeout)
+ 		}
+@@ -2923,6 +2930,7 @@ func (rl *clientConnReadLoop) processPing(f *PingFrame) error {
+ 			close(c)
+ 			delete(cc.pings, f.Data)
+ 		}
++		cc.prefacePingAcked(f.Data) // [eidolon]
+ 		if cc.pendingResets > 0 {
+ 			// See clientStream.cleanupWriteRequest.
+ 			cc.pendingResets = 0
+diff --git a/internal/http2/transport_common.go b/internal/http2/transport_common.go
+index 7029cab..1d44e00 100644
+--- a/internal/http2/transport_common.go
++++ b/internal/http2/transport_common.go
+@@ -148,6 +148,14 @@ type Transport struct {
+ 	// MaxEncoderHeaderTableSize does not limit it.
+ 	ChromiumHPACK bool
+ 
++	// [eidolon] PrefacePing, if non-zero, sends a PING right after the
++	// HEADERS of a request, or a DATA frame with payload, when nothing has
++	// been read on the connection for longer than it, as Chromium's
++	// preface PING (10 s): at most one at a time, with a payload counting
++	// the PINGs from 1. If nothing is read for PrefacePing while it is
++	// unanswered, the connection is closed as lost.
++	PrefacePing time.Duration
++
+ 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
+ 	// initial settings frame. It is the size in bytes of the largest frame
+ 	// payload that the sender is willing to receive. If 0, no setting is

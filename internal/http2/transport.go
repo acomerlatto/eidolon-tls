@@ -189,6 +189,9 @@ func (t *Transport) initConnPool() {
 type ClientConn struct {
 	t             *Transport
 	chain         [8][]uint32          // [eidolon] open streams by urgency (PriorityChain), under mu
+	born          time.Time            // [eidolon] creation, the clock of lastRead
+	lastRead      atomic.Int64         // [eidolon] time.Duration since born of the last frame read
+	prefacePing   prefacePing          // [eidolon] Transport.PrefacePing, under mu
 	tconn         net.Conn             // usually *tls.Conn, except specialized impls
 	tlsState      *tls.ConnectionState // nil only for specialized impls
 	atomicReused  uint32               // whether conn is being reused; atomic
@@ -542,6 +545,7 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 		reqHeaderMu:                 make(chan struct{}, 1),
 		lastActive:                  time.Now(),
 		internalStateHook:           internalStateHook,
+		born:                        time.Now(),
 	}
 	if t.transportTestHooks != nil {
 		t.transportTestHooks.newclientconn(cc)
@@ -1604,6 +1608,7 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 			cc.fr.WriteContinuation(streamID, endHeaders, chunk)
 		}
 	}
+	cc.maybePrefacePing() // [eidolon]
 	cc.bw.Flush()
 	return cc.werr
 }
@@ -1751,6 +1756,7 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 			}
 			err = cc.fr.WriteData(cs.ID, sentEnd, data)
 			if err == nil {
+				cc.maybePrefacePing() // [eidolon] data is never empty here
 				// TODO(bradfitz): this flush is for latency, not bandwidth.
 				// Most requests won't need this. Make this opt-in or
 				// opt-out?  Use some heuristic on the body type? Nagel-like
@@ -2079,6 +2085,7 @@ func (rl *clientConnReadLoop) run() error {
 	}
 	for {
 		f, err := cc.fr.ReadFrame()
+		cc.lastRead.Store(int64(cc.readNow())) // [eidolon] PrefacePing
 		if t != nil {
 			t.Reset(readIdleTimeout)
 		}
@@ -2923,6 +2930,7 @@ func (rl *clientConnReadLoop) processPing(f *PingFrame) error {
 			close(c)
 			delete(cc.pings, f.Data)
 		}
+		cc.prefacePingAcked(f.Data) // [eidolon]
 		if cc.pendingResets > 0 {
 			// See clientStream.cleanupWriteRequest.
 			cc.pendingResets = 0

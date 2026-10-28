@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"testing"
+	"time"
 
 	eidolon "github.com/acomerlatto/eidolon-tls"
 	"github.com/acomerlatto/eidolon-tls/internal/lab"
@@ -217,6 +218,51 @@ func TestHTTP2HPACK(t *testing.T) {
 	}
 }
 
+// After PrefacePing without a read, the next request sends a PING with
+// payload 1 right after its HEADERS; without PrefacePing, none.
+func TestHTTP2PrefacePing(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ping time.Duration
+		want []string
+	}{
+		{"ping", 200 * time.Millisecond, []string{"HEADERS", "HEADERS", "PING"}},
+		{"none", 0, []string{"HEADERS", "HEADERS"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
+			c := newClient(t, srv, eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{PrefacePing: tt.ping}))
+			for i := range 2 {
+				if i == 1 {
+					time.Sleep(300 * time.Millisecond)
+				}
+				resp, err := c.Get("https://example.com/")
+				if err != nil {
+					t.Fatal(err)
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+			frames, err := srv.NextConn(t).H2Frames()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, f := range frames {
+				if f.Type == "HEADERS" || f.Type == "PING" && f.Flags&0x1 == 0 {
+					got = append(got, f.Type)
+					if f.Type == "PING" && f.Ping != [8]byte{7: 1} {
+						t.Errorf("PING payload %x, want 1", f.Ping)
+					}
+				}
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("frames %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // Settings the client cannot honor are refused by New.
 func TestWithHTTP2SettingsInvalid(t *testing.T) {
 	for _, s := range []eidolon.HTTP2Settings{
@@ -227,6 +273,7 @@ func TestWithHTTP2SettingsInvalid(t *testing.T) {
 		{Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingNoRFC7540Priorities, Value: 1}}, Priority: eidolon.HTTP2PriorityChromium},
 		{Priority: 7},
 		{HPACK: 7},
+		{PrefacePing: -1},
 	} {
 		if c, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithHTTP2Settings(s)); !errors.Is(err, eidolon.ErrConfig) || c != nil {
 			t.Errorf("New with %v = %v, %v; want ErrConfig", s, c, err)

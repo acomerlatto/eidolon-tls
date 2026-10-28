@@ -148,6 +148,14 @@ type Transport struct {
 	// MaxEncoderHeaderTableSize does not limit it.
 	ChromiumHPACK bool
 
+	// [eidolon] PrefacePing, if non-zero, sends a PING right after the
+	// HEADERS of a request, or a DATA frame with payload, when nothing has
+	// been read on the connection for longer than it, as Chromium's
+	// preface PING (10 s): at most one at a time, with a payload counting
+	// the PINGs from 1. If nothing is read for PrefacePing while it is
+	// unanswered, the connection is closed as lost.
+	PrefacePing time.Duration
+
 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
 	// initial settings frame. It is the size in bytes of the largest frame
 	// payload that the sender is willing to receive. If 0, no setting is

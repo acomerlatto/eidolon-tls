@@ -43,6 +43,7 @@ type H2Frame struct {
 	Priority  *Priority     // PRIORITY, or HEADERS with the PRIORITY flag
 	Headers   []HeaderField // HEADERS
 	Block     []byte        // HEADERS without CONTINUATION: the HPACK block
+	Ping      [8]byte       // PING
 }
 
 // H2Frames decodes the client preface and the frames received so far. A
@@ -79,6 +80,8 @@ func (c *Conn) H2Frames() ([]H2Frame, error) {
 			})
 		case *xhttp2.WindowUpdateFrame:
 			out.Increment = f.Increment
+		case *xhttp2.PingFrame:
+			out.Ping = f.Data
 		case *xhttp2.PriorityFrame:
 			out.Priority = &Priority{StreamDep: f.StreamDep, Exclusive: f.Exclusive, Weight: f.Weight}
 		case *xhttp2.MetaHeadersFrame:

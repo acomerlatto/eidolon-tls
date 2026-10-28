@@ -26,6 +26,7 @@ type wireFrame struct {
 type wireOptions struct {
 	settings []Setting
 	noPings  bool   // leave the client's PINGs unanswered
+	silent   bool   // and the requests too
 	body     []byte // of each response, in DATA frames of 16384 bytes
 }
 
@@ -64,7 +65,7 @@ func wireServer(c net.Conn, o wireOptions) <-chan wireFrame {
 				}
 			case *PingFrame:
 				w.ping = f.Data
-				if !f.IsAck() && !o.noPings {
+				if !f.IsAck() && !o.noPings && !o.silent {
 					writes <- func() { fr.WritePing(true, f.Data) }
 				}
 			case *WindowUpdateFrame:
@@ -76,7 +77,7 @@ func wireServer(c net.Conn, o wireOptions) <-chan wireFrame {
 				end = f.StreamEnded()
 			}
 			seen <- w
-			if end {
+			if end && !o.silent {
 				respond(writes, fr, h.StreamID, o.body)
 			}
 		}

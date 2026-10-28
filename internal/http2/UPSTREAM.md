@@ -40,6 +40,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0020-priority-chain.patch`
 - `scripts/xnet-patches/0021-max-data-frame-size.patch`
 - `scripts/xnet-patches/0022-chromium-hpack.patch`
+- `scripts/xnet-patches/0023-preface-ping.patch`
 
 ## Excluded files
 

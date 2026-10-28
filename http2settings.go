@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/acomerlatto/eidolon-tls/internal/dispatch"
 	"github.com/acomerlatto/eidolon-tls/internal/http2"
@@ -78,14 +79,21 @@ type HTTP2Settings struct {
 	MaxDataFrameSize uint32
 	// HPACK is how the header fields are encoded.
 	HPACK HTTP2HPACK
+	// PrefacePing, if non-zero, sends a PING right after the HEADERS of a
+	// request, or a DATA frame with payload, when nothing has been read on
+	// the connection for longer than it, as Chrome does after 10 s: at
+	// most one at a time, with a payload counting the PINGs from 1. If
+	// nothing is read for PrefacePing while it is unanswered, the
+	// connection is closed as lost, and its requests fail.
+	PrefacePing time.Duration
 }
 
 // WithHTTP2Settings sets the SETTINGS and the connection WINDOW_UPDATE of
 // each new HTTP/2 connection. By default they are those of Chrome 156:
 // HEADER_TABLE_SIZE 65536, ENABLE_PUSH 0, INITIAL_WINDOW_SIZE 6291456 and
 // MAX_HEADER_LIST_SIZE 262144, then a WINDOW_UPDATE of 15663105, with
-// HTTP2PriorityChromium, DATA frames of at most 16375 bytes and
-// HTTP2HPACKChromium.
+// HTTP2PriorityChromium, DATA frames of at most 16375 bytes,
+// HTTP2HPACKChromium and a PrefacePing of 10 s.
 //
 // The values announced are enforced: HEADER_TABLE_SIZE sizes the HPACK
 // decoder, INITIAL_WINDOW_SIZE the receive window of each stream, the
@@ -96,7 +104,8 @@ type HTTP2Settings struct {
 // return an error that wraps ErrConfig: a setting repeated, a value RFC
 // 9113 forbids, ENABLE_PUSH other than 0 (server push is refused),
 // INITIAL_WINDOW_SIZE or MAX_HEADER_LIST_SIZE of 0, a connection window
-// above 2^31-1, an unknown Priority or HPACK, or HTTP2PriorityChromium with
+// above 2^31-1, an unknown Priority or HPACK, a negative PrefacePing, or
+// HTTP2PriorityChromium with
 // NO_RFC7540_PRIORITIES 1, which says the client sends no such priority.
 // The settings are copied when WithHTTP2Settings is called.
 func WithHTTP2Settings(s HTTP2Settings) Option {
@@ -117,6 +126,10 @@ func h2Preface(s HTTP2Settings) (*dispatch.H2Preface, error) {
 		Settings:         make([]http2.Setting, len(s.Settings)),
 		ConnWindowUpdate: s.ConnectionWindowUpdate,
 		MaxDataFrameSize: s.MaxDataFrameSize,
+		PrefacePing:      s.PrefacePing,
+	}
+	if s.PrefacePing < 0 {
+		return nil, fmt.Errorf("negative PrefacePing %v", s.PrefacePing)
 	}
 	for i, st := range s.Settings {
 		pre.Settings[i] = http2.Setting{ID: http2.SettingID(st.ID), Val: st.Value}

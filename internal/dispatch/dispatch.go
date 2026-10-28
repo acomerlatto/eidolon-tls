@@ -668,6 +668,7 @@ func (t *Transport) h2t() *http2.Transport {
 		t.h2.PriorityChain = pre.PriorityChain
 		t.h2.MaxDataFrameSize = pre.MaxDataFrameSize
 		t.h2.ChromiumHPACK = pre.ChromiumHPACK
+		t.h2.PrefacePing = pre.PrefacePing
 	})
 	return t.h2
 }
