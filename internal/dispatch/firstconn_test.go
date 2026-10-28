@@ -411,3 +411,70 @@ func TestFirstConnCloseCancelsSharedDial(t *testing.T) {
 		t.Fatal("request still waiting for the dial after Close")
 	}
 }
+
+// A slow host, stuck in TCP or in the handshake, does not delay the
+// requests to another host: no lock is held while dialing (R5).
+func TestSlowHostDoesNotBlockOthers(t *testing.T) {
+	stalled, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stalled.Close()
+	go func() {
+		for {
+			c, err := stalled.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close() // accepted, never answered
+		}
+	}()
+	for _, stage := range []string{"tcp", "handshake"} {
+		for _, protos := range bothProtos {
+			t.Run(stage+"/"+protos[0], func(t *testing.T) {
+				srv := lab.Start(t, lab.Options{NextProtos: protos})
+				dialing := make(chan struct{})
+				tr := transport(srv)
+				tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					var d net.Dialer
+					if addr != "slow.example:443" {
+						return d.DialContext(ctx, network, srv.Addr)
+					}
+					close(dialing)
+					if stage == "tcp" {
+						<-ctx.Done()
+						return nil, ctx.Err()
+					}
+					return d.DialContext(ctx, network, stalled.Addr().String())
+				}
+				defer tr.Close()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				slow := make(chan error, 1)
+				go func() {
+					_, err := send(ctx, tr, http.MethodGet, "https://slow.example/", nil)
+					slow <- err
+				}()
+				<-dialing
+				if stage == "handshake" {
+					time.Sleep(100 * time.Millisecond) // into the handshake
+				}
+				fast, stop := context.WithTimeout(context.Background(), 2*time.Second)
+				defer stop()
+				if _, err := send(fast, tr, http.MethodGet, "https://example.com/", nil); err != nil {
+					t.Fatalf("the other host: %v", err)
+				}
+				select {
+				case err := <-slow:
+					t.Fatalf("slow host returned: %v", err)
+				default:
+				}
+				cancel()
+				if err := <-slow; !errors.Is(err, context.Canceled) {
+					t.Fatalf("slow host: %v, want context.Canceled", err)
+				}
+			})
+		}
+	}
+}
