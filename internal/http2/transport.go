@@ -374,17 +374,25 @@ func lingering(cs *clientStream) bool {
 
 // lingerForEndStream arms the fallback reset for a closed, fully read
 // response. When END_STREAM arrives first, the stream ends cleanly and
-// cleanupWriteRequest stops the timer.
-func (cs *clientStream) lingerForEndStream() {
+// cleanupWriteRequest stops the timer. It reports false, arming nothing,
+// when END_STREAM already came: the read loop closes peerClosed under
+// cc.mu, together with the body.
+func (cs *clientStream) lingerForEndStream() bool {
 	cc := cs.cc
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
+	select {
+	case <-cs.peerClosed:
+		return false
+	default:
+	}
 	if cs.lingerTimer == nil {
 		cs.lingerTimer = time.AfterFunc(endStreamLinger, func() {
 			cs.abortStream(errClosedResponseBody)
 		})
 		close(cs.lingerc)
 	}
+	return true
 }
 
 func (cs *clientStream) abortStream(err error) {
@@ -2406,10 +2414,11 @@ func (b transportResponseBody) Close() error {
 	// succeeded. Chromium never does: it does not treat a response as
 	// complete until END_STREAM arrives. So leave the stream for the read
 	// loop to retire, and return without waiting for it. From the sardanioss
-	// x/net fork, 6418c7d.
-	if cs.bodyDone.Load() && cs.endStreamSent.Load() && cs.bufPipe.Len() == 0 {
+	// x/net fork, 6418c7d. If END_STREAM already came, as for a body read to
+	// EOF, the usual path below ends the stream without a reset and waits
+	// until it is forgotten, so the next request finds the connection idle.
+	if cs.bodyDone.Load() && cs.endStreamSent.Load() && cs.bufPipe.Len() == 0 && cs.lingerForEndStream() {
 		cs.bufPipe.BreakWithError(errClosedResponseBody)
-		cs.lingerForEndStream()
 		return nil
 	}
 

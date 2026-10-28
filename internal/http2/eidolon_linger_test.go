@@ -19,9 +19,9 @@ type lingerReset struct {
 	code ErrCode
 }
 
-// lingerServer answers each request on c with a body of "ok" and no
-// END_STREAM, ever, and reports the RST_STREAM frames it receives.
-func lingerServer(c net.Conn) <-chan lingerReset {
+// lingerServer answers each request on c with a body of "ok", with
+// END_STREAM only if end, and reports the RST_STREAM frames it receives.
+func lingerServer(c net.Conn, end bool) <-chan lingerReset {
 	resets := make(chan lingerReset, 1)
 	go func() {
 		defer c.Close()
@@ -57,7 +57,7 @@ func lingerServer(c net.Conn) <-chan lingerReset {
 				id := f.StreamID
 				writes <- func() {
 					fr.WriteHeaders(HeadersFrameParam{StreamID: id, EndHeaders: true, BlockFragment: block.Bytes()})
-					fr.WriteData(id, false, []byte("ok"))
+					fr.WriteData(id, end, []byte("ok"))
 				}
 			case *RSTStreamFrame:
 				resets <- lingerReset{time.Now(), f.ErrCode}
@@ -74,7 +74,7 @@ func lingerRequest(t *testing.T, method string, body io.Reader) (time.Time, <-ch
 	t.Helper()
 	client, server := net.Pipe()
 	t.Cleanup(func() { client.Close() })
-	resets := lingerServer(server)
+	resets := lingerServer(server, false)
 	cc, err := (&Transport{}).newClientConn(client, false, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -135,5 +135,37 @@ func TestNoLingerWhileSending(t *testing.T) {
 		}
 	case <-time.After(endStreamLinger / 2):
 		t.Fatal("no RST_STREAM: the stream lingers with the upload unfinished")
+	}
+}
+
+// A body read to EOF has its END_STREAM: closing it takes the usual path,
+// which waits until the stream is forgotten, so the next request finds the
+// connection idle (GotConnInfo.WasIdle, which the dispatcher's replay rule
+// reads). The linger path returned at once.
+func TestClosedAfterEOFForgotten(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	lingerServer(server, true)
+	cc, err := (&Transport{}).newClientConn(client, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 50 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
+		resp, err := cc.RoundTrip(req)
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		if body, err := io.ReadAll(resp.Body); err != nil || string(body) != "ok" {
+			cancel()
+			t.Fatalf("body %q, %v", body, err)
+		}
+		resp.Body.Close()
+		cancel()
+		if n := cc.State().StreamsActive; n != 0 {
+			t.Fatalf("request %d: %d active streams after Close", i, n)
+		}
 	}
 }
