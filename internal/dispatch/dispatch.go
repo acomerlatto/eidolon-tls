@@ -66,8 +66,9 @@ type Transport struct {
 	// means http1.DefaultMaxHeaderBytes (256 KiB, as Chrome); above 2^32-2,
 	// the largest limit SETTINGS announces, it is that value.
 	MaxResponseHeaderBytes int64
-	// DisableDecompression delivers gzip and deflate bodies as they came,
-	// with Content-Encoding. By default they are decoded (decompress).
+	// DisableDecompression delivers gzip, deflate, br and zstd bodies as
+	// they came, with Content-Encoding. By default they are decoded
+	// (decompress).
 	DisableDecompression bool
 	// Protocols restricts the protocols offered by ALPN, and accepted
 	// from it, to tlsdial.ProtoHTTP1 and tlsdial.ProtoH2 as listed. Nil

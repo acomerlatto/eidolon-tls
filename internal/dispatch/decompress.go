@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 )
 
 // maxDrain bounds what is read after the end of a compressed stream, so the
@@ -19,16 +22,22 @@ const maxDrain = 4 << 10
 // Decoders keep tens of kilobytes of window and tables; they are reused
 // across responses instead of allocated for each one.
 var (
-	gzipPool  sync.Pool // *gzip.Reader
-	zlibPool  sync.Pool // io.ReadCloser that is a zlib.Resetter
-	flatePool sync.Pool // io.ReadCloser that is a flate.Resetter
-	bufioPool = sync.Pool{New: func() any { return bufio.NewReader(nil) }}
+	gzipPool   sync.Pool // *gzip.Reader
+	zlibPool   sync.Pool // io.ReadCloser that is a zlib.Resetter
+	flatePool  sync.Pool // io.ReadCloser that is a flate.Resetter
+	brotliPool sync.Pool // *brotli.Reader
+	zstdPool   sync.Pool // *zstd.Decoder
+	bufioPool  = sync.Pool{New: func() any { return bufio.NewReader(nil) }}
 )
 
-// decompress decodes a gzip or deflate body, as browsers do: the response
-// loses Content-Encoding and Content-Length, and Uncompressed is set. Other
-// codings, several codings, and responses without a body are left as they
-// came. Decoding starts at the first Read, so a malformed body is reported
+// zstdMaxWindow is the largest zstd window decoded, as Chrome's
+// ZstdSourceStream (window_log_max 23): a frame that needs more fails.
+const zstdMaxWindow = 8 << 20
+
+// decompress decodes a gzip, deflate, br or zstd body, as browsers do: the
+// response loses Content-Encoding and Content-Length, and Uncompressed is
+// set. Other codings, several codings, and responses without a body are
+// left as they came. Decoding starts at the first Read, so a malformed body is reported
 // by Read, never by RoundTrip.
 func decompress(resp *http.Response) {
 	if resp.Request != nil && resp.Request.Method == http.MethodHead ||
@@ -44,8 +53,8 @@ func decompress(resp *http.Response) {
 	switch strings.ToLower(strings.TrimSpace(values[0])) {
 	case "gzip", "x-gzip":
 		coding = "gzip"
-	case "deflate":
-		coding = "deflate"
+	case "deflate", "br", "zstd":
+		coding = strings.ToLower(strings.TrimSpace(values[0]))
 	default:
 		return
 	}
@@ -98,7 +107,8 @@ func (d *decodedBody) Read(p []byte) (int, error) {
 
 // start takes a decoder from the pools, or makes one. The decoder reads
 // through a pooled bufio.Reader: without an io.ByteReader the gzip and
-// flate decoders would allocate one of their own.
+// flate decoders would allocate one of their own. The zstd decoder works on
+// the reading goroutine, as Chrome's, without goroutines of its own.
 func (d *decodedBody) start() error {
 	br := bufioPool.Get().(*bufio.Reader)
 	br.Reset(d.body)
@@ -118,6 +128,20 @@ func (d *decodedBody) start() error {
 			// One member, as Chrome's GzipSourceStream: bytes after it are
 			// ignored, not read as another member. Reset turns it back on.
 			zr.Multistream(false)
+		}
+	case d.coding == "br":
+		pool = &brotliPool
+		if bdec, _ := pool.Get().(*brotli.Reader); bdec != nil {
+			dec, err = bdec, bdec.Reset(br)
+		} else {
+			dec = brotli.NewReader(br)
+		}
+	case d.coding == "zstd":
+		pool = &zstdPool
+		if zdec, _ := pool.Get().(*zstd.Decoder); zdec != nil {
+			dec, err = zdec, zdec.Reset(br)
+		} else if zdec, err = zstd.NewReader(br, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(zstdMaxWindow)); zdec != nil {
+			dec = zdec
 		}
 	case isZlib(br):
 		// "deflate" is zlib (RFC 9110 section 8.4.1.2), but servers also

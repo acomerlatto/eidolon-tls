@@ -12,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 )
 
 func compressed(coding, s string) []byte {
@@ -22,6 +25,10 @@ func compressed(coding, s string) []byte {
 		w = gzip.NewWriter(&b)
 	case "zlib":
 		w = zlib.NewWriter(&b)
+	case "br":
+		w = brotli.NewWriter(&b)
+	case "zstd":
+		w, _ = zstd.NewWriter(&b)
 	default:
 		w, _ = flate.NewWriter(&b, flate.DefaultCompression)
 	}
@@ -46,7 +53,7 @@ func decodeOnce(t testing.TB, header string, payload []byte) string {
 }
 
 var codings = []struct{ name, header string }{
-	{"gzip", "gzip"}, {"zlib", "deflate"}, {"raw", "deflate"},
+	{"gzip", "gzip"}, {"zlib", "deflate"}, {"raw", "deflate"}, {"br", "br"}, {"zstd", "zstd"},
 }
 
 // BenchmarkDecompress reports the memory of decoding one body; the copy
@@ -244,5 +251,51 @@ func TestDecompressGzipOneMember(t *testing.T) {
 				t.Fatalf("extra %q: got %q", extra, got)
 			}
 		}
+	}
+}
+
+// zstd decodes windows up to 8 MiB, as Chrome; a frame that needs more
+// fails on Read. The encoder shrinks the window to the content, so the
+// content is above 8 MiB.
+func TestDecompressZstdWindow(t *testing.T) {
+	text := strings.Repeat("window ", 9<<20/7)
+	for _, tt := range []struct {
+		window int
+		ok     bool
+	}{{8 << 20, true}, {16 << 20, false}} {
+		var b bytes.Buffer
+		w, err := zstd.NewWriter(&b, zstd.WithWindowSize(tt.window), zstd.WithSingleSegment(false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.WriteString(w, text)
+		w.Close()
+		resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Encoding": {"zstd"}}, Body: io.NopCloser(&b)}
+		decompress(resp)
+		got, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if tt.ok && (err != nil || string(got) != text) {
+			t.Errorf("window %d: %.20q, %v", tt.window, got, err)
+		}
+		if !tt.ok && !errors.Is(err, zstd.ErrWindowSizeExceeded) {
+			t.Errorf("window %d: error %v, want %v", tt.window, err, zstd.ErrWindowSizeExceeded)
+		}
+	}
+}
+
+// zstd decodes on the reading goroutine, as Chrome: no goroutine runs
+// while a body is read, pooled decoders included.
+func TestDecompressZstdNoGoroutines(t *testing.T) {
+	payload := compressed("zstd", strings.Repeat("goroutines ", 4<<20/11))
+	decodeOnce(t, "zstd", payload) // fills the pool
+	before := runtime.NumGoroutine()
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Encoding": {"zstd"}}, Body: io.NopCloser(bytes.NewReader(payload))}
+	decompress(resp)
+	defer resp.Body.Close()
+	if _, err := resp.Body.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if n := runtime.NumGoroutine(); n > before {
+		t.Fatalf("%d goroutines while reading, %d before", n, before)
 	}
 }

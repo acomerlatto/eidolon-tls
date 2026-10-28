@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/acomerlatto/eidolon-tls/internal/lab"
 )
 
@@ -142,14 +145,18 @@ func encode(coding string, s string) []byte {
 		w = zlib.NewWriter(&b)
 	case "raw":
 		w, _ = flate.NewWriter(&b, flate.DefaultCompression)
+	case "br":
+		w = brotli.NewWriter(&b)
+	case "zstd":
+		w, _ = zstd.NewWriter(&b)
 	}
 	io.WriteString(w, s)
 	w.Close()
 	return b.Bytes()
 }
 
-// gzip and deflate (zlib or raw) are decoded on both engines; other
-// codings, several codings and HEAD come back as they were sent.
+// gzip, deflate (zlib or raw), br and zstd are decoded on both engines;
+// other codings, several codings and HEAD come back as they were sent.
 func TestDecompression(t *testing.T) {
 	text := strings.Repeat("decoded text ", 100)
 	tests := []struct {
@@ -164,7 +171,9 @@ func TestDecompression(t *testing.T) {
 		{"case and space", " GZip ", encode("gzip", text), true, text},
 		{"deflate zlib", "deflate", encode("zlib", text), true, text},
 		{"deflate raw", "deflate", encode("raw", text), true, text},
-		{"br", "br", []byte("brotli bytes"), false, "brotli bytes"},
+		{"br", "br", encode("br", text), true, text},
+		{"zstd", "zstd", encode("zstd", text), true, text},
+		{"unknown", "compress", []byte("compressed bytes"), false, "compressed bytes"},
 		{"two codings", "gzip, br", []byte("layered"), false, "layered"},
 		{"identity", "", []byte(text), false, text},
 	}
