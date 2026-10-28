@@ -201,8 +201,9 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			conn, err := t.dial(ctx, tgt.Addr())
 			return conn, nil, err
 		}
+		fresh := false
 		for replays := 0; ; replays++ {
-			c, err := t.h1Get(ctx, key, dial)
+			c, err := t.h1Get(ctx, key, fresh, dial)
 			if err != nil {
 				closeBody(req)
 				return nil, err
@@ -211,7 +212,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			if again == nil || replays == maxDials {
 				return resp, err
 			}
-			req = again
+			req, fresh = again, true
 		}
 	}
 
@@ -224,6 +225,9 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 		GotConn: func(ci httptrace.GotConnInfo) { got = ci },
 	}))
 
+	// fresh: after a lost HTTP/1.1 connection, the replay goes to a new
+	// one (h1Acquire). A lost HTTP/2 connection leaves the pool by itself.
+	fresh := false
 	for dials, retries, replays := 0, 0, 0; ; {
 		got = httptrace.GotConnInfo{}
 		watched, body := watchBody(req)
@@ -291,7 +295,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 		}
 
 		dials++
-		c, err := t.connFor(ctx, tgt, key)
+		c, err := t.connFor(ctx, tgt, key, fresh)
 		if err != nil {
 			closeBody(req)
 			return nil, err
@@ -304,7 +308,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			return resp, err
 		}
 		replays++
-		req = again
+		req, fresh = again, true
 	}
 }
 

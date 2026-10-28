@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,6 +181,68 @@ func TestGoAwayErrorNotRetried(t *testing.T) {
 	}
 	if n := srv.Accepted(); n != 1 {
 		t.Fatalf("%d connections, want 1", n)
+	}
+}
+
+// After a lost idle HTTP/1.1 connection, the replay goes to a new
+// connection (section 6.3), not to another idle one, which is suspect too.
+// The other idle connections stay, also at the limit.
+func TestH1ReplayOnNewConnection(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		for _, limit := range []int{0, 2} {
+			name := map[bool]string{false: "tls", true: "plain"}[plain] + map[int]string{0: "", 2: "/at the limit"}[limit]
+			t.Run(name, func(t *testing.T) {
+				var dropped atomic.Bool
+				gate := make(chan struct{})
+				var arrived sync.WaitGroup
+				arrived.Add(2)
+				srv, base := h1Lab(t, plain, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/gate":
+						arrived.Done()
+						<-gate
+					case "/drop":
+						if dropped.CompareAndSwap(false, true) {
+							hijack(w, "", true) // closed with the request unanswered
+							return
+						}
+					}
+					io.WriteString(w, "ok")
+				}))
+				tr := transport(srv)
+				tr.MaxConnsPerHost = limit
+				defer tr.Close()
+
+				// Two idle connections.
+				var wg sync.WaitGroup
+				for range 2 {
+					wg.Go(func() { fetch(t, tr, base+"/gate") })
+				}
+				arrived.Wait()
+				close(gate)
+				wg.Wait()
+
+				if resp := fetch(t, tr, base+"/drop"); resp == nil {
+					t.FailNow()
+				}
+				if n := srv.Accepted(); n != 3 {
+					t.Fatalf("%d connections, want 3: the replay took an idle one", n)
+				}
+				// The dropped connection is closed and its slot taken by
+				// the replay; the other idle one stays.
+				closed := 0
+				for _, c := range []*lab.Conn{srv.NextConn(t), srv.NextConn(t)} {
+					select {
+					case <-c.Done():
+						closed++
+					case <-time.After(200 * time.Millisecond):
+					}
+				}
+				if closed != 1 {
+					t.Fatalf("%d of the first connections closed, want 1", closed)
+				}
+			})
+		}
 	}
 }
 

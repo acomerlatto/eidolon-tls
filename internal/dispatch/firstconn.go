@@ -33,14 +33,15 @@ type dialCall struct {
 }
 
 // connFor returns an HTTP/1.1 connection for a request of key, or nil
-// when an h2 connection was put in the pool.
+// when an h2 connection was put in the pool. With fresh, an HTTP/1.1
+// connection is a new one (h1Acquire).
 //
 // An origin learned as http/1.1 takes its connection from the HTTP/1.1
 // pool, which dials in parallel up to the limit. Otherwise the requests
 // wait for one shared dial, as Chrome does: with h2 they all multiplex on
 // it; with http/1.1 one waiter takes the connection and the others go to
 // the HTTP/1.1 pool.
-func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string) (*h1Conn, error) {
+func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string, fresh bool) (*h1Conn, error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -48,7 +49,7 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string) 
 	}
 	if t.protos[key] == tlsdial.ProtoHTTP1 || !t.allows(tlsdial.ProtoH2) {
 		t.mu.Unlock()
-		return t.h1Get(ctx, key, t.h1DialTLS(tgt, key))
+		return t.h1Get(ctx, key, fresh, t.h1DialTLS(tgt, key))
 	}
 	call := t.dialing[key]
 	if call == nil {
@@ -95,7 +96,7 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string) 
 	t.mu.Unlock()
 	// Another waiter took the http/1.1 connection: the origin is now
 	// learned as http/1.1.
-	return t.h1Get(ctx, key, t.h1DialTLS(tgt, key))
+	return t.h1Get(ctx, key, fresh, t.h1DialTLS(tgt, key))
 }
 
 // h1DialTLS returns the dial of the HTTP/1.1 pool for key. A connection

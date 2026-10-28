@@ -76,7 +76,13 @@ func (t *Transport) h1HostLocked(key string) *h1Host {
 
 // h1Acquire returns an idle connection of key, or nil with a slot to dial
 // a new one. At the limit it waits, in arrival order, until ctx ends.
-func (t *Transport) h1Acquire(ctx context.Context, key string) (*h1Conn, error) {
+//
+// fresh asks for a slot even when idle connections exist, for a replay
+// after a lost idle connection (section 6.3: on a new connection); the
+// others idle since then are suspect too. At the limit, an idle
+// connection is closed to make room, and a reused one handed over while
+// waiting is closed as well.
+func (t *Transport) h1Acquire(ctx context.Context, key string, fresh bool) (*h1Conn, error) {
 	t.mu.Lock()
 	for {
 		if t.closed {
@@ -84,18 +90,19 @@ func (t *Transport) h1Acquire(ctx context.Context, key string) (*h1Conn, error) 
 			return nil, ErrClosed
 		}
 		h := t.h1HostLocked(key)
-		if n := len(h.idle); n > 0 {
+		free := h.open < t.maxConnsPerHost()
+		if n := len(h.idle); n > 0 && !(fresh && free) {
 			c := h.idle[n-1]
 			h.idle = h.idle[:n-1]
 			t.mu.Unlock()
-			if c.Reuse() {
+			if c.Reuse() && !fresh {
 				return c, nil
 			}
 			c.close() // closed or written to by the server while idle
 			t.mu.Lock()
 			continue
 		}
-		if h.open < t.maxConnsPerHost() {
+		if free {
 			h.open++
 			t.mu.Unlock()
 			return nil, nil
@@ -106,7 +113,12 @@ func (t *Transport) h1Acquire(ctx context.Context, key string) (*h1Conn, error) 
 
 		select {
 		case c := <-w.grant:
-			return c, nil
+			if c == nil || !fresh {
+				return c, nil
+			}
+			c.close()
+			t.mu.Lock()
+			continue
 		case <-ctx.Done():
 		}
 		t.mu.Lock()
@@ -224,10 +236,10 @@ func (t *Transport) closeIdleH1() {
 }
 
 // h1Get returns a connection of key for one request: idle, or dialed in a
-// free slot. A dial that negotiates h2 pools the connection and returns
+// free slot; with fresh, always dialed (h1Acquire). A dial that negotiates h2 pools the connection and returns
 // nil, so the request goes back to the HTTP/2 pool.
-func (t *Transport) h1Get(ctx context.Context, key string, dial func(context.Context) (net.Conn, *tls.ConnectionState, error)) (*h1Conn, error) {
-	c, err := t.h1Acquire(ctx, key)
+func (t *Transport) h1Get(ctx context.Context, key string, fresh bool, dial func(context.Context) (net.Conn, *tls.ConnectionState, error)) (*h1Conn, error) {
+	c, err := t.h1Acquire(ctx, key, fresh)
 	if err != nil || c != nil {
 		return c, err
 	}
