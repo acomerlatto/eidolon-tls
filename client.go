@@ -78,6 +78,9 @@ func New(opts ...Option) (HttpClient, error) {
 		Order:       cfg.order,
 		Protocols:   alpn,
 
+		MaxConnsPerHost: cfg.maxConnsPerHost,
+		IdleConnTimeout: cfg.idleConnTimeout,
+
 		DisableDecompression: cfg.disableDecompression,
 	}
 	return &client{

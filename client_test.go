@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,6 +54,8 @@ func TestNewValidatesOptions(t *testing.T) {
 		{name: "nil pool", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithRootCAs(nil)}},
 		{name: "negative timeout", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithTimeout(-time.Second)}},
 		{name: "nil dialer", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithDialContext(nil)}},
+		{name: "zero connections per host", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithMaxConnsPerHost(0)}},
+		{name: "zero idle timeout", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithIdleConnTimeout(0)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -289,5 +292,35 @@ func TestCloseIdleConnectionsKeepsActiveResponse(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || string(body) != "first;second" {
 		t.Fatalf("body = %q, %v", body, err)
+	}
+}
+
+// The connection options reach the HTTP/1.1 pool: one connection serves
+// two concurrent requests in turn, and is closed once idle for the timeout.
+func TestConnectionOptions(t *testing.T) {
+	srv := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+	})})
+	c := newClient(t, srv, eidolon.WithMaxConnsPerHost(1), eidolon.WithIdleConnTimeout(300*time.Millisecond))
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			resp, err := c.Get("https://example.com/")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		})
+	}
+	wg.Wait()
+	if n := srv.Accepted(); n != 1 {
+		t.Fatalf("%d connections, want 1", n)
+	}
+	select {
+	case <-srv.NextConn(t).Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("idle connection kept open")
 	}
 }

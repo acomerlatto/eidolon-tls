@@ -32,6 +32,9 @@ type config struct {
 
 	disableDecompression bool
 
+	maxConnsPerHost int
+	idleConnTimeout time.Duration
+
 	order    *order.Order
 	spelling http1.Spelling
 
@@ -87,6 +90,33 @@ func WithDialContext(dial func(ctx context.Context, network, addr string) (net.C
 			return errors.New("WithDialContext: nil function")
 		}
 		c.dialContext = dial
+		return nil
+	}
+}
+
+// WithMaxConnsPerHost bounds the HTTP/1.1 connections per origin; requests
+// over the limit wait for a connection, each until its own context ends.
+// The default is 6, as Chrome. HTTP/2 uses one connection per origin.
+func WithMaxConnsPerHost(n int) Option {
+	return func(c *config) error {
+		if n <= 0 {
+			return fmt.Errorf("WithMaxConnsPerHost: %d is not positive", n)
+		}
+		c.maxConnsPerHost = n
+		return nil
+	}
+}
+
+// WithIdleConnTimeout bounds how long an idle HTTP/1.1 connection is kept
+// for reuse. The default is 300 seconds, as Chrome for a connection that
+// served a request. HTTP/2 connections are kept until the server or
+// CloseIdleConnections closes them, as Chrome does.
+func WithIdleConnTimeout(d time.Duration) Option {
+	return func(c *config) error {
+		if d <= 0 {
+			return errors.New("WithIdleConnTimeout: duration not positive")
+		}
+		c.idleConnTimeout = d
 		return nil
 	}
 }
