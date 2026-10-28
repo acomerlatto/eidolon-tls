@@ -303,6 +303,11 @@ func (t *Transport) h1Get(ctx context.Context, key string, fresh bool, dial func
 // was lost and the request can be replayed.
 func (t *Transport) sendH1(c *h1Conn, req *http.Request) (resp *http.Response, again *http.Request, err error) {
 	ctx := req.Context()
+	if h, ok := ctx.Value(h1HeaderKey{}).(http.Header); ok {
+		r := *req
+		r.Header = h
+		req = &r
+	}
 	watched, body := watchBody(req)
 	stop := context.AfterFunc(ctx, c.close)
 	resp, err = c.RoundTrip(watched, t.Spelling)
@@ -350,6 +355,10 @@ func (t *Transport) sendH1(c *h1Conn, req *http.Request) (resp *http.Response, a
 	resp.Body = &h1Body{ReadCloser: resp.Body, c: c, stop: stop, keep: keep, ctx: ctx}
 	return resp, nil, nil
 }
+
+// h1HeaderKey carries the header of a request over HTTP/1.1 when it
+// differs from the one over HTTP/2 (browser.Request).
+type h1HeaderKey struct{}
 
 // finishH1 ends the use of c by one response: back to the pool if it may
 // be reused and the context did not close it, closed otherwise.

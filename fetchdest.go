@@ -30,7 +30,9 @@ const (
 )
 
 // WithFetchDest returns a context that sends a request as the destination
-// dest. A request with a destination Sec-Fetch-Dest cannot send fails.
+// dest. With a profile, a request with a destination Sec-Fetch-Dest cannot
+// send fails before it is sent. A redirect keeps the destination of the
+// first request, as Chrome does.
 //
 // Without it, the destination comes from the request: its Sec-Fetch-Dest,
 // then its Sec-Fetch-Mode (navigate is a FetchDocument, any other mode a

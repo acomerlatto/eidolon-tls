@@ -15,6 +15,7 @@ import (
 
 	utls "github.com/acomerlatto/utls"
 
+	"github.com/acomerlatto/eidolon-tls/internal/browser"
 	"github.com/acomerlatto/eidolon-tls/internal/dispatch"
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/order"
@@ -40,7 +41,8 @@ type config struct {
 	spelling http1.Spelling
 	h2       *dispatch.H2Preface
 
-	profile *profile // WithProfile, applied by New under the options above
+	profile *profile         // WithProfile, applied by New under the options above
+	headers *browser.Headers // from the profile
 
 	protocols    []Protocol // WithProtocols; nil if not used
 	force        int        // bits 1<<HTTP1 and 1<<HTTP2 of WithForceHTTP*

@@ -96,6 +96,7 @@ func New(opts ...Option) (HttpClient, error) {
 		DialContext: cfg.dialContext,
 		Spelling:    cfg.spelling,
 		Order:       cfg.order,
+		Headers:     cfg.headers,
 		Protocols:   alpn,
 		H2:          cfg.h2,
 

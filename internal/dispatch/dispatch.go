@@ -30,6 +30,7 @@ import (
 
 	utls "github.com/acomerlatto/utls"
 
+	"github.com/acomerlatto/eidolon-tls/internal/browser"
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/http2"
 	"github.com/acomerlatto/eidolon-tls/internal/order"
@@ -60,6 +61,9 @@ type Transport struct {
 	// request (the keys of Header, then the context) in precedence
 	// (order.Merge). Nil leaves the request's.
 	Order *order.Order
+	// Headers are the headers of the profile, added to each request
+	// outside exact mode, with their order below Order. Nil adds none.
+	Headers *browser.Headers
 	// MaxResponseHeaderBytes bounds the headers of a response: over
 	// HTTP/1.1 the bytes read with them, 1xx included; over HTTP/2 the
 	// header list, as announced in SETTINGS_MAX_HEADER_LIST_SIZE. Zero
@@ -155,11 +159,22 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	// The order keys of Header are never sent; the order travels to the
 	// engines in the context.
-	merged := order.Merge(order.FromHeader(req.Header), order.FromContext(req.Context()), t.Order, defaultOrder)
-	if merged != nil {
-		sent = *sent.WithContext(order.WithOrder(req.Context(), *merged))
-	}
 	sent.Header = redirectHeader(req, order.WithoutKeys(req.Header))
+	ctx := req.Context()
+	var profileOrder *order.Order
+	if t.Headers != nil && order.ExactFromContext(ctx) == nil {
+		pr, err := t.Headers.Apply(&sent)
+		if err != nil {
+			closeBody(req)
+			return nil, fmt.Errorf("eidolon: %w", err)
+		}
+		sent.Header, profileOrder = pr.Header, pr.Order
+		ctx = context.WithValue(ctx, h1HeaderKey{}, pr.H1Header)
+	}
+	if merged := order.Merge(order.FromHeader(req.Header), order.FromContext(ctx), t.Order, profileOrder, defaultOrder); merged != nil {
+		ctx = order.WithOrder(ctx, *merged)
+	}
+	sent = *sent.WithContext(ctx)
 	if q := target.EncodeQuery(req.URL.RawQuery); q != req.URL.RawQuery {
 		u := *req.URL
 		u.RawQuery = q

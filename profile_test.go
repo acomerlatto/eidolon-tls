@@ -89,8 +89,15 @@ func TestChrome156Linux(t *testing.T) {
 	p.HTTP2.Settings[0].Value = 1
 	p.PseudoOrder[0] = ":path"
 	p.H1Spelling[0] = "SEC-CH-UA"
+	p.Headers[0].Value = "x"
+	p.InsecureHeaders[0].Value = "x"
+	p.Dests[eidolon.FetchDocument] = eidolon.DestHeaders{Mode: "cors"}
+	p.NavigationOrder[0] = "x"
+	p.SubresourceOrder[0] = "x"
 	q := eidolon.Chrome156Linux()
-	if q.HTTP2.Settings[0].Value != 65536 || q.PseudoOrder[0] != ":method" || q.H1Spelling[0] != "sec-ch-ua" {
+	if q.HTTP2.Settings[0].Value != 65536 || q.PseudoOrder[0] != ":method" || q.H1Spelling[0] != "sec-ch-ua" ||
+		q.Headers[0].Value == "x" || q.InsecureHeaders[0].Value == "x" || q.Dests[eidolon.FetchDocument].Mode != "navigate" ||
+		q.NavigationOrder[0] != "host" || q.SubresourceOrder[0] != "host" {
 		t.Fatalf("copies share state: %+v", q)
 	}
 	spec, err := q.ClientHello()
@@ -235,9 +242,19 @@ func TestProfileCopied(t *testing.T) {
 	opt := eidolon.WithProfile(p)
 	p.HTTP2.Settings[0].Value = 1
 	p.PseudoOrder[0] = ":path"
+	p.Headers[3].Value = "changed"
+	p.Dests[eidolon.FetchDocument] = eidolon.DestHeaders{Mode: "changed"}
+	p.NavigationOrder[4] = "accept"
 	settings, _, pseudo, _ := h2Preface(t, nil, opt)
 	if settings[0].Val != 65536 || pseudo[0] != ":method" {
 		t.Fatalf("SETTINGS %v, pseudo-headers %v", settings, pseudo)
+	}
+	srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
+	profileGet(t, profileClient(t, srv, opt), "https://example.com/", nil)
+	fields := h2Fields(t, srv.NextConn(t))
+	if fields[4].Name != "sec-ch-ua" || !slices.Contains(fields, lab.HeaderField{Name: "user-agent", Value: chromeUA}) ||
+		!slices.Contains(fields, lab.HeaderField{Name: "sec-fetch-mode", Value: "navigate"}) {
+		t.Fatalf("fields %v", fields)
 	}
 }
 
@@ -250,6 +267,18 @@ func TestProfileInvalid(t *testing.T) {
 		func(p *eidolon.Profile) { p.PseudoOrder = []string{"method"} },
 		func(p *eidolon.Profile) { p.PseudoOrder = []string{":"} },
 		func(p *eidolon.Profile) { p.H1Spelling = []string{"bad name"} },
+		func(p *eidolon.Profile) {
+			p.Headers = append(p.Headers, eidolon.HeaderField{Name: "bad name", Value: "1"})
+		},
+		func(p *eidolon.Profile) { p.InsecureHeaders[0].Value = "a\nb" },
+		func(p *eidolon.Profile) { p.Dests["xhr"] = eidolon.DestHeaders{Mode: "cors"} },
+		func(p *eidolon.Profile) { p.Dests[eidolon.FetchDest("font")] = eidolon.DestHeaders{} },
+		func(p *eidolon.Profile) {
+			p.Dests[eidolon.FetchEmpty] = eidolon.DestHeaders{Mode: "cors", Accept: "a\rb"}
+		},
+		func(p *eidolon.Profile) { p.NavigationOrder = append(p.NavigationOrder, "bad name") },
+		func(p *eidolon.Profile) { p.SubresourceOrder = []string{""} },
+		func(p *eidolon.Profile) { p.H1Connection = "a\nb" },
 		func(p *eidolon.Profile) { p.MaxConnsPerHost = -1 },
 		func(p *eidolon.Profile) { p.IdleConnTimeout = -1 },
 	} {
