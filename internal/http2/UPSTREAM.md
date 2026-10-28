@@ -37,6 +37,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0017-content-length-as-chrome.patch`
 - `scripts/xnet-patches/0018-lost-conn-read-error-first.patch`
 - `scripts/xnet-patches/0019-caller-settings.patch`
+- `scripts/xnet-patches/0020-priority-chain.patch`
 
 ## Excluded files
 

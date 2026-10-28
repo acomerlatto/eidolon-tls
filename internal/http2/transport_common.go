@@ -119,6 +119,15 @@ type Transport struct {
 	// validates them.
 	Settings []Setting
 
+	// [eidolon] PriorityChain sends the HEADERS of each request with the
+	// PRIORITY flag as Chromium does (Http2PriorityDependencies): the
+	// weight follows the urgency of the priority field the request sends
+	// (RFC 9218, 3 without one), and the stream depends exclusively on the
+	// last open stream of that urgency, or else of the closest more urgent
+	// one, or else on stream 0. A stream leaves the chain when the client
+	// forgets it, once both sides ended it.
+	PriorityChain bool
+
 	// [eidolon] ConnWindowUpdate is, with Settings, the increment of the
 	// WINDOW_UPDATE sent on the connection right after SETTINGS; 0 sends
 	// none. The connection receive window is 65535 plus it.

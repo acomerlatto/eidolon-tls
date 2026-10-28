@@ -188,6 +188,7 @@ func (t *Transport) initConnPool() {
 // Deprecated: Use [http.ClientConn] instead.
 type ClientConn struct {
 	t             *Transport
+	chain         [8][]uint32          // [eidolon] open streams by urgency (PriorityChain), under mu
 	tconn         net.Conn             // usually *tls.Conn, except specialized impls
 	tlsState      *tls.ConnectionState // nil only for specialized impls
 	atomicReused  uint32               // whether conn is being reused; atomic
@@ -284,6 +285,9 @@ type ClientConn struct {
 // is created for each Transport.RoundTrip call.
 type clientStream struct {
 	cc *ClientConn
+
+	urgency  uint8         // [eidolon] PriorityChain
+	priority PriorityParam // [eidolon] sent in HEADERS
 
 	// Fields of Request that we may access even after the response body is closed.
 	ctx       context.Context
@@ -1246,6 +1250,12 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 		return err
 	}
 	cc.addStreamLocked(cs) // assigns stream ID
+	if cc.t.PriorityChain {
+		// [eidolon] Under reqHeaderMu: the streams enter the chain in the
+		// order their HEADERS are written.
+		cs.urgency = chainUrgency(req)
+		cc.chainAddLocked(cs)
+	}
 	if isConnectionCloseRequest(req) {
 		cc.doNotReuse = true
 	}
@@ -1404,7 +1414,7 @@ func (cs *clientStream) encodeAndWriteHeaders(req *http.Request) error {
 		// done.
 		cs.endStreamSent.Store(true)
 	}
-	err = cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs)
+	err = cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs, cs.priority)
 	traceWroteHeaders(cs.trace)
 	return err
 }
@@ -1571,7 +1581,7 @@ func (cc *ClientConn) awaitOpenSlotForStreamLocked(cs *clientStream) error {
 }
 
 // requires cc.wmu be held
-func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize int, hdrs []byte) error {
+func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize int, hdrs []byte, prio PriorityParam) error {
 	first := true // first frame written (HEADERS is first, then CONTINUATION)
 	for len(hdrs) > 0 && cc.werr == nil {
 		chunk := hdrs
@@ -1586,6 +1596,7 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 				BlockFragment: chunk,
 				EndStream:     endStream,
 				EndHeaders:    endHeaders,
+				Priority:      prio, // [eidolon] PriorityChain
 			})
 			first = false
 		} else {
@@ -1779,7 +1790,7 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 	// with an empty DATA frame.
 	cs.endStreamSent.Store(true) // [eidolon] see encodeAndWriteHeaders
 	if len(trls) > 0 {
-		err = cc.writeHeaders(cs.ID, true, maxFrameSize, trls)
+		err = cc.writeHeaders(cs.ID, true, maxFrameSize, trls, PriorityParam{})
 	} else {
 		err = cc.fr.WriteData(cs.ID, true, nil)
 	}
@@ -1894,6 +1905,7 @@ func (cc *ClientConn) forgetStreamID(id uint32) {
 	cc.mu.Lock()
 	slen := len(cc.streams)
 	delete(cc.streams, id)
+	cc.chainForgetLocked(id) // [eidolon] PriorityChain
 	if len(cc.streams) != slen-1 {
 		panic("forgetting unknown stream id")
 	}
