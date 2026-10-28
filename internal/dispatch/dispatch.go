@@ -432,8 +432,17 @@ func rewindBody(req *http.Request) (*http.Request, bool) {
 	return &r, true
 }
 
+// dialTimeout bounds a TLS dial, TCP and handshake, as Chrome bounds the
+// handshake (kSSLHandshakeTimeout, 30 s): a server that accepts and never
+// answers does not hold a request without deadline, nor its slot. A
+// variable for the tests.
+var dialTimeout = 30 * time.Second
+
 // dialTLS opens a TLS connection to tgt and records its protocol for key.
+// It stops at ctx or after dialTimeout.
 func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) (*utls.UConn, error) {
+	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
 	cfg := t.TLS
 	if cfg == nil {
 		cfg = &utls.Config{}

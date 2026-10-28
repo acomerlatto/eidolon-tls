@@ -114,3 +114,57 @@ func TestSharedDialAbandonedFreesSlot(t *testing.T) {
 		t.Fatalf("%d slots taken, want 0", n)
 	}
 }
+
+// A server that accepts the connection and never answers the ClientHello
+// fails the request after dialTimeout, even when its context has no
+// deadline: on the shared dial and on the dial of the HTTP/1.1 pool, which
+// runs in the context of the request.
+func TestDialTimeout(t *testing.T) {
+	defer func(d time.Duration) { dialTimeout = d }(dialTimeout)
+	dialTimeout = 200 * time.Millisecond
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+	for _, tt := range []struct {
+		name   string
+		protos []string
+	}{
+		{"shared dial", nil},
+		{"http/1.1 pool", []string{"http/1.1"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := &Transport{
+				Spec: func() (*utls.ClientHelloSpec, error) {
+					spec, err := utls.UTLSIdToSpec(utls.HelloChrome_155)
+					return &spec, err
+				},
+				Protocols: tt.protos,
+				DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+					var d net.Dialer
+					return d.DialContext(ctx, network, ln.Addr().String())
+				},
+			}
+			defer tr.Close()
+			req, _ := http.NewRequest("GET", "https://example.com/", nil)
+			start := time.Now()
+			_, err := tr.RoundTrip(req)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("err = %v, want DeadlineExceeded", err)
+			}
+			if d := time.Since(start); d > 5*time.Second {
+				t.Fatalf("returned after %v", d)
+			}
+		})
+	}
+}

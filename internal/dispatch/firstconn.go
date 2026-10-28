@@ -4,19 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
-	"time"
 
 	utls "github.com/acomerlatto/utls"
 
 	"github.com/acomerlatto/eidolon-tls/internal/target"
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
-
-// sharedDialTimeout bounds a dial shared by the requests waiting for the
-// first connection of a key. The dial belongs to the Transport, not to the
-// request that started it, so it has its own deadline; each waiter stops at
-// its own context.
-const sharedDialTimeout = 30 * time.Second
 
 // dialCall is a dial shared by the requests of one key while its protocol
 // is unknown or h2 without a usable connection.
@@ -139,9 +132,10 @@ func (t *Transport) addH2(key string, conn *utls.UConn) error {
 // the pool even if every waiter left; an http/1.1 connection nobody waits
 // for is closed (R2).
 func (t *Transport) sharedDial(call *dialCall, tgt target.Target, key string) {
-	ctx, cancel := context.WithTimeout(t.dialContext(), sharedDialTimeout)
-	defer cancel()
-	conn, err := t.dialTLS(ctx, tgt, key)
+	// The dial belongs to the Transport, not to the request that started
+	// it: Close cancels it, dialTimeout bounds it, and each waiter stops
+	// at its own context.
+	conn, err := t.dialTLS(t.dialContext(), tgt, key)
 	if err == nil && conn.ConnectionState().NegotiatedProtocol == tlsdial.ProtoH2 {
 		err = t.addH2(key, conn)
 		conn = nil
