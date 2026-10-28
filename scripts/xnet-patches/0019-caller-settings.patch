@@ -1,0 +1,407 @@
+diff --git a/internal/http2/eidolon_settings.go b/internal/http2/eidolon_settings.go
+new file mode 100644
+index 0000000..5c6611b
+--- /dev/null
++++ b/internal/http2/eidolon_settings.go
+@@ -0,0 +1,42 @@
++package http2
++
++import (
++	"errors"
++	"fmt"
++)
++
++// CheckSettings validates the SETTINGS of Transport.Settings and the
++// ConnWindowUpdate sent with them: no setting twice, values allowed by RFC
++// 9113 section 6.5.2, ENABLE_PUSH never 1, since the client refuses server
++// push, a stream window and a header list limit above zero, and a
++// connection window within 2^31-1.
++func CheckSettings(settings []Setting, connWindowUpdate uint32) error {
++	seen := make(map[SettingID]bool, len(settings))
++	for _, s := range settings {
++		if seen[s.ID] {
++			return fmt.Errorf("http2: setting %v repeated", s.ID)
++		}
++		seen[s.ID] = true
++		if err := s.Valid(); err != nil {
++			return fmt.Errorf("http2: invalid %v: %w", s, err)
++		}
++		switch s.ID {
++		case SettingEnablePush:
++			if s.Val != 0 {
++				return errors.New("http2: ENABLE_PUSH must be 0: server push is refused")
++			}
++		case SettingInitialWindowSize, SettingMaxHeaderListSize:
++			if s.Val == 0 {
++				return fmt.Errorf("http2: %v must be above 0", s.ID)
++			}
++		case SettingNoRFC7540Priorities:
++			if s.Val > 1 {
++				return fmt.Errorf("http2: invalid %v", s)
++			}
++		}
++	}
++	if connWindowUpdate > 1<<31-1-initialWindowSize {
++		return fmt.Errorf("http2: connection window update %d above 2^31-1-%d", connWindowUpdate, initialWindowSize)
++	}
++	return nil
++}
+diff --git a/internal/http2/eidolon_settings_test.go b/internal/http2/eidolon_settings_test.go
+new file mode 100644
+index 0000000..fb8249d
+--- /dev/null
++++ b/internal/http2/eidolon_settings_test.go
+@@ -0,0 +1,244 @@
++// SETTINGS and connection window given by the caller (patch 0019).
++
++package http2
++
++import (
++	"bytes"
++	"io"
++	"net"
++	"net/http"
++	"slices"
++	"strings"
++	"sync"
++	"testing"
++
++	"github.com/acomerlatto/eidolon-tls/internal/http2/hpack"
++)
++
++// prefaceSeen is what the client sent before its first request.
++type prefaceSeen struct {
++	settings []Setting
++	updates  []uint32 // WINDOW_UPDATE increments on the connection
++}
++
++// settingsServer reads the preface of c, reports it, and answers the first
++// request with respond, which writes frames on stream 1, then a PING. done
++// is closed when the PING is acknowledged, so the client processed every
++// frame respond wrote, or when the connection ends.
++func settingsServer(c net.Conn, respond func(fr *Framer), done chan<- struct{}) <-chan prefaceSeen {
++	seen := make(chan prefaceSeen, 1)
++	var once sync.Once
++	finish := func() { once.Do(func() { close(done) }) }
++	go func() {
++		defer finish()
++		defer c.Close()
++		if _, err := io.ReadFull(c, make([]byte, len(ClientPreface))); err != nil {
++			return
++		}
++		fr := NewFramer(c, c)
++		// net.Pipe has no buffer: write from another goroutine, in order.
++		writes := make(chan func(), 8)
++		defer close(writes)
++		go func() {
++			for w := range writes {
++				w()
++			}
++		}()
++		writes <- func() { fr.WriteSettings() }
++		var p prefaceSeen
++		for {
++			f, err := fr.ReadFrame()
++			if err != nil {
++				return
++			}
++			switch f := f.(type) {
++			case *SettingsFrame:
++				if !f.IsAck() {
++					f.ForeachSetting(func(s Setting) error { p.settings = append(p.settings, s); return nil })
++					writes <- func() { fr.WriteSettingsAck() }
++				}
++			case *WindowUpdateFrame:
++				if f.StreamID == 0 {
++					p.updates = append(p.updates, f.Increment)
++				}
++			case *HeadersFrame:
++				seen <- p
++				writes <- func() { respond(fr); fr.WritePing(false, [8]byte{1}) }
++			case *PingFrame:
++				if f.IsAck() {
++					finish()
++				}
++			}
++		}
++	}()
++	return seen
++}
++
++// respondWith answers stream 1 with 200, the extra header fields and body
++// in DATA frames of at most frame bytes, written without waiting for
++// flow control. enc, if set, encodes the header block.
++func respondWith(enc *hpack.Encoder, block *bytes.Buffer, extra []hpack.HeaderField, body []byte, frame int) func(*Framer) {
++	return func(fr *Framer) {
++		if enc == nil {
++			block = new(bytes.Buffer)
++			enc = hpack.NewEncoder(block)
++		}
++		enc.WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
++		for _, f := range extra {
++			enc.WriteField(f)
++		}
++		fr.WriteHeaders(HeadersFrameParam{StreamID: 1, EndHeaders: true, EndStream: len(body) == 0, BlockFragment: block.Bytes()})
++		for len(body) > 0 {
++			n := min(frame, len(body))
++			fr.WriteData(1, n == len(body), body[:n])
++			body = body[n:]
++		}
++	}
++}
++
++// settingsRoundTrip sends a GET over a new connection of t to a server
++// answering with respond, and returns the preface and the body read. The
++// body is read once the client processed all the server wrote: reading it
++// earlier gives the window back, and a frame above the window would fit.
++func settingsRoundTrip(t *testing.T, tr *Transport, respond func(*Framer)) (prefaceSeen, []byte, error) {
++	t.Helper()
++	client, server := net.Pipe()
++	t.Cleanup(func() { client.Close() })
++	done := make(chan struct{})
++	seen := settingsServer(server, respond, done)
++	cc, err := tr.newClientConn(client, false, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
++	resp, err := cc.RoundTrip(req)
++	p := <-seen
++	if err != nil {
++		return p, nil, err
++	}
++	defer resp.Body.Close()
++	<-done
++	body, err := io.ReadAll(resp.Body)
++	return p, body, err
++}
++
++var chromeSettings = []Setting{
++	{ID: SettingHeaderTableSize, Val: 65536},
++	{ID: SettingEnablePush, Val: 0},
++	{ID: SettingInitialWindowSize, Val: 6291456},
++	{ID: SettingMaxHeaderListSize, Val: 262144},
++}
++
++// Settings are sent exactly, in order, with the WINDOW_UPDATE given, or
++// none for 0; without Settings the derived ones are sent.
++func TestSettingsSent(t *testing.T) {
++	for _, tt := range []struct {
++		name     string
++		settings []Setting
++		update   uint32
++		want     []Setting
++		updates  []uint32
++	}{
++		{"chrome", chromeSettings, 15663105, chromeSettings, []uint32{15663105}},
++		{"no window update", []Setting{{ID: SettingMaxConcurrentStreams, Val: 100}, {ID: 0x0a0a, Val: 7}}, 0,
++			[]Setting{{ID: SettingMaxConcurrentStreams, Val: 100}, {ID: 0x0a0a, Val: 7}}, nil},
++		{"empty", []Setting{}, 0, nil, nil},
++		{"derived", nil, 0, []Setting{
++			{ID: SettingEnablePush, Val: 0},
++			{ID: SettingInitialWindowSize, Val: transportDefaultStreamFlow},
++			{ID: SettingMaxFrameSize, Val: minMaxFrameSize},
++			{ID: SettingMaxHeaderListSize, Val: 10 << 20},
++		}, []uint32{transportDefaultConnFlow}},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			tr := &Transport{Settings: tt.settings, ConnWindowUpdate: tt.update}
++			p, _, err := settingsRoundTrip(t, tr, respondWith(nil, nil, nil, nil, 0))
++			if err != nil {
++				t.Fatal(err)
++			}
++			if !slices.Equal(p.settings, tt.want) {
++				t.Errorf("settings %v, want %v", p.settings, tt.want)
++			}
++			if !slices.Equal(p.updates, tt.updates) {
++				t.Errorf("window updates %v, want %v", p.updates, tt.updates)
++			}
++		})
++	}
++}
++
++// The values announced are the ones enforced: the HPACK table, the stream
++// and connection windows, the frame size and the header list limit, both
++// when they allow what the server sends and when they refuse more.
++func TestSettingsEnforced(t *testing.T) {
++	big := bytes.Repeat([]byte("x"), 100000)
++	tableUpdate := func(size uint32) func(*Framer) {
++		var block bytes.Buffer
++		enc := hpack.NewEncoder(&block)
++		enc.SetMaxDynamicTableSizeLimit(size)
++		enc.SetMaxDynamicTableSize(size)
++		return respondWith(enc, &block, nil, []byte("ok"), 16384)
++	}
++	for _, tt := range []struct {
++		name     string
++		settings []Setting
++		update   uint32
++		respond  func(*Framer)
++		ok       bool
++	}{
++		{"table within HEADER_TABLE_SIZE", []Setting{{ID: SettingHeaderTableSize, Val: 65536}}, 0, tableUpdate(65536), true},
++		{"table above HEADER_TABLE_SIZE", []Setting{{ID: SettingHeaderTableSize, Val: 65536}}, 0, tableUpdate(65537), false},
++		{"table above the initial 4096", []Setting{}, 0, tableUpdate(4097), false},
++		{"windows of 100000", []Setting{{ID: SettingInitialWindowSize, Val: 100000}}, 100000 - initialWindowSize,
++			respondWith(nil, nil, nil, big, 16384), true},
++		{"stream window of 99999", []Setting{{ID: SettingInitialWindowSize, Val: 99999}}, 100000 - initialWindowSize,
++			respondWith(nil, nil, nil, big, 16384), false},
++		{"connection window of 99999", []Setting{{ID: SettingInitialWindowSize, Val: 100000}}, 99999 - initialWindowSize,
++			respondWith(nil, nil, nil, big, 16384), false},
++		{"initial windows", []Setting{}, 0, respondWith(nil, nil, nil, big[:initialWindowSize], 16384), true},
++		{"initial stream window", []Setting{}, 100000, respondWith(nil, nil, nil, big[:initialWindowSize+1], 16384), false},
++		{"frame within MAX_FRAME_SIZE", []Setting{{ID: SettingMaxFrameSize, Val: 32768}, {ID: SettingInitialWindowSize, Val: 100000}}, 100000,
++			respondWith(nil, nil, nil, big[:32768], 32768), true},
++		{"frame above the initial 16384", []Setting{{ID: SettingInitialWindowSize, Val: 100000}}, 100000,
++			respondWith(nil, nil, nil, big[:16385], 16385), false},
++		{"headers within MAX_HEADER_LIST_SIZE", []Setting{{ID: SettingMaxHeaderListSize, Val: 1000}}, 0,
++			respondWith(nil, nil, []hpack.HeaderField{{Name: "x-a", Value: strings.Repeat("a", 900)}}, nil, 0), true},
++		{"headers above MAX_HEADER_LIST_SIZE", []Setting{{ID: SettingMaxHeaderListSize, Val: 1000}}, 0,
++			respondWith(nil, nil, []hpack.HeaderField{{Name: "x-a", Value: strings.Repeat("a", 1000)}}, nil, 0), false},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			// The other fields allow more than the initial values: the
++			// settings must replace them.
++			tr := &Transport{Settings: tt.settings, ConnWindowUpdate: tt.update, MaxHeaderListSize: 1 << 20,
++				MaxDecoderHeaderTableSize: 1 << 20, MaxReadFrameSize: 1 << 20}
++			_, _, err := settingsRoundTrip(t, tr, tt.respond)
++			if (err == nil) != tt.ok {
++				t.Fatalf("error %v, want ok %v", err, tt.ok)
++			}
++		})
++	}
++}
++
++func TestCheckSettings(t *testing.T) {
++	for _, tt := range []struct {
++		settings []Setting
++		update   uint32
++		ok       bool
++	}{
++		{chromeSettings, 15663105, true},
++		{nil, 0, true},
++		{[]Setting{{ID: 0x0a0a, Val: 1}, {ID: SettingNoRFC7540Priorities, Val: 1}}, 1<<31 - 1 - initialWindowSize, true},
++		{[]Setting{{ID: SettingEnablePush, Val: 0}, {ID: SettingEnablePush, Val: 0}}, 0, false},
++		{[]Setting{{ID: SettingEnablePush, Val: 1}}, 0, false},
++		{[]Setting{{ID: SettingEnablePush, Val: 2}}, 0, false},
++		{[]Setting{{ID: SettingInitialWindowSize, Val: 0}}, 0, false},
++		{[]Setting{{ID: SettingInitialWindowSize, Val: 1 << 31}}, 0, false},
++		{[]Setting{{ID: SettingMaxFrameSize, Val: 16383}}, 0, false},
++		{[]Setting{{ID: SettingMaxHeaderListSize, Val: 0}}, 0, false},
++		{[]Setting{{ID: SettingNoRFC7540Priorities, Val: 2}}, 0, false},
++		{nil, 1<<31 - initialWindowSize, false},
++	} {
++		if err := CheckSettings(tt.settings, tt.update); (err == nil) != tt.ok {
++			t.Errorf("CheckSettings(%v, %d) = %v, want ok %v", tt.settings, tt.update, err, tt.ok)
++		}
++	}
++}
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index ba42ea8..51732b8 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -559,13 +559,34 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook
+ 	})
+ 	cc.br = bufio.NewReader(c)
+ 	cc.fr = NewFramer(cc.bw, cc.br)
+-	cc.fr.SetMaxReadFrameSize(conf.MaxReadFrameSize)
++	maxHeaderTableSize := conf.MaxDecoderHeaderTableSize
++	maxReadFrameSize := conf.MaxReadFrameSize
++	maxHeaderListSize := t.maxHeaderListSize()
++	connWindowUpdate := uint32(conf.MaxUploadBufferPerConnection)
++	if t.Settings != nil {
++		// [eidolon] The settings sent are the ones in force.
++		maxHeaderTableSize, maxReadFrameSize = initialHeaderTableSize, minMaxFrameSize
++		cc.initialStreamRecvWindowSize = initialWindowSize
++		for _, s := range t.Settings {
++			switch s.ID {
++			case SettingHeaderTableSize:
++				maxHeaderTableSize = s.Val
++			case SettingInitialWindowSize:
++				cc.initialStreamRecvWindowSize = int32(s.Val)
++			case SettingMaxFrameSize:
++				maxReadFrameSize = s.Val
++			case SettingMaxHeaderListSize:
++				maxHeaderListSize = s.Val
++			}
++		}
++		connWindowUpdate = t.ConnWindowUpdate
++	}
++	cc.fr.SetMaxReadFrameSize(maxReadFrameSize)
+ 	if t.CountError != nil {
+ 		cc.fr.countError = t.CountError
+ 	}
+-	maxHeaderTableSize := conf.MaxDecoderHeaderTableSize
+ 	cc.fr.ReadMetaHeaders = hpack.NewDecoder(maxHeaderTableSize, nil)
+-	cc.fr.MaxHeaderListSize = t.maxHeaderListSize()
++	cc.fr.MaxHeaderListSize = maxHeaderListSize
+ 
+ 	cc.henc = hpack.NewEncoder(&cc.hbuf)
+ 	cc.henc.SetMaxDynamicTableSizeLimit(conf.MaxEncoderHeaderTableSize)
+@@ -576,22 +597,27 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook
+ 		cc.tlsState = &state
+ 	}
+ 
+-	initialSettings := []Setting{
+-		{ID: SettingEnablePush, Val: 0},
+-		{ID: SettingInitialWindowSize, Val: uint32(cc.initialStreamRecvWindowSize)},
+-	}
+-	initialSettings = append(initialSettings, Setting{ID: SettingMaxFrameSize, Val: conf.MaxReadFrameSize})
+-	if max := t.maxHeaderListSize(); max != 0 {
+-		initialSettings = append(initialSettings, Setting{ID: SettingMaxHeaderListSize, Val: max})
+-	}
+-	if maxHeaderTableSize != initialHeaderTableSize {
+-		initialSettings = append(initialSettings, Setting{ID: SettingHeaderTableSize, Val: maxHeaderTableSize})
++	initialSettings := t.Settings
++	if initialSettings == nil {
++		initialSettings = []Setting{
++			{ID: SettingEnablePush, Val: 0},
++			{ID: SettingInitialWindowSize, Val: uint32(cc.initialStreamRecvWindowSize)},
++		}
++		initialSettings = append(initialSettings, Setting{ID: SettingMaxFrameSize, Val: conf.MaxReadFrameSize})
++		if max := t.maxHeaderListSize(); max != 0 {
++			initialSettings = append(initialSettings, Setting{ID: SettingMaxHeaderListSize, Val: max})
++		}
++		if maxHeaderTableSize != initialHeaderTableSize {
++			initialSettings = append(initialSettings, Setting{ID: SettingHeaderTableSize, Val: maxHeaderTableSize})
++		}
+ 	}
+ 
+ 	cc.bw.Write(clientPreface)
+ 	cc.fr.WriteSettings(initialSettings...)
+-	cc.fr.WriteWindowUpdate(0, uint32(conf.MaxUploadBufferPerConnection))
+-	cc.inflow.init(conf.MaxUploadBufferPerConnection + initialWindowSize)
++	if connWindowUpdate > 0 {
++		cc.fr.WriteWindowUpdate(0, connWindowUpdate)
++	}
++	cc.inflow.init(int32(connWindowUpdate) + initialWindowSize)
+ 	cc.bw.Flush()
+ 	if cc.werr != nil {
+ 		cc.Close()
+diff --git a/internal/http2/transport_common.go b/internal/http2/transport_common.go
+index cc04c68..b523ad0 100644
+--- a/internal/http2/transport_common.go
++++ b/internal/http2/transport_common.go
+@@ -108,6 +108,22 @@ type Transport struct {
+ 	// Deprecated: Use [http.Transport.MaxResponseHeaderBytes] instead.
+ 	MaxHeaderListSize uint32
+ 
++	// [eidolon] Settings, if non-nil, are the SETTINGS the client sends
++	// first, exactly and in order, in place of the ones derived from the
++	// other fields. The ones the client enforces take effect:
++	// HEADER_TABLE_SIZE sizes the HPACK decoder, INITIAL_WINDOW_SIZE the
++	// receive window of each stream, MAX_FRAME_SIZE the largest frame read
++	// and MAX_HEADER_LIST_SIZE the response header limit. One left out
++	// keeps its RFC 9113 initial value, except MAX_HEADER_LIST_SIZE,
++	// whose limit then comes from MaxHeaderListSize. CheckSettings
++	// validates them.
++	Settings []Setting
++
++	// [eidolon] ConnWindowUpdate is, with Settings, the increment of the
++	// WINDOW_UPDATE sent on the connection right after SETTINGS; 0 sends
++	// none. The connection receive window is 65535 plus it.
++	ConnWindowUpdate uint32
++
+ 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
+ 	// initial settings frame. It is the size in bytes of the largest frame
+ 	// payload that the sender is willing to receive. If 0, no setting is

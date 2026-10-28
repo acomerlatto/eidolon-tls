@@ -559,13 +559,34 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 	})
 	cc.br = bufio.NewReader(c)
 	cc.fr = NewFramer(cc.bw, cc.br)
-	cc.fr.SetMaxReadFrameSize(conf.MaxReadFrameSize)
+	maxHeaderTableSize := conf.MaxDecoderHeaderTableSize
+	maxReadFrameSize := conf.MaxReadFrameSize
+	maxHeaderListSize := t.maxHeaderListSize()
+	connWindowUpdate := uint32(conf.MaxUploadBufferPerConnection)
+	if t.Settings != nil {
+		// [eidolon] The settings sent are the ones in force.
+		maxHeaderTableSize, maxReadFrameSize = initialHeaderTableSize, minMaxFrameSize
+		cc.initialStreamRecvWindowSize = initialWindowSize
+		for _, s := range t.Settings {
+			switch s.ID {
+			case SettingHeaderTableSize:
+				maxHeaderTableSize = s.Val
+			case SettingInitialWindowSize:
+				cc.initialStreamRecvWindowSize = int32(s.Val)
+			case SettingMaxFrameSize:
+				maxReadFrameSize = s.Val
+			case SettingMaxHeaderListSize:
+				maxHeaderListSize = s.Val
+			}
+		}
+		connWindowUpdate = t.ConnWindowUpdate
+	}
+	cc.fr.SetMaxReadFrameSize(maxReadFrameSize)
 	if t.CountError != nil {
 		cc.fr.countError = t.CountError
 	}
-	maxHeaderTableSize := conf.MaxDecoderHeaderTableSize
 	cc.fr.ReadMetaHeaders = hpack.NewDecoder(maxHeaderTableSize, nil)
-	cc.fr.MaxHeaderListSize = t.maxHeaderListSize()
+	cc.fr.MaxHeaderListSize = maxHeaderListSize
 
 	cc.henc = hpack.NewEncoder(&cc.hbuf)
 	cc.henc.SetMaxDynamicTableSizeLimit(conf.MaxEncoderHeaderTableSize)
@@ -576,22 +597,27 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 		cc.tlsState = &state
 	}
 
-	initialSettings := []Setting{
-		{ID: SettingEnablePush, Val: 0},
-		{ID: SettingInitialWindowSize, Val: uint32(cc.initialStreamRecvWindowSize)},
-	}
-	initialSettings = append(initialSettings, Setting{ID: SettingMaxFrameSize, Val: conf.MaxReadFrameSize})
-	if max := t.maxHeaderListSize(); max != 0 {
-		initialSettings = append(initialSettings, Setting{ID: SettingMaxHeaderListSize, Val: max})
-	}
-	if maxHeaderTableSize != initialHeaderTableSize {
-		initialSettings = append(initialSettings, Setting{ID: SettingHeaderTableSize, Val: maxHeaderTableSize})
+	initialSettings := t.Settings
+	if initialSettings == nil {
+		initialSettings = []Setting{
+			{ID: SettingEnablePush, Val: 0},
+			{ID: SettingInitialWindowSize, Val: uint32(cc.initialStreamRecvWindowSize)},
+		}
+		initialSettings = append(initialSettings, Setting{ID: SettingMaxFrameSize, Val: conf.MaxReadFrameSize})
+		if max := t.maxHeaderListSize(); max != 0 {
+			initialSettings = append(initialSettings, Setting{ID: SettingMaxHeaderListSize, Val: max})
+		}
+		if maxHeaderTableSize != initialHeaderTableSize {
+			initialSettings = append(initialSettings, Setting{ID: SettingHeaderTableSize, Val: maxHeaderTableSize})
+		}
 	}
 
 	cc.bw.Write(clientPreface)
 	cc.fr.WriteSettings(initialSettings...)
-	cc.fr.WriteWindowUpdate(0, uint32(conf.MaxUploadBufferPerConnection))
-	cc.inflow.init(conf.MaxUploadBufferPerConnection + initialWindowSize)
+	if connWindowUpdate > 0 {
+		cc.fr.WriteWindowUpdate(0, connWindowUpdate)
+	}
+	cc.inflow.init(int32(connWindowUpdate) + initialWindowSize)
 	cc.bw.Flush()
 	if cc.werr != nil {
 		cc.Close()

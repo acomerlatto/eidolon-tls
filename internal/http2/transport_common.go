@@ -108,6 +108,22 @@ type Transport struct {
 	// Deprecated: Use [http.Transport.MaxResponseHeaderBytes] instead.
 	MaxHeaderListSize uint32
 
+	// [eidolon] Settings, if non-nil, are the SETTINGS the client sends
+	// first, exactly and in order, in place of the ones derived from the
+	// other fields. The ones the client enforces take effect:
+	// HEADER_TABLE_SIZE sizes the HPACK decoder, INITIAL_WINDOW_SIZE the
+	// receive window of each stream, MAX_FRAME_SIZE the largest frame read
+	// and MAX_HEADER_LIST_SIZE the response header limit. One left out
+	// keeps its RFC 9113 initial value, except MAX_HEADER_LIST_SIZE,
+	// whose limit then comes from MaxHeaderListSize. CheckSettings
+	// validates them.
+	Settings []Setting
+
+	// [eidolon] ConnWindowUpdate is, with Settings, the increment of the
+	// WINDOW_UPDATE sent on the connection right after SETTINGS; 0 sends
+	// none. The connection receive window is 65535 plus it.
+	ConnWindowUpdate uint32
+
 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
 	// initial settings frame. It is the size in bytes of the largest frame
 	// payload that the sender is willing to receive. If 0, no setting is
