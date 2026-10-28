@@ -274,7 +274,7 @@ type RoundTripOpt struct {
 	allowHTTP bool // allow http:// URLs
 
 	key  string         // pool key; empty derives it from the URL (eidolon)
-	next **http.Request // receives the request to send elsewhere on ErrNoCachedConn (eidolon)
+	next **http.Request // receives the request to send again, or nil (eidolon; see RoundTripPooled)
 }
 
 // Deprecated: Use [http.Transport.RoundTrip] instead.
@@ -353,7 +353,16 @@ func (t *Transport) roundTripViaPool(req *http.Request, opt RoundTripOpt, pool C
 		reused := !atomic.CompareAndSwapUint32(&cc.atomicReused, 0, 1)
 		traceGotConn(req, cc, reused)
 		res, err := cc.RoundTrip(req)
-		if err != nil && retry <= 6 {
+		if err != nil && opt.next != nil {
+			// [eidolon] RoundTripPooled: the caller owns the retry
+			// budget, as Chrome does (at most two retries, at once, no
+			// backoff). Report the request it may send again, or nil,
+			// and keep the error as it came.
+			*opt.next = nil
+			if r, rerr := shouldRetryRequest(req, err); rerr == nil {
+				*opt.next = r
+			}
+		} else if err != nil && retry <= 6 {
 			roundTripErr := err
 			if req, err = shouldRetryRequest(req, err); err == nil {
 				// After the first retry, do exponential backoff with 10% jitter.

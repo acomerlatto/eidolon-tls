@@ -224,7 +224,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 		GotConn: func(ci httptrace.GotConnInfo) { got = ci },
 	}))
 
-	for dials, replays := 0, 0; ; {
+	for dials, retries, replays := 0, 0, 0; ; {
 		got = httptrace.GotConnInfo{}
 		watched, body := watchBody(req)
 		var resp *http.Response
@@ -254,6 +254,18 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			req = r
 			continue
 		}
+		if !errors.Is(err, http2.ErrNoCachedConn) && next != nil {
+			// The engine knows the server did not process the request:
+			// REFUSED_STREAM, or a stream above the last one of a
+			// graceful GOAWAY. Chrome sends it again, whatever the
+			// method, at once and at most twice.
+			if retries == maxRetries || body.failed() || ctx.Err() != nil || t.isClosed() {
+				return nil, err
+			}
+			retries++
+			req = next
+			continue
+		}
 		if !errors.Is(err, http2.ErrNoCachedConn) {
 			// Section 6.3: a request is sent again on a new connection
 			// only if the reused idle connection was lost and the
@@ -272,7 +284,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			req = r
 			continue
 		}
-		req = next // watched, or a copy whose body GetBody rewound
+		req = next // watched
 		if dials == maxDials {
 			closeBody(req)
 			return nil, fmt.Errorf("eidolon: no usable connection to %s after %d dials", tgt.Origin(), dials)
@@ -300,6 +312,10 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 // is lost before taking it, such as a server that closes right after the
 // handshake. It also bounds the replays after lost idle connections.
 const maxDials = 3
+
+// maxRetries bounds the retries of a request the server did not process,
+// as Chrome's kMaxRetryAttempts.
+const maxRetries = 2
 
 // connLost reports whether err means the connection was lost, as opposed
 // to an error about the request itself.

@@ -25,11 +25,13 @@ func (t *Transport) AddConn(key string, c net.Conn) (used bool, err error) {
 	return t.connPool().(noDialClientConnPool).addConnIfNeeded(key, t, c)
 }
 
-// RoundTripPooled sends req on a pooled connection for key, retrying on
-// another pooled connection when the engine judges it safe. When no pooled
-// connection can take the request, it returns ErrNoCachedConn and the
-// request to send on a new connection: req itself, or a copy with a fresh
-// body after a failure the engine can retry.
+// RoundTripPooled sends req once on a pooled connection for key. When no
+// pooled connection can take the request, it returns ErrNoCachedConn and
+// req, to send on a new connection. On another failure it returns the
+// request to send again when the engine knows the server did not process
+// it (REFUSED_STREAM, a stream above the last one of a graceful GOAWAY),
+// with a fresh body if needed, or nil. It never retries by itself: the
+// caller keeps the budget.
 func (t *Transport) RoundTripPooled(req *http.Request, key string) (*http.Response, *http.Request, error) {
 	next := req
 	res, err := t.roundTripOpt(req, RoundTripOpt{key: key, next: &next})
