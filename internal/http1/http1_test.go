@@ -1,8 +1,12 @@
 package http1_test
 
 import (
+	"bufio"
 	"bytes"
+	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -311,3 +315,69 @@ func TestWriteRequestFraming(t *testing.T) {
 		})
 	}
 }
+
+// rawResponse returns the client side of a connection whose server reads
+// one request and answers raw.
+func rawResponse(t *testing.T, raw string) net.Conn {
+	t.Helper()
+	client, server := net.Pipe()
+	go func() {
+		defer server.Close()
+		if _, err := http.ReadRequest(bufio.NewReader(server)); err != nil {
+			return
+		}
+		io.WriteString(server, raw)
+	}()
+	t.Cleanup(func() { client.Close() })
+	client.SetDeadline(time.Now().Add(10 * time.Second))
+	return client
+}
+
+// The header limit covers the 1xx responses and the final one together,
+// and more than five 1xx responses are refused, as in net/http.
+func TestRoundTripHeaderLimits(t *testing.T) {
+	early := "HTTP/1.1 103 Early Hints\r\nLink: " + strings.Repeat("l", 400) + "\r\n\r\n"
+	final := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	tests := []struct {
+		name    string
+		raw     string
+		limit   int64
+		wantErr error // nil: success; errAny: any error
+	}{
+		{"under", final, 1 << 10, nil},
+		{"one header over", "HTTP/1.1 200 OK\r\nX-Big: " + strings.Repeat("a", 2<<10) + "\r\nContent-Length: 2\r\n\r\nok", 1 << 10, http1.ErrHeaderTooLarge},
+		{"1xx add up", strings.Repeat(early, 3) + final, 1 << 10, http1.ErrHeaderTooLarge},
+		{"1xx under", strings.Repeat(early, 3) + final, 4 << 10, nil},
+		{"default under", "HTTP/1.1 200 OK\r\nX-Big: " + strings.Repeat("a", 200<<10) + "\r\nContent-Length: 2\r\n\r\nok", 0, nil},
+		{"default over", "HTTP/1.1 200 OK\r\nX-Big: " + strings.Repeat("a", 300<<10) + "\r\nContent-Length: 2\r\n\r\nok", 0, http1.ErrHeaderTooLarge},
+		{"five 1xx", strings.Repeat(early, 5) + final, 0, nil},
+		{"six 1xx", strings.Repeat(early, 6) + final, 0, errAny},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := http1.NewConn(rawResponse(t, tt.raw))
+			c.MaxHeaderBytes = tt.limit
+			req, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
+			resp, err := c.RoundTrip(req, nil)
+			switch {
+			case tt.wantErr == nil && err != nil:
+				t.Fatal(err)
+			case tt.wantErr == nil:
+				body, _ := io.ReadAll(resp.Body)
+				if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+					t.Fatalf("got %d %q", resp.StatusCode, body)
+				}
+			case err == nil:
+				t.Fatal("no error")
+			case tt.wantErr != errAny && !errors.Is(err, tt.wantErr):
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			case tt.wantErr == http1.ErrHeaderTooLarge && !strings.Contains(err.Error(), fmt.Sprintf("of %d bytes", cmp.Or(tt.limit, http1.DefaultMaxHeaderBytes))):
+				t.Fatalf("err = %v, without the limit", err)
+			case tt.wantErr == errAny && errors.Is(err, http1.ErrHeaderTooLarge):
+				t.Fatalf("err = %v, want the 1xx count", err)
+			}
+		})
+	}
+}
+
+var errAny = errors.New("any error")

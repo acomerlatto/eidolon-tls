@@ -39,6 +39,18 @@ var defaultOrder = &order.Order{Header: []string{"host"}}
 // ErrUpgrade reports a 101 response; Upgrade is outside phase 1.
 var ErrUpgrade = errors.New("http1: unexpected 101 Switching Protocols")
 
+// ErrHeaderTooLarge reports response headers, 1xx included, over the limit
+// of the connection.
+var ErrHeaderTooLarge = errors.New("http1: response headers exceed the limit")
+
+// DefaultMaxHeaderBytes bounds the headers of a response, 1xx included,
+// as Chrome does (kMaxHeaderBufSize, 256 KiB).
+const DefaultMaxHeaderBytes = 256 << 10
+
+// max1xx bounds the informational responses before the final one, as
+// net/http does.
+const max1xx = 5
+
 // WriteRequest writes req to w as HTTP/1.1. Header order comes from
 // order.FromContext(req.Context()); spelling from spell. Nothing is written
 // if the request is invalid.
@@ -89,6 +101,11 @@ type Conn struct {
 	// Content-Length.
 	mixed bool
 	idle  chan error // the error of the idle watch, when one runs
+
+	// MaxHeaderBytes bounds the bytes read from the connection while the
+	// headers of a response, 1xx included, are read. Zero means
+	// DefaultMaxHeaderBytes.
+	MaxHeaderBytes int64
 }
 
 // NewConn returns a Conn over c.
@@ -113,7 +130,14 @@ func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, err
 	if err := WriteRequest(writeCounter{c}, req, spell); err != nil {
 		return nil, err
 	}
-	for {
+	limit := c.MaxHeaderBytes
+	if limit <= 0 {
+		limit = DefaultMaxHeaderBytes
+	}
+	// The limit covers the 1xx responses and the final one together, as
+	// in net/http; bytes the reader takes ahead count too.
+	c.tap.left = limit
+	for n1xx := 0; ; {
 		// The raw head is recorded because ReadResponse drops
 		// Content-Length when the response is chunked.
 		c.tap.rec = append(c.tap.rec[:0], peekBuffered(c.br)...)
@@ -121,6 +145,9 @@ func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, err
 		resp, err := http.ReadResponse(c.br, req)
 		c.tap.on = false
 		if err != nil {
+			if c.tap.left <= 0 {
+				return nil, fmt.Errorf("%w of %d bytes", ErrHeaderTooLarge, limit)
+			}
 			return nil, err
 		}
 		switch {
@@ -129,6 +156,9 @@ func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, err
 			return nil, ErrUpgrade
 		case resp.StatusCode >= 100 && resp.StatusCode < 200:
 			resp.Body.Close()
+			if n1xx++; n1xx > max1xx {
+				return nil, fmt.Errorf("http1: more than %d informational responses", max1xx)
+			}
 			continue
 		}
 		c.mixed = bothFramings(c.tap.rec)
@@ -169,18 +199,28 @@ func (c *Conn) Reuse() bool {
 	return errors.Is(err, os.ErrDeadlineExceeded)
 }
 
-// tap records what the reader takes from the connection while on.
+// tap records what the reader takes from the connection while on, and
+// bounds it to left bytes.
 type tap struct {
-	r   io.Reader
-	on  bool
-	rec []byte
+	r    io.Reader
+	on   bool
+	rec  []byte
+	left int64
 }
 
 func (t *tap) Read(p []byte) (int, error) {
-	n, err := t.r.Read(p)
-	if t.on {
-		t.rec = append(t.rec, p[:n]...)
+	if !t.on {
+		return t.r.Read(p)
 	}
+	if t.left <= 0 {
+		return 0, ErrHeaderTooLarge
+	}
+	if int64(len(p)) > t.left {
+		p = p[:t.left]
+	}
+	n, err := t.r.Read(p)
+	t.left -= int64(n)
+	t.rec = append(t.rec, p[:n]...)
 	return n, err
 }
 
