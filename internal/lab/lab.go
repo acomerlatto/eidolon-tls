@@ -55,6 +55,10 @@ type Options struct {
 	// the HTTP/2 server, with raw frames. It gets the decrypted connection
 	// and closes it.
 	H2Conn func(net.Conn)
+
+	// Certificate is the server certificate. Nil generates a self-signed
+	// one for ServerName, valid for one hour.
+	Certificate *tls.Certificate
 }
 
 // Server is a running lab server.
@@ -83,9 +87,21 @@ func (s *Server) Accepted() int {
 	return len(s.open)
 }
 
-// Start starts a lab server that is closed when the test ends.
+// Start starts a lab server on 127.0.0.1 that is closed when the test
+// ends.
 func Start(tb testing.TB, opts Options) *Server {
 	tb.Helper()
+	s, err := Listen("127.0.0.1:0", opts)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(s.Close)
+	return s
+}
+
+// Listen starts a lab server on addr. The caller closes it, and receives
+// its connections from Conns: only 64 wait there, then the server blocks.
+func Listen(addr string, opts Options) (*Server, error) {
 	if opts.NextProtos == nil {
 		opts.NextProtos = []string{"h2", "http/1.1"}
 	}
@@ -94,35 +110,41 @@ func Start(tb testing.TB, opts Options) *Server {
 			io.WriteString(w, "ok")
 		})
 	}
-	cert, leaf, err := newCertificate()
-	if err != nil {
-		tb.Fatal(err)
+	cert := opts.Certificate
+	if cert == nil {
+		c, err := NewCertificate(time.Hour, ServerName)
+		if err != nil {
+			return nil, err
+		}
+		cert = &c
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		tb.Fatal(err)
+		return nil, err
 	}
 	s := &Server{
 		Addr:        ln.Addr().String(),
 		RootCAs:     x509.NewCertPool(),
-		Certificate: leaf,
+		Certificate: cert.Leaf,
 		ln:          ln,
 		opts:        opts,
 		conns:       make(chan *Conn, 64),
 		tlsConf: &tls.Config{
-			Certificates: []tls.Certificate{cert},
+			Certificates: []tls.Certificate{*cert},
 			NextProtos:   opts.NextProtos,
 		},
 	}
-	s.RootCAs.AddCert(leaf)
+	s.RootCAs.AddCert(cert.Leaf)
 	if opts.TLS != nil {
 		opts.TLS(s.tlsConf)
 	}
 	s.wg.Add(1)
 	go s.accept()
-	tb.Cleanup(s.Close)
-	return s
+	return s, nil
 }
+
+// Conns returns the accepted connections, after their TLS handshake.
+func (s *Server) Conns() <-chan *Conn { return s.conns }
 
 // NextConn returns the next accepted connection, after its TLS handshake.
 func (s *Server) NextConn(tb testing.TB) *Conn {
@@ -344,20 +366,20 @@ func (c *closeHook) Close() error {
 func (l *oneConnListener) Close() error   { l.close(); return nil }
 func (l *oneConnListener) Addr() net.Addr { return l.c.LocalAddr() }
 
-// newCertificate returns a self-signed certificate for ServerName,
-// 127.0.0.1 and ::1.
-func newCertificate() (tls.Certificate, *x509.Certificate, error) {
+// NewCertificate returns a self-signed certificate for names, 127.0.0.1
+// and ::1, valid for ttl, with Leaf set.
+func NewCertificate(ttl time.Duration, names ...string) (tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return tls.Certificate{}, nil, err
+		return tls.Certificate{}, err
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: ServerName},
-		DNSNames:              []string{ServerName},
+		Subject:               pkix.Name{CommonName: names[0]},
+		DNSNames:              names,
 		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
+		NotAfter:              time.Now().Add(ttl),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
@@ -365,11 +387,11 @@ func newCertificate() (tls.Certificate, *x509.Certificate, error) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		return tls.Certificate{}, nil, err
+		return tls.Certificate{}, err
 	}
 	leaf, err := x509.ParseCertificate(der)
 	if err != nil {
-		return tls.Certificate{}, nil, err
+		return tls.Certificate{}, err
 	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, leaf, nil
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, nil
 }

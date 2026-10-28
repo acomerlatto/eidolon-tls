@@ -1,3 +1,4 @@
 # Local workspace with ../utls; consumers and CI build with GOWORK=off.
 go.work
 go.work.sum
+/lab-captures/
