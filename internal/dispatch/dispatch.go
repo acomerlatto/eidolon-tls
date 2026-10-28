@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -61,7 +62,8 @@ type Transport struct {
 	// MaxResponseHeaderBytes bounds the headers of a response: over
 	// HTTP/1.1 the bytes read with them, 1xx included; over HTTP/2 the
 	// header list, as announced in SETTINGS_MAX_HEADER_LIST_SIZE. Zero
-	// means http1.DefaultMaxHeaderBytes (256 KiB, as Chrome).
+	// means http1.DefaultMaxHeaderBytes (256 KiB, as Chrome); above 2^32-2,
+	// the largest limit SETTINGS announces, it is that value.
 	MaxResponseHeaderBytes int64
 	// DisableDecompression delivers gzip and deflate bodies as they came,
 	// with Content-Encoding. By default they are decoded (decompress).
@@ -624,7 +626,10 @@ func (t *Transport) h2t() *http2.Transport {
 // maxHeaderBytes returns the response header limit of both engines.
 func (t *Transport) maxHeaderBytes() int64 {
 	if t.MaxResponseHeaderBytes > 0 {
-		return t.MaxResponseHeaderBytes
+		// SETTINGS_MAX_HEADER_LIST_SIZE is 32 bits, and the HTTP/2
+		// engine takes 2^32-1 for no limit: a larger limit is the
+		// largest one it announces, for both engines.
+		return min(t.MaxResponseHeaderBytes, math.MaxUint32-1)
 	}
 	return http1.DefaultMaxHeaderBytes
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"testing"
@@ -132,6 +133,22 @@ func TestResponseHeaderLimitSet(t *testing.T) {
 	}
 	if got := settingValue(frames, uint16(http2.SettingMaxHeaderListSize)); got != 64<<10 {
 		t.Fatalf("SETTINGS_MAX_HEADER_LIST_SIZE = %d", got)
+	}
+
+	// Above what the 32-bit setting announces, the limit is the largest
+	// value it announces (2^32-1 means no limit); it used to be cut to the
+	// low 32 bits (5 here).
+	h2tr = transport(h2srv)
+	h2tr.MaxResponseHeaderBytes = 1<<32 + 5
+	defer h2tr.Close()
+	if _, _, err := do(t, h2tr, http.MethodGet, "https://example.com/", ""); err != nil {
+		t.Fatal(err)
+	}
+	if frames, err = h2srv.NextConn(t).H2Frames(); err != nil {
+		t.Fatal(err)
+	}
+	if got := settingValue(frames, uint16(http2.SettingMaxHeaderListSize)); got != math.MaxUint32-1 {
+		t.Fatalf("SETTINGS_MAX_HEADER_LIST_SIZE = %d, want %d", got, uint32(math.MaxUint32-1))
 	}
 }
 
