@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -78,9 +79,9 @@ func TestChrome156Linux(t *testing.T) {
 		Settings:               []eidolon.HTTP2Setting{{ID: 1, Value: 65536}, {ID: 2, Value: 0}, {ID: 4, Value: 6291456}, {ID: 6, Value: 262144}},
 		ConnectionWindowUpdate: 15663105,
 		Priority:               eidolon.HTTP2PriorityChromium,
+		MaxDataFrameSize:       16375,
 	}
-	if p.Name != "chrome/156/linux" ||
-		!slices.Equal(p.HTTP2.Settings, h2.Settings) || p.HTTP2.ConnectionWindowUpdate != h2.ConnectionWindowUpdate || p.HTTP2.Priority != h2.Priority ||
+	if p.Name != "chrome/156/linux" || !reflect.DeepEqual(p.HTTP2, h2) ||
 		!slices.Equal(p.PseudoOrder, []string{":method", ":authority", ":scheme", ":path"}) ||
 		!slices.Equal(p.H1Spelling, []string{"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"}) ||
 		p.MaxConnsPerHost != 6 || p.IdleConnTimeout != 300*time.Second {

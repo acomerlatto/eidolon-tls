@@ -55,13 +55,17 @@ type HTTP2Settings struct {
 	ConnectionWindowUpdate uint32
 	// Priority is how the requests announce their priority.
 	Priority HTTP2Priority
+	// MaxDataFrameSize, if non-zero, limits the DATA frames of a request
+	// body below the server's MAX_FRAME_SIZE: Chrome sends at most 16375
+	// bytes, whatever the server allows.
+	MaxDataFrameSize uint32
 }
 
 // WithHTTP2Settings sets the SETTINGS and the connection WINDOW_UPDATE of
 // each new HTTP/2 connection. By default they are those of Chrome 156:
 // HEADER_TABLE_SIZE 65536, ENABLE_PUSH 0, INITIAL_WINDOW_SIZE 6291456 and
 // MAX_HEADER_LIST_SIZE 262144, then a WINDOW_UPDATE of 15663105, with
-// HTTP2PriorityChromium.
+// HTTP2PriorityChromium and DATA frames of at most 16375 bytes.
 //
 // The values announced are enforced: HEADER_TABLE_SIZE sizes the HPACK
 // decoder, INITIAL_WINDOW_SIZE the receive window of each stream, the
@@ -89,7 +93,11 @@ func WithHTTP2Settings(s HTTP2Settings) Option {
 
 // h2Preface validates s and converts it for the transport.
 func h2Preface(s HTTP2Settings) (*dispatch.H2Preface, error) {
-	pre := &dispatch.H2Preface{Settings: make([]http2.Setting, len(s.Settings)), ConnWindowUpdate: s.ConnectionWindowUpdate}
+	pre := &dispatch.H2Preface{
+		Settings:         make([]http2.Setting, len(s.Settings)),
+		ConnWindowUpdate: s.ConnectionWindowUpdate,
+		MaxDataFrameSize: s.MaxDataFrameSize,
+	}
 	for i, st := range s.Settings {
 		pre.Settings[i] = http2.Setting{ID: http2.SettingID(st.ID), Val: st.Value}
 	}

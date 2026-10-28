@@ -1,6 +1,7 @@
 package eidolon_test
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net/http"
@@ -117,6 +118,55 @@ func TestHTTP2Preface(t *testing.T) {
 			}
 			if (prio == nil) != (tt.prio == nil) || prio != nil && *prio != *tt.prio {
 				t.Errorf("priority %+v, want %+v", prio, tt.prio)
+			}
+		})
+	}
+}
+
+// A request body goes in DATA frames of 16375 bytes by default, as
+// Chrome's, below the 1 MiB MAX_FRAME_SIZE of the lab server; without
+// MaxDataFrameSize, as large as the server allows. A GET goes first, so
+// the server's SETTINGS are in force for the body.
+func TestHTTP2DataFrames(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		opts []eidolon.Option
+		want []uint32
+	}{
+		{"default", nil, []uint32{16375, 16375, 16375, 16375, 36}},
+		{"custom", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{MaxDataFrameSize: 20000})}, []uint32{20000, 20000, 20000, 5536}},
+		{"none", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{})}, []uint32{65536}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+			})})
+			c := newClient(t, srv, tt.opts...)
+			for _, body := range []io.Reader{nil, bytes.NewReader(make([]byte, 65536))} {
+				method := http.MethodGet
+				if body != nil {
+					method = http.MethodPost
+				}
+				req, _ := http.NewRequest(method, "https://example.com/", body)
+				resp, err := c.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+			frames, err := srv.NextConn(t).H2Frames()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []uint32
+			for _, f := range frames {
+				if f.Type == "DATA" {
+					got = append(got, f.Length)
+				}
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("DATA frames %v, want %v", got, tt.want)
 			}
 		})
 	}

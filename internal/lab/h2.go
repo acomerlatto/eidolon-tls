@@ -36,6 +36,7 @@ type H2Frame struct {
 	Type     string // "SETTINGS", "WINDOW_UPDATE", "HEADERS", ...
 	StreamID uint32
 	Flags    uint8
+	Length   uint32 // of the payload
 
 	Settings  []Setting     // SETTINGS
 	Increment uint32        // WINDOW_UPDATE
@@ -66,7 +67,7 @@ func (c *Conn) H2Frames() ([]H2Frame, error) {
 			return frames, err
 		}
 		h := f.Header()
-		out := H2Frame{Type: h.Type.String(), StreamID: h.StreamID, Flags: uint8(h.Flags)}
+		out := H2Frame{Type: h.Type.String(), StreamID: h.StreamID, Flags: uint8(h.Flags), Length: h.Length}
 		switch f := f.(type) {
 		case *xhttp2.SettingsFrame:
 			f.ForeachSetting(func(s xhttp2.Setting) error {

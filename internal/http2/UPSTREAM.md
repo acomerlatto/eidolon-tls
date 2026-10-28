@@ -38,6 +38,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0018-lost-conn-read-error-first.patch`
 - `scripts/xnet-patches/0019-caller-settings.patch`
 - `scripts/xnet-patches/0020-priority-chain.patch`
+- `scripts/xnet-patches/0021-max-data-frame-size.patch`
 
 ## Excluded files
 

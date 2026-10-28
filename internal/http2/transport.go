@@ -1678,12 +1678,19 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 	cc.mu.Unlock()
 
 	// Scratch buffer for reading into & writing from.
-	scratchLen := cs.frameScratchBufferLen(maxFrameSize)
+	dataFrameSize := maxFrameSize
+	if m := int(cc.t.MaxDataFrameSize); m != 0 && m < dataFrameSize {
+		dataFrameSize = m // [eidolon] MaxDataFrameSize
+	}
+	scratchLen := cs.frameScratchBufferLen(dataFrameSize)
 	var buf []byte
 	index := bufPoolIndex(scratchLen)
 	if bp, ok := bufPools[index].Get().(*[]byte); ok && len(*bp) >= scratchLen {
 		defer bufPools[index].Put(bp)
-		buf = *bp
+		// [eidolon] Each read fills at most one frame of dataFrameSize,
+		// as Chromium's body buffer: a larger pooled buffer would read
+		// more and split it.
+		buf = (*bp)[:scratchLen]
 	} else {
 		buf = make([]byte, scratchLen)
 		defer bufPools[index].Put(&buf)

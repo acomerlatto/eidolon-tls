@@ -133,6 +133,13 @@ type Transport struct {
 	// none. The connection receive window is 65535 plus it.
 	ConnWindowUpdate uint32
 
+	// [eidolon] MaxDataFrameSize, if non-zero, limits the DATA frames of
+	// a request body below the peer's MAX_FRAME_SIZE: the body is read and
+	// sent in chunks of at most this size. Chromium sends 16375 bytes
+	// (kMaxSpdyFrameChunkSize, a frame and its header in 16 KiB), whatever
+	// the peer allows.
+	MaxDataFrameSize uint32
+
 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
 	// initial settings frame. It is the size in bytes of the largest frame
 	// payload that the sender is willing to receive. If 0, no setting is
