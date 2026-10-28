@@ -32,6 +32,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0012-goaway-error-not-retried.patch`
 - `scripts/xnet-patches/0013-report-header-list-size.patch`
 - `scripts/xnet-patches/0014-cookie-crumbs.patch`
+- `scripts/xnet-patches/0015-http11-required-drains.patch`
 
 ## Excluded files
 

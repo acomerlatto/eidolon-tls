@@ -1,0 +1,37 @@
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index 281af16..a2eba91 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -2651,6 +2651,19 @@ func (rl *clientConnReadLoop) processGoAway(f *GoAwayFrame) error {
+ 		}
+ 	}
+ 	cc.setGoAway(f)
++	if f.ErrCode == ErrCodeHTTP11Required {
++		// [eidolon] HTTP_1_1_REQUIRED ends the connection at once, with
++		// every stream, also the ones LastStreamID covers: Chrome drains
++		// the session (SpdySession::OnGoAway, DoDrainSession) and sends
++		// each request again over HTTP/1.1, whatever its method. The
++		// read loop returns, and cleanup aborts the streams with this
++		// error.
++		return GoAwayError{
++			LastStreamID: f.LastStreamID,
++			ErrCode:      f.ErrCode,
++			DebugData:    cc.goAwayDebug,
++		}
++	}
+ 	return nil
+ }
+ 
+@@ -2790,6 +2803,12 @@ func (rl *clientConnReadLoop) processResetStream(f *RSTStreamFrame) error {
+ 	cs.abortStream(serr)
+ 
+ 	cs.bufPipe.CloseWithError(serr)
++	if f.ErrCode == ErrCodeHTTP11Required {
++		// [eidolon] On one stream, it ends the connection with every
++		// stream, as in GOAWAY (processGoAway): Chrome drains the session
++		// (SpdySession::OnRstStream).
++		return serr
++	}
+ 	return nil
+ }
+ 

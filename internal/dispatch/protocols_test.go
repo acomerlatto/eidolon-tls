@@ -256,6 +256,75 @@ func TestHTTP11Required(t *testing.T) {
 	}
 }
 
+// HTTP_1_1_REQUIRED ends the connection with every stream, as Chrome
+// drains the session: a stream the GOAWAY covers is not left to finish,
+// and a reset of one stream takes the others too. Each request goes
+// again over HTTP/1.1, whatever its method; an answer the server writes
+// over h2 afterwards is not read.
+func TestHTTP11RequiredDrainsConnection(t *testing.T) {
+	h1 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		io.WriteString(w, "h1:"+r.Method+":"+string(b))
+	})
+	t.Run("GOAWAY covering the stream", func(t *testing.T) {
+		srv := lab.Start(t, lab.Options{Handler: h1, H2Conn: rawH2(func(fr *http2.Framer, stream uint32, n int) bool {
+			fr.WriteGoAway(stream, http2.ErrCodeHTTP11Required, nil)
+			writeOK(fr, stream)
+			return false
+		})})
+		tr := transport(srv)
+		defer tr.Close()
+		resp, got, err := do(t, tr, http.MethodPost, "https://example.com/", "payload")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.ProtoMajor != 1 || got != "h1:POST:payload" {
+			t.Fatalf("%s %q", resp.Proto, got)
+		}
+	})
+	t.Run("RST_STREAM of another stream", func(t *testing.T) {
+		first := make(chan uint32, 1)
+		srv := lab.Start(t, lab.Options{Handler: h1, H2Conn: rawH2(func(fr *http2.Framer, stream uint32, n int) bool {
+			if n == 1 {
+				first <- stream
+				return true
+			}
+			fr.WriteRSTStream(stream, http2.ErrCodeHTTP11Required)
+			writeOK(fr, <-first)
+			return false
+		})})
+		tr := transport(srv)
+		defer tr.Close()
+		type result struct {
+			proto string
+			got   string
+			err   error
+		}
+		done := make(chan result, 1)
+		go func() {
+			resp, got, err := do(t, tr, http.MethodGet, "https://example.com/a", "")
+			r := result{got: got, err: err}
+			if resp != nil {
+				r.proto = resp.Proto
+			}
+			done <- r
+		}()
+		s := <-first
+		first <- s // for the second HEADERS
+		resp, got, err := do(t, tr, http.MethodPost, "https://example.com/b", "payload")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.ProtoMajor != 1 || got != "h1:POST:payload" {
+			t.Fatalf("POST: %s %q", resp.Proto, got)
+		}
+		r := <-done
+		if r.err != nil || r.proto != "HTTP/1.1" || r.got != "h1:GET:" {
+			t.Fatalf("GET in flight: %s %q %v", r.proto, r.got, r.err)
+		}
+	})
+}
+
 // With HTTP/2 only, HTTP_1_1_REQUIRED is a policy error.
 func TestHTTP11RequiredH2Only(t *testing.T) {
 	srv := lab.Start(t, lab.Options{H2Conn: rawH2(func(fr *http2.Framer, stream uint32, n int) bool {
