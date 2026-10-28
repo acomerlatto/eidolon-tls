@@ -212,3 +212,43 @@ func TestBodyReleasedOnce(t *testing.T) {
 		t.Fatalf("%d requests at once, want 1 (one connection per host)", peak)
 	}
 }
+
+// slowClose delays closing the socket, as a loaded machine may: TLS sends
+// close_notify first, and the server answers it within the delay.
+type slowClose struct{ net.Conn }
+
+func (c slowClose) Close() error {
+	time.Sleep(300 * time.Millisecond)
+	return c.Conn.Close()
+}
+
+// A response read after the context ended is not returned: the server
+// sent it because the context closed the connection, here a handler that
+// returns when its request is canceled.
+func TestNoResponseAfterCancel(t *testing.T) {
+	srv := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})})
+	tr := transport(srv)
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		c, err := d.DialContext(ctx, network, srv.Addr)
+		if err != nil {
+			return nil, err
+		}
+		return slowClose{c}, nil
+	}
+	defer tr.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(200*time.Millisecond, cancel)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
+	resp, err := tr.RoundTrip(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("got %s after the cancel", resp.Status)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}

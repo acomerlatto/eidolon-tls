@@ -293,6 +293,15 @@ func (t *Transport) sendH1(c *h1Conn, req *http.Request) (resp *http.Response, a
 		}
 		return nil, again, err
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The context closed the connection, or is about to: a response
+		// read meanwhile may be the server's answer to that close, such
+		// as a handler that returns when its request is canceled.
+		resp.Body.Close()
+		stop()
+		c.close()
+		return nil, nil, ctxErr
+	}
 	resp.TLS = c.state
 	keep := c.KeepAlive(resp) && !req.Close && !closeRequested(req.Header)
 	if resp.Body == http.NoBody {
