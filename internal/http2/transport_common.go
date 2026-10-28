@@ -140,6 +140,14 @@ type Transport struct {
 	// the peer allows.
 	MaxDataFrameSize uint32
 
+	// [eidolon] ChromiumHPACK encodes the header fields as Chromium,
+	// with quiche's HpackEncoder (hpack.Encoder.SetChromiumPolicy): only
+	// :authority among the pseudo-headers is indexed, and the table takes
+	// the HEADER_TABLE_SIZE of the peer at any size, with a size update
+	// only when it changes (ApplyHeaderTableSizeSetting).
+	// MaxEncoderHeaderTableSize does not limit it.
+	ChromiumHPACK bool
+
 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
 	// initial settings frame. It is the size in bytes of the largest frame
 	// payload that the sender is willing to receive. If 0, no setting is

@@ -26,6 +26,7 @@ type Encoder struct {
 	// tableSizeUpdate indicates whether "Header Table Size
 	// Update" is required.
 	tableSizeUpdate bool
+	chromium        bool // [eidolon] SetChromiumPolicy
 	w               io.Writer
 	buf             []byte
 }
@@ -63,6 +64,13 @@ func (e *Encoder) WriteField(f HeaderField) error {
 		e.buf = appendIndexed(e.buf, idx)
 	} else {
 		indexing := e.shouldIndex(f)
+		if e.chromium {
+			// [eidolon] SetChromiumPolicy
+			indexing = chromiumIndex(f)
+			if idx != 0 && idx <= uint64(staticTable.len()) {
+				idx = firstStaticName(idx)
+			}
+		}
 		if indexing {
 			e.dynTab.add(f)
 		}

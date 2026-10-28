@@ -172,6 +172,51 @@ func TestHTTP2DataFrames(t *testing.T) {
 	}
 }
 
+// The header fields are encoded as Chromium by default: a second request
+// to the same path sends :path again as a literal without indexing, where
+// HTTP2HPACKGo indexes it.
+func TestHTTP2HPACK(t *testing.T) {
+	literal := []byte{0x04, 0x02, '/', 'a'}
+	for _, tt := range []struct {
+		name    string
+		opts    []eidolon.Option
+		literal bool
+	}{
+		{"default", nil, true},
+		{"chromium", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{HPACK: eidolon.HTTP2HPACKChromium})}, true},
+		{"go", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{})}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
+			c := newClient(t, srv, tt.opts...)
+			for range 2 {
+				resp, err := c.Get("https://example.com/a")
+				if err != nil {
+					t.Fatal(err)
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+			frames, err := srv.NextConn(t).H2Frames()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var blocks [][]byte
+			for _, f := range frames {
+				if f.Type == "HEADERS" {
+					blocks = append(blocks, f.Block)
+				}
+			}
+			if len(blocks) != 2 {
+				t.Fatalf("%d HEADERS, want 2", len(blocks))
+			}
+			if got := bytes.Contains(blocks[1], literal); got != tt.literal {
+				t.Errorf("second block %x: :path literal %v, want %v", blocks[1], got, tt.literal)
+			}
+		})
+	}
+}
+
 // Settings the client cannot honor are refused by New.
 func TestWithHTTP2SettingsInvalid(t *testing.T) {
 	for _, s := range []eidolon.HTTP2Settings{
@@ -181,6 +226,7 @@ func TestWithHTTP2SettingsInvalid(t *testing.T) {
 		{ConnectionWindowUpdate: 1 << 31},
 		{Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingNoRFC7540Priorities, Value: 1}}, Priority: eidolon.HTTP2PriorityChromium},
 		{Priority: 7},
+		{HPACK: 7},
 	} {
 		if c, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithHTTP2Settings(s)); !errors.Is(err, eidolon.ErrConfig) || c != nil {
 			t.Errorf("New with %v = %v, %v; want ErrConfig", s, c, err)

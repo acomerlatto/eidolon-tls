@@ -1,0 +1,487 @@
+diff --git a/internal/http2/eidolon_hpack_test.go b/internal/http2/eidolon_hpack_test.go
+new file mode 100644
+index 0000000..59bedeb
+--- /dev/null
++++ b/internal/http2/eidolon_hpack_test.go
+@@ -0,0 +1,72 @@
++// HPACK of Chromium on the connection (patch 0022).
++
++package http2
++
++import (
++	"bytes"
++	"encoding/hex"
++	"net"
++	"net/http"
++	"testing"
++)
++
++// With ChromiumHPACK the first block has a size update only when the
++// server announces a size other than 4096, at any size, and :path is never
++// indexed; without it, any HEADER_TABLE_SIZE announced brings an update,
++// at most 4096, and :path is indexed.
++func TestChromiumHPACK(t *testing.T) {
++	path := []byte{0x04, 0x02, '/', 'a'} // :path /a without indexing
++	for _, tt := range []struct {
++		name     string
++		chromium bool
++		table    uint32 // HEADER_TABLE_SIZE of the server, 0 for none
++		update   string // hex of the size update starting the first block
++		literal  bool   // :path /a literal in the second block
++	}{
++		{"chromium 4096", true, 4096, "", true},
++		{"chromium 65536", true, 65536, "3fe1ff03", true},
++		{"chromium none", true, 0, "", true},
++		{"default 4096", false, 4096, "3fe11f", false},
++		{"default 65536", false, 65536, "3fe11f", false},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			client, server := net.Pipe()
++			t.Cleanup(func() { client.Close() })
++			var o wireOptions
++			if tt.table != 0 {
++				o.settings = []Setting{{ID: SettingHeaderTableSize, Val: tt.table}}
++			}
++			seen := wireServer(server, o)
++			cc, err := (&Transport{ChromiumHPACK: tt.chromium}).newClientConn(client, false, nil)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if err := cc.Ping(t.Context()); err != nil { // the server SETTINGS are in force
++				t.Fatal(err)
++			}
++			for range 2 {
++				req, _ := http.NewRequest(http.MethodGet, "https://example.com/a", nil)
++				resp, err := cc.RoundTrip(req)
++				if err != nil {
++					t.Fatal(err)
++				}
++				resp.Body.Close()
++			}
++			var blocks [][]byte
++			for f := range seen {
++				if f.typ == FrameHeaders {
++					if blocks = append(blocks, f.block); len(blocks) == 2 {
++						break
++					}
++				}
++			}
++			update, _ := hex.DecodeString(tt.update)
++			if !bytes.HasPrefix(blocks[0], update) || blocks[0][len(update)]&0xe0 == 0x20 {
++				t.Errorf("first block %x, want the size update %q only", blocks[0], tt.update)
++			}
++			if got := bytes.Contains(blocks[1], path); got != tt.literal {
++				t.Errorf("second block %x: :path literal %v, want %v", blocks[1], got, tt.literal)
++			}
++		})
++	}
++}
+diff --git a/internal/http2/eidolon_wire_test.go b/internal/http2/eidolon_wire_test.go
+new file mode 100644
+index 0000000..b3f6711
+--- /dev/null
++++ b/internal/http2/eidolon_wire_test.go
+@@ -0,0 +1,100 @@
++// A server that reports the frames the client sends (patches 0022 on).
++
++package http2
++
++import (
++	"bytes"
++	"io"
++	"net"
++	"slices"
++
++	"github.com/acomerlatto/eidolon-tls/internal/http2/hpack"
++)
++
++// wireFrame is a frame the client sent.
++type wireFrame struct {
++	typ    FrameType
++	stream uint32
++	flags  Flags
++	length uint32
++	block  []byte  // HEADERS fragment
++	ping   [8]byte // PING payload
++	incr   uint32  // WINDOW_UPDATE increment
++}
++
++// wireOptions is how wireServer answers.
++type wireOptions struct {
++	settings []Setting
++	noPings  bool   // leave the client's PINGs unanswered
++	body     []byte // of each response, in DATA frames of 16384 bytes
++}
++
++// wireServer announces o.settings and a connection window of 1 GiB, then
++// reports each frame the client sends on c. It acknowledges SETTINGS and
++// PING, and answers each request with 200 and o.body once its stream ends.
++func wireServer(c net.Conn, o wireOptions) <-chan wireFrame {
++	seen := make(chan wireFrame, 1024)
++	go func() {
++		defer close(seen)
++		defer c.Close()
++		if _, err := io.ReadFull(c, make([]byte, len(ClientPreface))); err != nil {
++			return
++		}
++		fr := NewFramer(c, c)
++		writes := make(chan func(), 64)
++		defer close(writes)
++		go func() {
++			for w := range writes {
++				w()
++			}
++		}()
++		writes <- func() { fr.WriteSettings(o.settings...); fr.WriteWindowUpdate(0, 1<<30) }
++		for {
++			f, err := fr.ReadFrame()
++			if err != nil {
++				return
++			}
++			h := f.Header()
++			w := wireFrame{typ: h.Type, stream: h.StreamID, flags: h.Flags, length: h.Length}
++			end := false
++			switch f := f.(type) {
++			case *SettingsFrame:
++				if !f.IsAck() {
++					writes <- func() { fr.WriteSettingsAck() }
++				}
++			case *PingFrame:
++				w.ping = f.Data
++				if !f.IsAck() && !o.noPings {
++					writes <- func() { fr.WritePing(true, f.Data) }
++				}
++			case *WindowUpdateFrame:
++				w.incr = f.Increment
++			case *HeadersFrame:
++				w.block = slices.Clone(f.HeaderBlockFragment())
++				end = f.StreamEnded()
++			case *DataFrame:
++				end = f.StreamEnded()
++			}
++			seen <- w
++			if end {
++				respond(writes, fr, h.StreamID, o.body)
++			}
++		}
++	}()
++	return seen
++}
++
++// respond queues on writes a response with 200 and body on stream id.
++func respond(writes chan<- func(), fr *Framer, id uint32, body []byte) {
++	var block bytes.Buffer
++	hpack.NewEncoder(&block).WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
++	writes <- func() {
++		fr.WriteHeaders(HeadersFrameParam{StreamID: id, EndHeaders: true, EndStream: len(body) == 0, BlockFragment: block.Bytes()})
++	}
++	for b := body; len(b) > 0; {
++		n := min(len(b), 16384)
++		chunk, last := b[:n], n == len(b)
++		writes <- func() { fr.WriteData(id, last, chunk) }
++		b = b[n:]
++	}
++}
+diff --git a/internal/http2/hpack/eidolon_chromium.go b/internal/http2/hpack/eidolon_chromium.go
+new file mode 100644
+index 0000000..cf63331
+--- /dev/null
++++ b/internal/http2/hpack/eidolon_chromium.go
+@@ -0,0 +1,46 @@
++package hpack
++
++// SetChromiumPolicy makes e encode as quiche's HpackEncoder, the one of
++// Chromium (DefaultPolicy): among the pseudo-headers only :authority is
++// indexed, the others going as literals without indexing; any other field
++// is indexed, even one larger than the table, which then empties it (RFC
++// 7541 section 4.4); and a name of the static table refers to its first
++// entry, as :path to 4, not 5. A field marked Sensitive is still never
++// indexed.
++func (e *Encoder) SetChromiumPolicy(on bool) {
++	e.chromium = on
++}
++
++// chromiumIndex reports whether e indexes f under the Chromium policy.
++func chromiumIndex(f HeaderField) bool {
++	if f.Sensitive {
++		return false
++	}
++	return !f.IsPseudo() || f.Name == ":authority"
++}
++
++// firstStaticName returns the first index of the static table with the
++// name at index i, for i in the static table.
++func firstStaticName(i uint64) uint64 {
++	for i > 1 && staticTable.ents[i-2].Name == staticTable.ents[i-1].Name {
++		i--
++	}
++	return i
++}
++
++// ApplyHeaderTableSizeSetting adopts the SETTINGS_HEADER_TABLE_SIZE the
++// peer announced, as quiche's HpackEncoder: nothing changes when it is the
++// size in force; otherwise the table takes it, at any size, and the next
++// field starts with a Dynamic Table Size Update to it. If a setting since
++// the last update lowered the size below that, an update to the smallest
++// size it lowered to comes first.
++func (e *Encoder) ApplyHeaderTableSizeSetting(v uint32) {
++	if v == e.dynTab.maxSize {
++		return
++	}
++	if v < e.dynTab.maxSize {
++		e.minSize = min(e.minSize, v)
++	}
++	e.dynTab.setMaxSize(v)
++	e.tableSizeUpdate = true
++}
+diff --git a/internal/http2/hpack/eidolon_chromium_test.go b/internal/http2/hpack/eidolon_chromium_test.go
+new file mode 100644
+index 0000000..7e2dafe
+--- /dev/null
++++ b/internal/http2/hpack/eidolon_chromium_test.go
+@@ -0,0 +1,175 @@
++// HPACK encoding of Chromium (patch 0022).
++
++package hpack
++
++import (
++	"bytes"
++	"encoding/hex"
++	"slices"
++	"strings"
++	"testing"
++)
++
++// The representations of the Chrome 156 capture (A10): only :authority is
++// indexed among the pseudo-headers, :path goes without indexing under the
++// name of index 4, a regular field is indexed, and a name of the static
++// table refers to its first entry; the default policy indexes :path under
++// the name of index 5.
++func TestChromiumPolicy(t *testing.T) {
++	fields := []HeaderField{
++		{Name: ":method", Value: "GET"},
++		{Name: ":authority", Value: "lab.test"},
++		{Name: ":scheme", Value: "https"},
++		{Name: ":path", Value: "/style.css"},
++		{Name: ":method", Value: "PUT"},
++		{Name: "user-agent", Value: "Mozilla/5.0"},
++		{Name: "sec-ch-ua-mobile", Value: "?0"},
++		{Name: ":authority", Value: "lab.test"},
++		{Name: ":path", Value: "/style.css"},
++		{Name: "user-agent", Value: "Mozilla/5.0"},
++		{Name: "authorization", Value: "secret", Sensitive: true},
++	}
++	for _, tt := range []struct {
++		name     string
++		chromium bool
++		want     []byte
++		table    []HeaderField // dynamic table, newest first
++	}{
++		{"chromium", true,
++			[]byte{0x82, 0x41, 0x87, 0x04, 0x02, 0x7a, 0x40, 0xc0, 0x04, 0xbf, 0x1f},
++			[]HeaderField{
++				{Name: "sec-ch-ua-mobile", Value: "?0"},
++				{Name: "user-agent", Value: "Mozilla/5.0"},
++				{Name: ":authority", Value: "lab.test"},
++			}},
++		{"default", false,
++			[]byte{0x82, 0x41, 0x87, 0x45, 0x43, 0x7a, 0x40, 0xc2, 0xc1, 0xbf, 0x1f},
++			[]HeaderField{
++				{Name: "sec-ch-ua-mobile", Value: "?0"},
++				{Name: "user-agent", Value: "Mozilla/5.0"},
++				{Name: ":method", Value: "PUT"},
++				{Name: ":path", Value: "/style.css"},
++				{Name: ":authority", Value: "lab.test"},
++			}},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			var buf, all bytes.Buffer
++			e := NewEncoder(&buf)
++			e.SetChromiumPolicy(tt.chromium)
++			var got []byte
++			for _, f := range fields {
++				buf.Reset()
++				if err := e.WriteField(f); err != nil {
++					t.Fatal(err)
++				}
++				got = append(got, buf.Bytes()[0])
++				all.Write(buf.Bytes())
++			}
++			if !bytes.Equal(got, tt.want) {
++				t.Errorf("representations %x, want %x", got, tt.want)
++			}
++			var table []HeaderField
++			for i := e.dynTab.table.len() - 1; i >= 0; i-- {
++				table = append(table, e.dynTab.table.ents[i])
++			}
++			if !slices.Equal(table, tt.table) {
++				t.Errorf("table %v, want %v", table, tt.table)
++			}
++			decoded, err := NewDecoder(4096, nil).DecodeFull(all.Bytes())
++			if err != nil {
++				t.Fatal(err)
++			}
++			if !slices.Equal(decoded, fields) {
++				t.Errorf("decoded %v, want %v", decoded, fields)
++			}
++		})
++	}
++}
++
++// A field larger than the table is still indexed under the Chromium
++// policy, and empties the table, as for the decoder (RFC 7541 section
++// 4.4); the default policy leaves it out of the table.
++func TestChromiumPolicyLargeField(t *testing.T) {
++	large := HeaderField{Name: "cookie", Value: strings.Repeat("a", 5000)}
++	for _, tt := range []struct {
++		chromium bool
++		first    byte
++		table    int
++	}{{true, 0x60, 0}, {false, 0x0f, 1}} {
++		var buf bytes.Buffer
++		e := NewEncoder(&buf)
++		e.SetChromiumPolicy(tt.chromium)
++		d := NewDecoder(4096, nil)
++		e.WriteField(HeaderField{Name: ":authority", Value: "lab.test"})
++		block := slices.Clone(buf.Bytes())
++		buf.Reset()
++		e.WriteField(large)
++		block = append(block, buf.Bytes()...)
++		if first := buf.Bytes()[0]; first != tt.first {
++			t.Errorf("chromium %v: representation %x, want %x", tt.chromium, first, tt.first)
++		}
++		if n := e.dynTab.table.len(); n != tt.table {
++			t.Errorf("chromium %v: %d entries, want %d", tt.chromium, n, tt.table)
++		}
++		// The decoder agrees: the next :authority is literal again, or
++		// indexed.
++		buf.Reset()
++		e.WriteField(HeaderField{Name: ":authority", Value: "lab.test"})
++		block = append(block, buf.Bytes()...)
++		got, err := d.DecodeFull(block)
++		if err != nil || len(got) != 3 || got[2].Value != "lab.test" {
++			t.Errorf("chromium %v: decoded %v, %v", tt.chromium, got, err)
++		}
++	}
++}
++
++// The table takes the size the peer announces as quiche does: no update
++// for the size in force, any size adopted, and the smallest size a
++// setting lowered to before the final one; the default encoder sends an
++// update even for the size in force and stops at its limit.
++func TestApplyHeaderTableSizeSetting(t *testing.T) {
++	for _, tt := range []struct {
++		name     string
++		settings []uint32
++		want     string // hex of the size updates before the next field
++		max      uint32
++	}{
++		{"same", []uint32{4096}, "", 4096},
++		{"larger", []uint32{65536}, "3fe1ff03", 65536},
++		{"smaller", []uint32{0}, "20", 0},
++		{"lowered then raised", []uint32{100, 8000}, "3f453fa13e", 8000},
++		{"raised twice", []uint32{8000, 9000}, "3f8946", 9000},
++		{"raised then back", []uint32{8000, 4096}, "3fe11f", 4096},
++		{"back to the start", []uint32{100, 4096}, "3f453fe11f", 4096},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			var buf bytes.Buffer
++			e := NewEncoder(&buf)
++			e.SetChromiumPolicy(true)
++			for _, v := range tt.settings {
++				e.ApplyHeaderTableSizeSetting(v)
++			}
++			e.WriteField(HeaderField{Name: ":method", Value: "GET"})
++			b := buf.Bytes()
++			if got := hex.EncodeToString(b[:len(b)-1]); got != tt.want || b[len(b)-1] != 0x82 {
++				t.Errorf("block %x, want %s82", b, tt.want)
++			}
++			if e.MaxDynamicTableSize() != tt.max {
++				t.Errorf("table size %d, want %d", e.MaxDynamicTableSize(), tt.max)
++			}
++			buf.Reset()
++			e.WriteField(HeaderField{Name: ":method", Value: "GET"})
++			if !bytes.Equal(buf.Bytes(), []byte{0x82}) {
++				t.Errorf("second block %x, want 82", buf.Bytes())
++			}
++		})
++	}
++	var buf bytes.Buffer
++	e := NewEncoder(&buf)
++	e.SetMaxDynamicTableSize(4096)
++	e.SetMaxDynamicTableSize(65536)
++	e.WriteField(HeaderField{Name: ":method", Value: "GET"})
++	if got := hex.EncodeToString(buf.Bytes()); got != "3fe11f82" {
++		t.Errorf("default encoder: block %s, want 3fe11f82", got)
++	}
++}
+diff --git a/internal/http2/hpack/encode.go b/internal/http2/hpack/encode.go
+index e6d0c26..5151707 100644
+--- a/internal/http2/hpack/encode.go
++++ b/internal/http2/hpack/encode.go
+@@ -26,6 +26,7 @@ type Encoder struct {
+ 	// tableSizeUpdate indicates whether "Header Table Size
+ 	// Update" is required.
+ 	tableSizeUpdate bool
++	chromium        bool // [eidolon] SetChromiumPolicy
+ 	w               io.Writer
+ 	buf             []byte
+ }
+@@ -63,6 +64,13 @@ func (e *Encoder) WriteField(f HeaderField) error {
+ 		e.buf = appendIndexed(e.buf, idx)
+ 	} else {
+ 		indexing := e.shouldIndex(f)
++		if e.chromium {
++			// [eidolon] SetChromiumPolicy
++			indexing = chromiumIndex(f)
++			if idx != 0 && idx <= uint64(staticTable.len()) {
++				idx = firstStaticName(idx)
++			}
++		}
+ 		if indexing {
+ 			e.dynTab.add(f)
+ 		}
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index fc7c1df..cb83dcf 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -594,6 +594,7 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook
+ 
+ 	cc.henc = hpack.NewEncoder(&cc.hbuf)
+ 	cc.henc.SetMaxDynamicTableSizeLimit(conf.MaxEncoderHeaderTableSize)
++	cc.henc.SetChromiumPolicy(t.ChromiumHPACK) // [eidolon]
+ 	cc.peerMaxHeaderTableSize = initialHeaderTableSize
+ 
+ 	if cs, ok := c.(connectionStater); ok {
+@@ -2767,7 +2768,11 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
+ 			}
+ 			cc.cond.Broadcast()
+ 		case SettingHeaderTableSize:
+-			cc.henc.SetMaxDynamicTableSize(s.Val)
++			if cc.t.ChromiumHPACK {
++				cc.henc.ApplyHeaderTableSizeSetting(s.Val) // [eidolon]
++			} else {
++				cc.henc.SetMaxDynamicTableSize(s.Val)
++			}
+ 			cc.peerMaxHeaderTableSize = s.Val
+ 		case SettingEnableConnectProtocol:
+ 			// If the peer wants to send us SETTINGS_ENABLE_CONNECT_PROTOCOL,
+diff --git a/internal/http2/transport_common.go b/internal/http2/transport_common.go
+index 0d9b251..7029cab 100644
+--- a/internal/http2/transport_common.go
++++ b/internal/http2/transport_common.go
+@@ -140,6 +140,14 @@ type Transport struct {
+ 	// the peer allows.
+ 	MaxDataFrameSize uint32
+ 
++	// [eidolon] ChromiumHPACK encodes the header fields as Chromium,
++	// with quiche's HpackEncoder (hpack.Encoder.SetChromiumPolicy): only
++	// :authority among the pseudo-headers is indexed, and the table takes
++	// the HEADER_TABLE_SIZE of the peer at any size, with a size update
++	// only when it changes (ApplyHeaderTableSizeSetting).
++	// MaxEncoderHeaderTableSize does not limit it.
++	ChromiumHPACK bool
++
+ 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
+ 	// initial settings frame. It is the size in bytes of the largest frame
+ 	// payload that the sender is willing to receive. If 0, no setting is

@@ -594,6 +594,7 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 
 	cc.henc = hpack.NewEncoder(&cc.hbuf)
 	cc.henc.SetMaxDynamicTableSizeLimit(conf.MaxEncoderHeaderTableSize)
+	cc.henc.SetChromiumPolicy(t.ChromiumHPACK) // [eidolon]
 	cc.peerMaxHeaderTableSize = initialHeaderTableSize
 
 	if cs, ok := c.(connectionStater); ok {
@@ -2767,7 +2768,11 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
 			}
 			cc.cond.Broadcast()
 		case SettingHeaderTableSize:
-			cc.henc.SetMaxDynamicTableSize(s.Val)
+			if cc.t.ChromiumHPACK {
+				cc.henc.ApplyHeaderTableSizeSetting(s.Val) // [eidolon]
+			} else {
+				cc.henc.SetMaxDynamicTableSize(s.Val)
+			}
 			cc.peerMaxHeaderTableSize = s.Val
 		case SettingEnableConnectProtocol:
 			// If the peer wants to send us SETTINGS_ENABLE_CONNECT_PROTOCOL,

@@ -80,6 +80,7 @@ func TestChrome156Linux(t *testing.T) {
 		ConnectionWindowUpdate: 15663105,
 		Priority:               eidolon.HTTP2PriorityChromium,
 		MaxDataFrameSize:       16375,
+		HPACK:                  eidolon.HTTP2HPACKChromium,
 	}
 	if p.Name != "chrome/156/linux" || !reflect.DeepEqual(p.HTTP2, h2) ||
 		!slices.Equal(p.PseudoOrder, []string{":method", ":authority", ":scheme", ":path"}) ||

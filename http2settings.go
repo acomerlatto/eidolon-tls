@@ -44,8 +44,25 @@ const (
 	HTTP2PriorityChromium
 )
 
+// HTTP2HPACK is how an HTTP/2 connection encodes header fields with HPACK
+// (RFC 7541).
+type HTTP2HPACK int
+
+const (
+	// HTTP2HPACKGo encodes as the HPACK encoder of Go: every field that
+	// fits in the table is indexed, and the table never grows past 4096
+	// bytes, with a size update whenever the server announces a size.
+	HTTP2HPACKGo HTTP2HPACK = iota
+	// HTTP2HPACKChromium encodes as Chromium (quiche's HpackEncoder): only
+	// :authority among the pseudo-headers is indexed, and the table takes
+	// any size the server announces, with a size update only when it
+	// changes.
+	HTTP2HPACKChromium
+)
+
 // HTTP2Settings is what a new HTTP/2 connection sends before its first
-// request, and how its requests announce their priority.
+// request, how its requests announce their priority, and how it sends
+// DATA frames and header fields.
 type HTTP2Settings struct {
 	// Settings are sent exactly, in this order. Unknown IDs, such as
 	// GREASE values, are sent as given.
@@ -59,13 +76,16 @@ type HTTP2Settings struct {
 	// body below the server's MAX_FRAME_SIZE: Chrome sends at most 16375
 	// bytes, whatever the server allows.
 	MaxDataFrameSize uint32
+	// HPACK is how the header fields are encoded.
+	HPACK HTTP2HPACK
 }
 
 // WithHTTP2Settings sets the SETTINGS and the connection WINDOW_UPDATE of
 // each new HTTP/2 connection. By default they are those of Chrome 156:
 // HEADER_TABLE_SIZE 65536, ENABLE_PUSH 0, INITIAL_WINDOW_SIZE 6291456 and
 // MAX_HEADER_LIST_SIZE 262144, then a WINDOW_UPDATE of 15663105, with
-// HTTP2PriorityChromium and DATA frames of at most 16375 bytes.
+// HTTP2PriorityChromium, DATA frames of at most 16375 bytes and
+// HTTP2HPACKChromium.
 //
 // The values announced are enforced: HEADER_TABLE_SIZE sizes the HPACK
 // decoder, INITIAL_WINDOW_SIZE the receive window of each stream, the
@@ -76,7 +96,7 @@ type HTTP2Settings struct {
 // return an error that wraps ErrConfig: a setting repeated, a value RFC
 // 9113 forbids, ENABLE_PUSH other than 0 (server push is refused),
 // INITIAL_WINDOW_SIZE or MAX_HEADER_LIST_SIZE of 0, a connection window
-// above 2^31-1, an unknown Priority, or HTTP2PriorityChromium with
+// above 2^31-1, an unknown Priority or HPACK, or HTTP2PriorityChromium with
 // NO_RFC7540_PRIORITIES 1, which says the client sends no such priority.
 // The settings are copied when WithHTTP2Settings is called.
 func WithHTTP2Settings(s HTTP2Settings) Option {
@@ -113,6 +133,13 @@ func h2Preface(s HTTP2Settings) (*dispatch.H2Preface, error) {
 		pre.PriorityChain = true
 	default:
 		return nil, fmt.Errorf("unknown priority %d", s.Priority)
+	}
+	switch s.HPACK {
+	case HTTP2HPACKGo:
+	case HTTP2HPACKChromium:
+		pre.ChromiumHPACK = true
+	default:
+		return nil, fmt.Errorf("unknown HPACK %d", s.HPACK)
 	}
 	return pre, nil
 }

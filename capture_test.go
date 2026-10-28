@@ -3,6 +3,7 @@ package eidolon_test
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -18,13 +19,15 @@ import (
 )
 
 // capture holds the requests of Chrome 156 against the lab (spec A10):
-// the HEADERS of connection 001 (lab.test over HTTP/2), and the bytes of
-// connections 002 and 003 (h1.lab.test over HTTP/1.1) and 006 to 008
-// (plain.lab.test over http://), in the order they were sent.
+// the HEADERS of connection 001 (lab.test over HTTP/2), decoded and as
+// HPACK blocks in hex, and the bytes of connections 002 and 003
+// (h1.lab.test over HTTP/1.1) and 006 to 008 (plain.lab.test over
+// http://), in the order they were sent.
 type capture struct {
-	H2    [][][2]string `json:"h2"`
-	H1    string        `json:"h1"`
-	Plain string        `json:"plain"`
+	H2       [][][2]string `json:"h2"`
+	H2Blocks []string      `json:"h2_blocks"`
+	H1       string        `json:"h1"`
+	Plain    string        `json:"plain"`
 }
 
 func loadCapture(t *testing.T) capture {
@@ -78,8 +81,10 @@ func captureRequest(t *testing.T, method, url, referer, cookie, contentType, bod
 
 // The profile sends what Chrome sent in the capture, field by field and
 // in order, over HTTP/2, HTTP/1.1 and http://, with the requests a page
-// would make. Known deviation: the favicon goes at the image priority,
-// u=2, i, where Chrome sent it at u=1, i.
+// would make; over HTTP/2, the HPACK blocks are those of Chrome byte by
+// byte. Known deviation: the favicon goes at the image priority, u=2, i,
+// where Chrome sent it at u=1, i, which changes the index of that field
+// in its block.
 func TestChromeCapture(t *testing.T) {
 	c := loadCapture(t)
 	cert, err := lab.NewCertificate(time.Hour, "lab.test", "h1.lab.test")
@@ -148,6 +153,9 @@ func TestChromeCapture(t *testing.T) {
 			}
 			if !slices.Equal(got, want) {
 				t.Errorf("request %d:\n got %q\nwant %q", i, got, want)
+			}
+			if block := hex.EncodeToString(fr.Block); block != c.H2Blocks[i] && !slices.Contains(want, [2]string{":path", "/favicon.ico"}) {
+				t.Errorf("request %d: HPACK block\n got %s\nwant %s", i, block, c.H2Blocks[i])
 			}
 			i++
 		}

@@ -42,6 +42,7 @@ type H2Frame struct {
 	Increment uint32        // WINDOW_UPDATE
 	Priority  *Priority     // PRIORITY, or HEADERS with the PRIORITY flag
 	Headers   []HeaderField // HEADERS
+	Block     []byte        // HEADERS without CONTINUATION: the HPACK block
 }
 
 // H2Frames decodes the client preface and the frames received so far. A
@@ -51,6 +52,8 @@ func (c *Conn) H2Frames() ([]H2Frame, error) {
 	if !bytes.HasPrefix(data, []byte(xhttp2.ClientPreface)) {
 		return nil, errNoPreface
 	}
+	// The decoded HEADERS no longer hold their block: take it first.
+	blocks := headerBlocks(data[len(xhttp2.ClientPreface):])
 	fr := xhttp2.NewFramer(io.Discard, bytes.NewReader(data[len(xhttp2.ClientPreface):]))
 	// The lab server advertises the default table size, so the client's
 	// encoder uses at most 4096 bytes.
@@ -87,7 +90,28 @@ func (c *Conn) H2Frames() ([]H2Frame, error) {
 			for _, hf := range f.Fields {
 				out.Headers = append(out.Headers, HeaderField{Name: hf.Name, Value: hf.Value})
 			}
+			out.Block, blocks = blocks[0], blocks[1:]
 		}
 		frames = append(frames, out)
+	}
+}
+
+// headerBlocks returns the HPACK block of each HEADERS frame in data, in
+// order: nil for one followed by CONTINUATION.
+func headerBlocks(data []byte) [][]byte {
+	fr := xhttp2.NewFramer(io.Discard, bytes.NewReader(data))
+	var blocks [][]byte
+	for {
+		f, err := fr.ReadFrame()
+		if err != nil {
+			return blocks
+		}
+		if h, ok := f.(*xhttp2.HeadersFrame); ok {
+			var b []byte
+			if h.HeadersEnded() {
+				b = bytes.Clone(h.HeaderBlockFragment())
+			}
+			blocks = append(blocks, b)
+		}
 	}
 }
