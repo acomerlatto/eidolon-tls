@@ -30,10 +30,17 @@ func (t *Transport) AddConn(key string, c net.Conn) (used bool, err error) {
 // req, to send on a new connection. On another failure it returns the
 // request to send again when the engine knows the server did not process
 // it (REFUSED_STREAM, a stream above the last one of a graceful GOAWAY),
-// with a fresh body if needed, or nil. It never retries by itself: the
-// caller keeps the budget.
+// with a fresh body if needed, or nil. A connection that closed before
+// its first stream is reported as ErrNoCachedConn. It never retries by
+// itself: the caller keeps the budget.
 func (t *Transport) RoundTripPooled(req *http.Request, key string) (*http.Response, *http.Request, error) {
 	next := req
 	res, err := t.roundTripOpt(req, RoundTripOpt{key: key, next: &next})
+	if err == errClientConnNotEstablished {
+		// The connection closed before its first stream, so nothing was
+		// sent: as when no pooled connection can take the request, the
+		// caller dials again within its budget.
+		return nil, req, ErrNoCachedConn
+	}
 	return res, next, err
 }

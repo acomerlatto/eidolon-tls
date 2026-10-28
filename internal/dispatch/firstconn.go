@@ -103,7 +103,8 @@ func (t *Transport) h1DialTLS(tgt target.Target, key string) func(context.Contex
 			return nil, nil, err
 		}
 		if conn.ConnectionState().NegotiatedProtocol == tlsdial.ProtoH2 {
-			return nil, nil, t.addH2(key, conn)
+			t.addH2(key, conn)
+			return nil, nil, nil
 		}
 		std := tlsdial.StdConn{UConn: conn}
 		state := std.ConnectionState()
@@ -118,14 +119,15 @@ func (t *Transport) newH1Conn(key string, conn *utls.UConn) *h1Conn {
 }
 
 // addH2 puts an h2 connection in the pool. A connection the pool does not
-// take, because a usable one is already there, is closed.
-func (t *Transport) addH2(key string, conn *utls.UConn) error {
+// take, because a usable one is already there, is closed. So is one lost
+// before any request, whose preface could not be written: the requests
+// find no connection and dial again, within their budget, as nothing was
+// sent.
+func (t *Transport) addH2(key string, conn *utls.UConn) {
 	std := tlsdial.StdConn{UConn: conn}
-	used, err := t.h2t().AddConn(key, std)
-	if err != nil || !used {
+	if used, err := t.h2t().AddConn(key, std); err != nil || !used {
 		std.Close()
 	}
-	return err
 }
 
 // sharedDial runs one dial for the waiters of key. An h2 connection enters
@@ -137,7 +139,7 @@ func (t *Transport) sharedDial(call *dialCall, tgt target.Target, key string) {
 	// at its own context.
 	conn, err := t.dialTLS(t.dialContext(), tgt, key)
 	if err == nil && conn.ConnectionState().NegotiatedProtocol == tlsdial.ProtoH2 {
-		err = t.addH2(key, conn)
+		t.addH2(key, conn)
 		conn = nil
 	}
 

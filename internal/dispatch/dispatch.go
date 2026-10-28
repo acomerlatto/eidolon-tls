@@ -253,7 +253,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 	// fresh: after a lost HTTP/1.1 connection, the replay goes to a new
 	// one (h1Acquire). A lost HTTP/2 connection leaves the pool by itself.
 	fresh := false
-	for dials, retries, replays := 0, 0, 0; ; {
+	for dials, retries, replays, lost := 0, 0, 0, 0; ; {
 		got = httptrace.GotConnInfo{}
 		watched, body := watchBody(req)
 		var resp *http.Response
@@ -318,11 +318,11 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			if !ok {
 				return nil, err
 			}
-			if replays == maxDials {
+			if lost == maxLostReplays {
 				closeBody(r)
 				return nil, overBudget(err)
 			}
-			replays++
+			lost++
 			req = r
 			continue
 		}
@@ -356,19 +356,29 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 
 // maxDials bounds the new connections one request opens when each one
 // is lost before taking it, such as a server that closes right after the
-// handshake. It also bounds the replays after lost idle connections.
+// handshake. It also bounds the replays over HTTP/1.1, after a lost
+// connection or HTTP_1_1_REQUIRED.
 const maxDials = 3
+
+// maxLostReplays bounds the replays of a request an idle HTTP/2
+// connection lost, which the server might have processed: RFC 9110
+// section 9.2.2 says a failed automatic retry is not retried.
+const maxLostReplays = 1
 
 // maxRetries bounds the retries of a request the server did not process,
 // as Chrome's kMaxRetryAttempts.
 const maxRetries = 2
 
 // connLost reports whether err means the connection was lost, as opposed
-// to an error about the request itself.
+// to an error about the request itself. A graceful GOAWAY that covered
+// the stream before the connection closed is one: the server is polite,
+// not different (RFC 9113 section 6.8).
 func connLost(err error) bool {
+	var ge http2.GoAwayError
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.EPIPE)
+		errors.Is(err, syscall.EPIPE) ||
+		errors.As(err, &ge) && ge.ErrCode == http2.ErrCodeNo
 }
 
 // watchedBody records an error of the request body, so a body that fails

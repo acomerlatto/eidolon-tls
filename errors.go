@@ -47,8 +47,9 @@ var (
 	ErrHeaderTooLarge = http1.ErrHeaderTooLarge
 	// ErrRetryBudget reports a request that could have been sent again
 	// but was not, because its budget ran out: two retries of a request
-	// the server did not process, as Chrome, or three replays after lost
-	// connections or three dials. It wraps the last error.
+	// the server did not process, as Chrome; one replay after an idle
+	// HTTP/2 connection was lost, as the server might have processed it;
+	// three replays over HTTP/1.1 or three dials. It wraps the last error.
 	ErrRetryBudget = dispatch.ErrRetryBudget
 	// ErrTooManyRedirects reports a request stopped after 20 redirects,
 	// the limit of the Fetch standard and Chrome.

@@ -33,6 +33,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0013-report-header-list-size.patch`
 - `scripts/xnet-patches/0014-cookie-crumbs.patch`
 - `scripts/xnet-patches/0015-http11-required-drains.patch`
+- `scripts/xnet-patches/0016-not-established-is-no-conn.patch`
 
 ## Excluded files
 
