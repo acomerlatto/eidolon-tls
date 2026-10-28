@@ -670,6 +670,7 @@ func (t *Transport) h2t() *http2.Transport {
 		t.h2.ChromiumHPACK = pre.ChromiumHPACK
 		t.h2.PrefacePing = pre.PrefacePing
 		t.h2.ChromiumWindowUpdate = pre.ChromiumWindowUpdate
+		t.h2.CancelWithoutPing = pre.CancelWithoutPing
 	})
 	return t.h2
 }

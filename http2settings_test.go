@@ -2,6 +2,7 @@ package eidolon_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -315,6 +316,59 @@ func TestHTTP2WindowUpdate(t *testing.T) {
 			if !tt.ok(updates) {
 				t.Errorf("WINDOW_UPDATE %v", updates)
 			}
+		})
+	}
+}
+
+// A request cancelled before its response sends RST_STREAM alone by
+// default, as Chrome; without CancelWithoutPing, a PING goes with it. A
+// GET goes first, so nothing is read after the cancelled HEADERS.
+func TestHTTP2CancelWithoutPing(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		opts []eidolon.Option
+		want []string
+	}{
+		{"default", nil, []string{"HEADERS", "HEADERS", "RST_STREAM"}},
+		{"set", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{CancelWithoutPing: true})}, []string{"HEADERS", "HEADERS", "RST_STREAM"}},
+		{"go", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{})}, []string{"HEADERS", "HEADERS", "RST_STREAM", "PING"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/block" {
+					<-r.Context().Done()
+				}
+			})})
+			c := newClient(t, srv, tt.opts...)
+			resp, err := c.Get("https://example.com/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/block", nil)
+			if _, err := c.Do(req); err == nil {
+				t.Fatal("cancelled request answered")
+			}
+			conn := srv.NextConn(t)
+			var got []string
+			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+				frames, err := conn.H2Frames()
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = got[:0]
+				for _, f := range frames {
+					if f.Type == "HEADERS" || f.Type == "RST_STREAM" || f.Type == "PING" && f.Flags&0x1 == 0 {
+						got = append(got, f.Type)
+					}
+				}
+				if slices.Equal(got, tt.want) {
+					return
+				}
+			}
+			t.Errorf("frames %v, want %v", got, tt.want)
 		})
 	}
 }

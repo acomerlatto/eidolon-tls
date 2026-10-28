@@ -1520,7 +1520,9 @@ func (cs *clientStream) cleanupWriteRequest(err error) {
 				// because it's short lived and will probably be closed before
 				// we get the ping response.
 				ping := false
-				if !closeOnIdle && !readSinceStream {
+				// [eidolon] CancelWithoutPing: nor counted in pendingResets,
+				// which only a PING acknowledgment clears.
+				if !closeOnIdle && !readSinceStream && !cc.t.CancelWithoutPing {
 					cc.mu.Lock()
 					// rstStreamPingsBlocked works around a gRPC behavior:
 					// see comment on the field for details.

@@ -123,6 +123,7 @@ func Chrome156Linux() Profile {
 			HPACK:                  HTTP2HPACKChromium,
 			PrefacePing:            10 * time.Second,
 			WindowUpdate:           HTTP2WindowUpdateChromium,
+			CancelWithoutPing:      true,
 		},
 		PseudoOrder: []string{":method", ":authority", ":scheme", ":path"},
 		Headers: []HeaderField{

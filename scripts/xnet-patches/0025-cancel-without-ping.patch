@@ -1,0 +1,133 @@
+diff --git a/internal/http2/eidolon_cancel_test.go b/internal/http2/eidolon_cancel_test.go
+new file mode 100644
+index 0000000..5fbb69f
+--- /dev/null
++++ b/internal/http2/eidolon_cancel_test.go
+@@ -0,0 +1,72 @@
++// RST_STREAM without PING (patch 0025).
++
++package http2
++
++import (
++	"context"
++	"fmt"
++	"net"
++	"net/http"
++	"slices"
++	"testing"
++	"testing/synctest"
++)
++
++// A request cancelled before anything is read on the connection sends its
++// RST_STREAM alone with CancelWithoutPing, and the next request takes its
++// place at once; without it, a PING goes with the RST_STREAM, and the
++// stream holds the only place until the PING is answered.
++func TestCancelWithoutPing(t *testing.T) {
++	for _, tt := range []struct {
++		quiet bool
++		want  []string
++	}{
++		{true, []string{"HEADERS 1", "RST_STREAM 1 CANCEL", "HEADERS 3"}},
++		{false, []string{"HEADERS 1", "RST_STREAM 1 CANCEL", "PING 0"}},
++	} {
++		t.Run(fmt.Sprint(tt.quiet), func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				client, server := net.Pipe()
++				seen := wireServer(server, wireOptions{silent: true, settings: []Setting{{ID: SettingMaxConcurrentStreams, Val: 1}}})
++				tr := &Transport{CancelWithoutPing: tt.quiet, StrictMaxConcurrentStreams: true}
++				cc, err := tr.newClientConn(client, false, nil)
++				if err != nil {
++					t.Fatal(err)
++				}
++				synctest.Wait() // the server SETTINGS are read
++				send := func(ctx context.Context) <-chan error {
++					req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
++					done := make(chan error, 1)
++					go func() {
++						_, err := cc.RoundTrip(req)
++						done <- err
++					}()
++					synctest.Wait()
++					return done
++				}
++				ctx, cancel := context.WithCancel(context.Background())
++				first := send(ctx)
++				cancel()
++				<-first
++				second := send(context.Background())
++				synctest.Wait()
++				client.Close()
++				<-second
++				var got []string
++				for f := range seen {
++					switch f.typ {
++					case FrameHeaders:
++						got = append(got, fmt.Sprint("HEADERS ", f.stream))
++					case FrameRSTStream:
++						got = append(got, fmt.Sprint("RST_STREAM ", f.stream, " ", f.code))
++					case FramePing:
++						got = append(got, fmt.Sprint("PING ", f.stream))
++					}
++				}
++				if !slices.Equal(got, tt.want) {
++					t.Errorf("frames %v, want %v", got, tt.want)
++				}
++			})
++		})
++	}
++}
+diff --git a/internal/http2/eidolon_wire_test.go b/internal/http2/eidolon_wire_test.go
+index 5be36ac..e90d1af 100644
+--- a/internal/http2/eidolon_wire_test.go
++++ b/internal/http2/eidolon_wire_test.go
+@@ -20,6 +20,7 @@ type wireFrame struct {
+ 	block  []byte  // HEADERS fragment
+ 	ping   [8]byte // PING payload
+ 	incr   uint32  // WINDOW_UPDATE increment
++	code   ErrCode // RST_STREAM and GOAWAY error code
+ }
+ 
+ // wireOptions is how wireServer answers.
+@@ -70,6 +71,10 @@ func wireServer(c net.Conn, o wireOptions) <-chan wireFrame {
+ 				}
+ 			case *WindowUpdateFrame:
+ 				w.incr = f.Increment
++			case *RSTStreamFrame:
++				w.code = f.ErrCode
++			case *GoAwayFrame:
++				w.code = f.ErrCode
+ 			case *HeadersFrame:
+ 				w.block = slices.Clone(f.HeaderBlockFragment())
+ 				end = f.StreamEnded()
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index 16f16a4..9ac3675 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -1520,7 +1520,9 @@ func (cs *clientStream) cleanupWriteRequest(err error) {
+ 				// because it's short lived and will probably be closed before
+ 				// we get the ping response.
+ 				ping := false
+-				if !closeOnIdle && !readSinceStream {
++				// [eidolon] CancelWithoutPing: nor counted in pendingResets,
++				// which only a PING acknowledgment clears.
++				if !closeOnIdle && !readSinceStream && !cc.t.CancelWithoutPing {
+ 					cc.mu.Lock()
+ 					// rstStreamPingsBlocked works around a gRPC behavior:
+ 					// see comment on the field for details.
+diff --git a/internal/http2/transport_common.go b/internal/http2/transport_common.go
+index 3ec67fc..cf64577 100644
+--- a/internal/http2/transport_common.go
++++ b/internal/http2/transport_common.go
+@@ -163,6 +163,12 @@ type Transport struct {
+ 	// back every 4 KiB read.
+ 	ChromiumWindowUpdate bool
+ 
++	// [eidolon] CancelWithoutPing sends the RST_STREAM of a cancelled
++	// request alone, as Chromium. Otherwise, when nothing has been read
++	// since the request was sent, a PING goes with it, and the stream
++	// keeps its place in the concurrency limit until the PING is answered.
++	CancelWithoutPing bool
++
+ 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
+ 	// initial settings frame. It is the size in bytes of the largest frame
+ 	// payload that the sender is willing to receive. If 0, no setting is

@@ -20,6 +20,7 @@ type wireFrame struct {
 	block  []byte  // HEADERS fragment
 	ping   [8]byte // PING payload
 	incr   uint32  // WINDOW_UPDATE increment
+	code   ErrCode // RST_STREAM and GOAWAY error code
 }
 
 // wireOptions is how wireServer answers.
@@ -70,6 +71,10 @@ func wireServer(c net.Conn, o wireOptions) <-chan wireFrame {
 				}
 			case *WindowUpdateFrame:
 				w.incr = f.Increment
+			case *RSTStreamFrame:
+				w.code = f.ErrCode
+			case *GoAwayFrame:
+				w.code = f.ErrCode
 			case *HeadersFrame:
 				w.block = slices.Clone(f.HeaderBlockFragment())
 				end = f.StreamEnded()

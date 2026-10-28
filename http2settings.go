@@ -77,7 +77,7 @@ const (
 
 // HTTP2Settings is what a new HTTP/2 connection sends before its first
 // request, how its requests announce their priority, and how it sends
-// DATA frames, header fields, PINGs and window updates.
+// DATA frames, header fields, PINGs, window updates and resets.
 type HTTP2Settings struct {
 	// Settings are sent exactly, in this order. Unknown IDs, such as
 	// GREASE values, are sent as given.
@@ -102,6 +102,11 @@ type HTTP2Settings struct {
 	PrefacePing time.Duration
 	// WindowUpdate is when the receive windows are given back.
 	WindowUpdate HTTP2WindowUpdate
+	// CancelWithoutPing sends the RST_STREAM of a cancelled request alone,
+	// as Chrome. Otherwise, as in Go, when nothing has been read since the
+	// request was sent, a PING goes with it, and the stream keeps its
+	// place in the server's concurrency limit until the PING is answered.
+	CancelWithoutPing bool
 }
 
 // WithHTTP2Settings sets the SETTINGS and the connection WINDOW_UPDATE of
@@ -109,7 +114,8 @@ type HTTP2Settings struct {
 // HEADER_TABLE_SIZE 65536, ENABLE_PUSH 0, INITIAL_WINDOW_SIZE 6291456 and
 // MAX_HEADER_LIST_SIZE 262144, then a WINDOW_UPDATE of 15663105, with
 // HTTP2PriorityChromium, DATA frames of at most 16375 bytes,
-// HTTP2HPACKChromium, a PrefacePing of 10 s and HTTP2WindowUpdateChromium.
+// HTTP2HPACKChromium, a PrefacePing of 10 s, HTTP2WindowUpdateChromium and
+// CancelWithoutPing.
 //
 // The values announced are enforced: HEADER_TABLE_SIZE sizes the HPACK
 // decoder, INITIAL_WINDOW_SIZE the receive window of each stream, the
@@ -140,10 +146,11 @@ func WithHTTP2Settings(s HTTP2Settings) Option {
 // h2Preface validates s and converts it for the transport.
 func h2Preface(s HTTP2Settings) (*dispatch.H2Preface, error) {
 	pre := &dispatch.H2Preface{
-		Settings:         make([]http2.Setting, len(s.Settings)),
-		ConnWindowUpdate: s.ConnectionWindowUpdate,
-		MaxDataFrameSize: s.MaxDataFrameSize,
-		PrefacePing:      s.PrefacePing,
+		Settings:          make([]http2.Setting, len(s.Settings)),
+		ConnWindowUpdate:  s.ConnectionWindowUpdate,
+		MaxDataFrameSize:  s.MaxDataFrameSize,
+		PrefacePing:       s.PrefacePing,
+		CancelWithoutPing: s.CancelWithoutPing,
 	}
 	if s.PrefacePing < 0 {
 		return nil, fmt.Errorf("negative PrefacePing %v", s.PrefacePing)

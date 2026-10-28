@@ -163,6 +163,12 @@ type Transport struct {
 	// back every 4 KiB read.
 	ChromiumWindowUpdate bool
 
+	// [eidolon] CancelWithoutPing sends the RST_STREAM of a cancelled
+	// request alone, as Chromium. Otherwise, when nothing has been read
+	// since the request was sent, a PING goes with it, and the stream
+	// keeps its place in the concurrency limit until the PING is answered.
+	CancelWithoutPing bool
+
 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
 	// initial settings frame. It is the size in bytes of the largest frame
 	// payload that the sender is willing to receive. If 0, no setting is
