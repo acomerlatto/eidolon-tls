@@ -40,8 +40,13 @@ var defaultOrder = &order.Order{Header: []string{"host"}}
 var ErrUpgrade = errors.New("http1: unexpected 101 Switching Protocols")
 
 // ErrHeaderTooLarge reports response headers, 1xx included, over the limit
-// of the connection.
-var ErrHeaderTooLarge = errors.New("http1: response headers exceed the limit")
+// of the connection. The dispatcher reports the HTTP/2 limit with it too.
+var ErrHeaderTooLarge = errors.New("eidolon: response headers exceed the limit")
+
+// ErrMalformedResponse reports a response that cannot be read: a bad
+// status line or header, conflicting Content-Length values, too many 1xx
+// responses. A connection lost while reading is not one.
+var ErrMalformedResponse = errors.New("eidolon: malformed HTTP/1.1 response")
 
 // DefaultMaxHeaderBytes bounds the headers of a response, 1xx included,
 // as Chrome does (kMaxHeaderBufSize, 256 KiB).
@@ -148,6 +153,9 @@ func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, err
 			if c.tap.left <= 0 {
 				return nil, fmt.Errorf("%w of %d bytes", ErrHeaderTooLarge, limit)
 			}
+			if !readFailed(err) {
+				err = fmt.Errorf("%w: %w", ErrMalformedResponse, err)
+			}
 			return nil, err
 		}
 		switch {
@@ -157,7 +165,7 @@ func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, err
 		case resp.StatusCode >= 100 && resp.StatusCode < 200:
 			resp.Body.Close()
 			if n1xx++; n1xx > max1xx {
-				return nil, fmt.Errorf("http1: more than %d informational responses", max1xx)
+				return nil, fmt.Errorf("%w: more than %d informational responses", ErrMalformedResponse, max1xx)
 			}
 			continue
 		}
@@ -197,6 +205,17 @@ func (c *Conn) Reuse() bool {
 	c.idle = nil
 	c.conn.SetReadDeadline(time.Time{})
 	return errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+// readFailed reports whether err comes from reading the connection, as
+// opposed to parsing what was read. ReadResponse reports an early io.EOF
+// as io.ErrUnexpectedEOF; io.ErrClosedPipe comes from in-memory
+// connections, such as one from a custom dial. Timeouts and net.ErrClosed
+// are net.Error values.
+func readFailed(err error) bool {
+	var ne net.Error
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) ||
+		errors.As(err, &ne)
 }
 
 // tap records what the reader takes from the connection while on, and

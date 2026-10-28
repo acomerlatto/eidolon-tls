@@ -381,3 +381,40 @@ func TestRoundTripHeaderLimits(t *testing.T) {
 }
 
 var errAny = errors.New("any error")
+
+// A response cut short by the connection is not malformed: closed, timed
+// out or closed on our side while the headers are read.
+func TestRoundTripLostNotMalformed(t *testing.T) {
+	partial := "HTTP/1.1 200 OK\r\nX-A: 1\r\n"
+	for _, tt := range []struct {
+		name string
+		lose func(c net.Conn)
+	}{
+		{"closed by the server", nil},
+		{"timeout", func(c net.Conn) { c.SetReadDeadline(time.Now().Add(100 * time.Millisecond)) }},
+		{"closed here", func(c net.Conn) { time.AfterFunc(100*time.Millisecond, func() { c.Close() }) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			t.Cleanup(func() { client.Close(); server.Close() })
+			go func() {
+				if _, err := http.ReadRequest(bufio.NewReader(server)); err != nil {
+					return
+				}
+				io.WriteString(server, partial)
+				if tt.lose == nil {
+					server.Close()
+				}
+			}()
+			client.SetDeadline(time.Now().Add(10 * time.Second))
+			if tt.lose != nil {
+				tt.lose(client)
+			}
+			req, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
+			_, err := http1.NewConn(client).RoundTrip(req, nil)
+			if err == nil || errors.Is(err, http1.ErrMalformedResponse) {
+				t.Fatalf("err = %v, want a read error that is not ErrMalformedResponse", err)
+			}
+		})
+	}
+}
