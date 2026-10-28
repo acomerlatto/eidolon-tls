@@ -40,6 +40,8 @@ type config struct {
 	spelling http1.Spelling
 	h2       *dispatch.H2Preface
 
+	profile *profile // WithProfile, applied by New under the options above
+
 	protocols    []Protocol // WithProtocols; nil if not used
 	force        int        // bits 1<<HTTP1 and 1<<HTTP2 of WithForceHTTP*
 	disableHTTP3 bool
@@ -171,18 +173,27 @@ func WithDefaultOrder(o Order) Option {
 // lowercase.
 func WithHeaderSpelling(names ...string) Option {
 	return func(c *config) error {
-		sp := make(http1.Spelling, len(names))
-		for _, n := range names {
-			if !httpguts.ValidHeaderFieldName(n) {
-				return fmt.Errorf("WithHeaderSpelling: invalid name %q", n)
-			}
-			key := strings.ToLower(n)
-			if prev, ok := sp[key]; ok && prev != n {
-				return fmt.Errorf("WithHeaderSpelling: %q and %q spell one name", prev, n)
-			}
-			sp[key] = n
+		sp, err := spelling(names)
+		if err != nil {
+			return fmt.Errorf("WithHeaderSpelling: %w", err)
 		}
 		c.spelling = sp
 		return nil
 	}
+}
+
+// spelling validates names and returns their spelling table.
+func spelling(names []string) (http1.Spelling, error) {
+	sp := make(http1.Spelling, len(names))
+	for _, n := range names {
+		if !httpguts.ValidHeaderFieldName(n) {
+			return nil, fmt.Errorf("invalid name %q", n)
+		}
+		key := strings.ToLower(n)
+		if prev, ok := sp[key]; ok && prev != n {
+			return nil, fmt.Errorf("%q and %q spell one name", prev, n)
+		}
+		sp[key] = n
+	}
+	return sp, nil
 }

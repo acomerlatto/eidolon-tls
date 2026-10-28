@@ -76,24 +76,33 @@ type HTTP2Settings struct {
 // NO_RFC7540_PRIORITIES 1, which says the client sends no such priority.
 func WithHTTP2Settings(s HTTP2Settings) Option {
 	return func(c *config) error {
-		pre := &dispatch.H2Preface{Settings: make([]http2.Setting, len(s.Settings)), ConnWindowUpdate: s.ConnectionWindowUpdate}
-		for i, st := range s.Settings {
-			pre.Settings[i] = http2.Setting{ID: http2.SettingID(st.ID), Val: st.Value}
-		}
-		if err := http2.CheckSettings(pre.Settings, pre.ConnWindowUpdate); err != nil {
-			return err
-		}
-		switch s.Priority {
-		case HTTP2PriorityNone:
-		case HTTP2PriorityChromium:
-			if slices.Contains(pre.Settings, http2.Setting{ID: http2.SettingNoRFC7540Priorities, Val: 1}) {
-				return errors.New("WithHTTP2Settings: HTTP2PriorityChromium with NO_RFC7540_PRIORITIES 1")
-			}
-			pre.PriorityChain = true
-		default:
-			return fmt.Errorf("WithHTTP2Settings: unknown priority %d", s.Priority)
+		pre, err := h2Preface(s)
+		if err != nil {
+			return fmt.Errorf("WithHTTP2Settings: %w", err)
 		}
 		c.h2 = pre
 		return nil
 	}
+}
+
+// h2Preface validates s and converts it for the transport.
+func h2Preface(s HTTP2Settings) (*dispatch.H2Preface, error) {
+	pre := &dispatch.H2Preface{Settings: make([]http2.Setting, len(s.Settings)), ConnWindowUpdate: s.ConnectionWindowUpdate}
+	for i, st := range s.Settings {
+		pre.Settings[i] = http2.Setting{ID: http2.SettingID(st.ID), Val: st.Value}
+	}
+	if err := http2.CheckSettings(pre.Settings, pre.ConnWindowUpdate); err != nil {
+		return nil, err
+	}
+	switch s.Priority {
+	case HTTP2PriorityNone:
+	case HTTP2PriorityChromium:
+		if slices.Contains(pre.Settings, http2.Setting{ID: http2.SettingNoRFC7540Priorities, Val: 1}) {
+			return nil, errors.New("HTTP2PriorityChromium with NO_RFC7540_PRIORITIES 1")
+		}
+		pre.PriorityChain = true
+	default:
+		return nil, fmt.Errorf("unknown priority %d", s.Priority)
+	}
+	return pre, nil
 }

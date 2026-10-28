@@ -79,6 +79,9 @@ func New(opts ...Option) (HttpClient, error) {
 			return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 		}
 	}
+	if cfg.profile != nil {
+		cfg.profile.apply(&cfg)
+	}
 	if cfg.clientHello == nil {
 		return nil, fmt.Errorf("%w: %w", ErrConfig, errors.New("WithClientHello is required"))
 	}

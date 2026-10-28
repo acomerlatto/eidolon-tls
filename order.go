@@ -34,7 +34,8 @@ const (
 // order.
 type Order struct {
 	// Pseudo orders the HTTP/2 pseudo-headers (":method", ":authority",
-	// ":scheme", ":path"). Nil keeps the engine's order.
+	// ":scheme", ":path"). Those not listed follow in Chrome's order,
+	// ":method", ":authority", ":scheme", ":path".
 	Pseudo []string
 	// Header orders the regular headers. Names not listed follow in
 	// alphabetical order; nil sorts them all alphabetically.
