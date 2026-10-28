@@ -7,18 +7,22 @@ import (
 	"strings"
 )
 
-// redirectHeader returns the header of a request that http.Client made
-// from a redirect (req.Response set), adjusted as a browser does at each
-// hop, as in httpcloak:
+// redirectHeader returns the header of a request made from a redirect
+// (req.Response set), adjusted at each hop as the Fetch standard does
+// ("HTTP-redirect fetch"), walking the chain of requests through
+// Response.Request:
 //
-//   - Referer follows strict-origin-when-cross-origin, Chrome's default
-//     policy, from the URL that answered the redirect: the URL without
-//     fragment and credentials within one origin, the origin alone across
-//     origins, and none from https to http. http.Client sends the whole URL
-//     across origins and keeps a Referer set by the caller.
-//   - Authorization and Proxy-Authorization are dropped across origins,
-//     which includes https to http; http.Client keeps them within a domain
-//     and its subdomains.
+//   - Referer comes from the referrer of the first request, its Referer
+//     header, under strict-origin-when-cross-origin, Chrome's default
+//     policy, against the URL of this hop: the referrer without fragment
+//     and credentials within one origin, its origin alone across origins,
+//     and none from https to http. A first request without Referer sends
+//     none at any hop. http.Client sends the URL that answered the
+//     redirect instead.
+//   - Authorization and Proxy-Authorization are dropped once any hop of
+//     the chain changed origin, which includes https to http, and stay
+//     dropped. http.Client compares the first request with this one
+//     only, so they come back at A -> B -> A.
 //
 // Other requests get h as it is. h is never modified; a copy is returned
 // when something changes.
@@ -26,13 +30,19 @@ func redirectHeader(req *http.Request, h http.Header) http.Header {
 	if req.Response == nil || req.Response.Request == nil || req.Response.Request.URL == nil {
 		return h
 	}
-	prev, next := req.Response.Request.URL, req.URL
+	cross := false
+	first, next := req, req.URL
+	for first.Response != nil && first.Response.Request != nil && first.Response.Request.URL != nil {
+		prev := first.Response.Request
+		if !sameOrigin(prev.URL, next) {
+			cross = true
+		}
+		first, next = prev, prev.URL
+	}
 	out := h.Clone()
 	if out == nil {
 		out = http.Header{}
 	}
-	cross := !sameOrigin(prev, next)
-	downgrade := prev.Scheme == "https" && next.Scheme == "http"
 	for k := range out {
 		switch strings.ToLower(k) {
 		case "referer":
@@ -43,26 +53,33 @@ func redirectHeader(req *http.Request, h http.Header) http.Header {
 			}
 		}
 	}
-	if ref := referer(prev, cross, downgrade); ref != "" {
+	if ref := referer(first.Header.Get("Referer"), req.URL); ref != "" {
 		out.Set("Referer", ref)
 	}
 	return out
 }
 
-// referer returns the Referer of strict-origin-when-cross-origin for a
-// request that follows prev.
-func referer(prev *url.URL, cross, downgrade bool) string {
-	if downgrade || (prev.Scheme != "https" && prev.Scheme != "http") {
+// referer returns the Referer of strict-origin-when-cross-origin for the
+// referrer ref and a request to u; none when ref is not an http(s) URL.
+func referer(ref string, u *url.URL) string {
+	r, err := url.Parse(ref)
+	if err != nil || r.Host == "" || (r.Scheme != "https" && r.Scheme != "http") {
 		return ""
 	}
-	if cross {
-		return prev.Scheme + "://" + originHost(prev) + "/"
+	if r.Scheme == "https" && u.Scheme == "http" {
+		return ""
 	}
-	u := *prev
-	u.User = nil
-	u.Fragment, u.RawFragment = "", ""
-	u.Host = originHost(prev)
-	return u.String()
+	if !sameOrigin(r, u) {
+		return r.Scheme + "://" + originHost(r) + "/"
+	}
+	c := *r
+	c.User = nil
+	c.Fragment, c.RawFragment = "", ""
+	c.Host = originHost(r)
+	if c.Path == "" {
+		c.Path = "/"
+	}
+	return c.String()
 }
 
 // sameOrigin reports whether a and b have the same scheme, host and port,

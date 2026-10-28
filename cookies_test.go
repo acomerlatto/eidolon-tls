@@ -43,7 +43,7 @@ func TestCookieJar(t *testing.T) {
 		eidolon.HeaderOrderKey: {"host", "cookie", "x-a"},
 	})
 	want := "GET /set HTTP/1.1\r\nHost: example.com\r\nCookie: c=0\r\nX-A: 1\r\n\r\n" +
-		"GET /check HTTP/1.1\r\nHost: example.com\r\nCookie: c=0; a=1\r\nX-A: 1\r\nReferer: https://example.com/set\r\n\r\n"
+		"GET /check HTTP/1.1\r\nHost: example.com\r\nCookie: c=0; a=1\r\nX-A: 1\r\n\r\n"
 	if got := string(srv.NextConn(t).Bytes()); got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}
@@ -89,7 +89,7 @@ func TestNoCookieJar(t *testing.T) {
 	if got := c.GetCookies(u); got != nil {
 		t.Fatalf("GetCookies = %v", got)
 	}
-	want := "GET /set HTTP/1.1\r\nHost: example.com\r\n\r\nGET /check HTTP/1.1\r\nHost: example.com\r\nReferer: https://example.com/set\r\n\r\n"
+	want := "GET /set HTTP/1.1\r\nHost: example.com\r\n\r\nGET /check HTTP/1.1\r\nHost: example.com\r\n\r\n"
 	if got := string(srv.NextConn(t).Bytes()); got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}

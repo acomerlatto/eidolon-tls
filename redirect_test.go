@@ -5,9 +5,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	eidolon "github.com/acomerlatto/eidolon-tls"
 	"github.com/acomerlatto/eidolon-tls/internal/lab"
@@ -81,37 +83,43 @@ func get(t *testing.T, do func(*http.Request) (*http.Response, error), url strin
 	resp.Body.Close()
 }
 
-// Referer and credentials at each redirect hop follow the browser, as in
-// httpcloak: strict-origin-when-cross-origin, and Authorization dropped
-// across origins and from https to http.
+// Referer and credentials at each redirect hop follow the Fetch standard:
+// the Referer comes from the referrer of the first request under
+// strict-origin-when-cross-origin, and Authorization is dropped across
+// origins and from https to http.
 func TestRedirectHeaders(t *testing.T) {
 	var h hops
 	srv := lab.Start(t, lab.Options{Handler: redirector(&h)})
 	plain := lab.Start(t, lab.Options{Plain: true, Handler: redirector(&h)})
 	c := routedClient(t, srv, plain)
-	auth := http.Header{"Authorization": {"Bearer t"}, "Proxy-Authorization": {"Basic p"}, "Referer": {"https://caller.test/"}}
 	for _, tt := range []struct {
-		name, url, next string
-		referer         string
-		auth            bool
+		name, ref, url, next string
+		referer              string
+		auth                 bool
 	}{
-		{"same origin", "https://example.com/from?q=1&to=/same1#frag", "/same1",
-			"https://example.com/from?q=1&to=/same1", true},
-		{"default port", "https://example.com:443/from?to=/same2", "/same2",
-			"https://example.com/from?to=/same2", true},
-		{"cross host", "https://example.com/from?to=https://127.0.0.1/cross1", "/cross1",
+		{"same origin", "https://example.com/page?q=1#frag", "https://example.com/from?to=/same1", "/same1",
+			"https://example.com/page?q=1", true},
+		{"default port", "https://example.com:443/page", "https://example.com:443/from?to=/same2", "/same2",
+			"https://example.com/page", true},
+		{"cross host", "https://example.com/page", "https://example.com/from?to=https://127.0.0.1/cross1", "/cross1",
 			"https://example.com/", false},
-		{"cross port", "https://example.com/from?to=https://example.com:8443/cross2", "/cross2",
+		{"to the referrer origin", "https://127.0.0.1/page", "https://example.com/from?to=https://127.0.0.1/cross2", "/cross2",
+			"https://127.0.0.1/page", false},
+		{"cross port", "https://example.com/page", "https://example.com/from?to=https://example.com:8443/cross3", "/cross3",
 			"https://example.com/", false},
-		{"from a port", "https://example.com:8443/from?to=https://127.0.0.1/cross3", "/cross3",
-			"https://example.com:8443/", false},
-		{"downgrade", "https://example.com/from?to=http://example.com/down", "/down",
+		{"downgrade", "https://example.com/page", "https://example.com/from?to=http://example.com/down", "/down",
 			"", false},
-		{"upgrade", "http://example.com/from?to=https://example.com/up", "/up",
+		{"upgrade", "http://example.com/page", "http://example.com/from?to=https://example.com/up", "/up",
 			"http://example.com/", false},
+		{"no referrer", "", "https://example.com/from?to=/same3", "/same3",
+			"", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			get(t, c.Do, tt.url, auth)
+			header := http.Header{"Authorization": {"Bearer t"}, "Proxy-Authorization": {"Basic p"}}
+			if tt.ref != "" {
+				header.Set("Referer", tt.ref)
+			}
+			get(t, c.Do, tt.url, header)
 			got := h.get(tt.next)
 			if got == nil {
 				t.Fatalf("%s not reached", tt.next)
@@ -124,11 +132,55 @@ func TestRedirectHeaders(t *testing.T) {
 					t.Errorf("%s sent = %v, want %v", k, ok, tt.auth)
 				}
 			}
+			// The first request keeps the Referer of the caller.
+			if ref := h.get("/from").Get("Referer"); ref != tt.ref {
+				t.Errorf("first Referer = %q, want %q", ref, tt.ref)
+			}
 		})
 	}
-	// The first request keeps the Referer of the caller.
-	if ref := h.get("/from").Get("Referer"); ref != "https://caller.test/" {
-		t.Errorf("first Referer = %q", ref)
+}
+
+// Credentials dropped at a hop that changed origin are not sent at a later
+// hop within the new origin, through the client and through an
+// http.Client built on Transport(). http.Client copies them again when
+// the host is the first one or a subdomain of it.
+func TestRedirectCredentialsStayDropped(t *testing.T) {
+	var h hops
+	cert, err := lab.NewCertificate(time.Hour, "example.com", "sub.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := lab.Start(t, lab.Options{Certificate: &cert, Handler: redirector(&h)})
+	plain := lab.Start(t, lab.Options{Plain: true, Handler: redirector(&h)})
+	c := routedClient(t, srv, plain)
+	for _, tt := range []struct {
+		name string
+		do   func(*http.Request) (*http.Response, error)
+	}{
+		{"client", c.Do},
+		{"transport", (&http.Client{Transport: c.Transport()}).Do},
+	} {
+		for _, hops := range [][]string{
+			{"http://example.com/away", "http://example.com/back"},
+			{"https://sub.example.com/away", "https://sub.example.com/back"},
+		} {
+			t.Run(tt.name+" "+hops[0], func(t *testing.T) {
+				h.mu.Lock()
+				clear(h.seen)
+				h.mu.Unlock()
+				next := hops[0] + "?to=" + url.QueryEscape(hops[1])
+				get(t, tt.do, "https://example.com/from?to="+url.QueryEscape(next), http.Header{"Authorization": {"Bearer t"}})
+				for _, p := range []string{"/away", "/back"} {
+					got := h.get(p)
+					if got == nil {
+						t.Fatalf("%s not reached", p)
+					}
+					if v, ok := got["Authorization"]; ok {
+						t.Errorf("%s got Authorization %q", p, v)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -138,9 +190,13 @@ func TestRedirectRefererTransport(t *testing.T) {
 	srv := lab.Start(t, lab.Options{Handler: redirector(&h)})
 	c := newClient(t, srv)
 	hc := &http.Client{Transport: c.Transport()}
-	get(t, hc.Do, "https://example.com/from?to=https://127.0.0.1/next", nil)
+	get(t, hc.Do, "https://example.com/from?to=https://127.0.0.1/next", http.Header{"Referer": {"https://example.com/page"}})
 	if ref := h.get("/next").Get("Referer"); ref != "https://example.com/" {
 		t.Fatalf("Referer = %q", ref)
+	}
+	get(t, hc.Do, "https://example.com/from?to=/plain", nil)
+	if ref, ok := h.get("/plain")["Referer"]; ok {
+		t.Fatalf("Referer = %q without a referrer", ref)
 	}
 }
 
@@ -153,9 +209,9 @@ func TestURLCredentials(t *testing.T) {
 		}
 	})})
 	c := newClient(t, srv)
-	get(t, c.Do, "https://user:pass@example.com/from", http.Header{eidolon.HeaderOrderKey: {"host", "referer", "authorization"}})
-	want := "GET /from HTTP/1.1\r\nHost: example.com\r\nAuthorization: Basic dXNlcjpwYXNz\r\n\r\n" +
-		"GET /next HTTP/1.1\r\nHost: example.com\r\nReferer: https://example.com/from\r\nAuthorization: Basic dXNlcjpwYXNz\r\n\r\n"
+	get(t, c.Do, "https://user:pass@example.com/from", http.Header{eidolon.HeaderOrderKey: {"host", "referer", "authorization"}, "Referer": {"https://user:pass@example.com/page#f"}})
+	want := "GET /from HTTP/1.1\r\nHost: example.com\r\nReferer: https://user:pass@example.com/page#f\r\nAuthorization: Basic dXNlcjpwYXNz\r\n\r\n" +
+		"GET /next HTTP/1.1\r\nHost: example.com\r\nReferer: https://example.com/page\r\nAuthorization: Basic dXNlcjpwYXNz\r\n\r\n"
 	if got := string(srv.NextConn(t).Bytes()); got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}
