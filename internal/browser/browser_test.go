@@ -51,7 +51,7 @@ func TestApply(t *testing.T) {
 			"Priority": {"u=0, i"},
 		}, testHeaders.NavigationOrder},
 		{"fetch", newReq(t, "POST", "https://a.test/api", http.Header{"Content-Type": {"application/json"}}), http.Header{
-			"Content-Type": {"application/json"}, "User-Agent": {"UA"}, "Sec-Ch-Ua": {"hints"}, "Accept": {"*/*"},
+			"Content-Type": {"application/json"}, "User-Agent": {"UA"}, "Sec-Ch-Ua": {"hints"}, "Accept": {"*/*"}, "Origin": {"https://a.test"},
 			"Sec-Fetch-Site": {"same-origin"}, "Sec-Fetch-Mode": {"cors"}, "Sec-Fetch-Dest": {"empty"},
 			"Priority": {"u=1, i"},
 		}, testHeaders.SubresourceOrder},
@@ -67,7 +67,7 @@ func TestApply(t *testing.T) {
 			"User-Agent": {"UA"}, "Upgrade-Insecure-Requests": {"1"}, "Accept": {"text/html"}, "Priority": {"u=0, i"},
 		}, testHeaders.NavigationOrder},
 		{"insecure fetch", newReq(t, "DELETE", "HTTP://a.test/x", nil), http.Header{
-			"User-Agent": {"UA"}, "Accept": {"*/*"}, "Priority": {"u=1, i"},
+			"User-Agent": {"UA"}, "Accept": {"*/*"}, "Priority": {"u=1, i"}, "Origin": {"http://a.test"},
 		}, testHeaders.SubresourceOrder},
 		{"caller values and removals", newReq(t, "GET", "https://a.test/", http.Header{
 			"user-agent": {"mine"}, "Sec-Ch-Ua": nil, "Accept": {"application/json"}, "Sec-Fetch-Site": {"cross-site"}, "X-A": {"1"},
@@ -146,6 +146,39 @@ func TestApplyRedirect(t *testing.T) {
 	if d, m := got.Header.Get("Sec-Fetch-Dest"), got.Header.Get("Sec-Fetch-Mode"); d != "empty" || m != "cors" {
 		t.Fatalf("dest %q, mode %q", d, m)
 	}
+
+	// The initiator is the Referer of the first request, and the whole
+	// chain counts: a navigation from a.test through b.test back to
+	// a.test is cross-site; a POST redirected across origins sends Origin
+	// null; the caller's Origin and Sec-Fetch-Site stay.
+	first = newReq(t, "POST", "https://b.test/form", http.Header{
+		"Referer": {"https://a.test/page"}, "Content-Type": {"application/x-www-form-urlencoded"},
+	})
+	mid = newReq(t, "POST", "https://c.test/next", http.Header{"Referer": {"https://a.test/"}})
+	mid.Response = &http.Response{Request: first}
+	last = newReq(t, "POST", "https://a.test/done", http.Header{"Referer": {"https://a.test/"}})
+	last.Response = &http.Response{Request: mid}
+	got, err = testHeaders.Apply(last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, o, d := got.Header.Get("Sec-Fetch-Site"), got.Header.Get("Origin"), got.Header.Get("Sec-Fetch-Dest"); s != "cross-site" || o != "null" || d != "document" {
+		t.Fatalf("site %q, origin %q, dest %q", s, o, d)
+	}
+	last.Header.Set("Origin", "https://mine.test")
+	last.Header.Set("Sec-Fetch-Site", "same-origin")
+	got, _ = testHeaders.Apply(last)
+	if s, o := got.Header.Get("Sec-Fetch-Site"), got.Header.Get("Origin"); s != "same-origin" || o != "https://mine.test" {
+		t.Fatalf("caller's: site %q, origin %q", s, o)
+	}
+	// A navigation with no initiator stays "none" through its redirects.
+	first = newReq(t, "GET", "https://a.test/", nil)
+	last = newReq(t, "GET", "https://b.test/", nil)
+	last.Response = &http.Response{Request: first}
+	got, _ = testHeaders.Apply(last)
+	if s := got.Header.Get("Sec-Fetch-Site"); s != "none" {
+		t.Fatalf("typed navigation redirected: site %q", s)
+	}
 }
 
 func TestApplyUnknownDest(t *testing.T) {
@@ -184,29 +217,119 @@ func TestBase(t *testing.T) {
 	}
 }
 
-func TestSite(t *testing.T) {
+func mustURLs(t *testing.T, raw ...string) []*url.URL {
+	t.Helper()
+	var out []*url.URL
+	for _, r := range raw {
+		u, err := url.Parse(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, u)
+	}
+	return out
+}
+
+func TestFetchSite(t *testing.T) {
 	for _, tt := range []struct {
-		url, referer string
-		navigation   bool
-		want         string
+		init string // "" for none
+		urls []string
+		want string
 	}{
-		{"https://a.test/", "", true, "none"},
-		{"https://a.test/", "", false, "same-origin"},
-		{"https://a.test/", "not a url\x7f", true, "none"},
-		{"https://a.test/x", "https://A.test:443/page", false, "same-origin"},
-		{"https://a.test:8443/x", "https://a.test/page", false, "cross-site"},
-		{"https://a.test/x", "http://a.test/page", true, "cross-site"},
-		{"https://a.test/x", "https://b.test/page", false, "cross-site"},
+		{"", []string{"https://a.test/"}, "none"},
+		{"", []string{"https://a.test/", "https://b.test/"}, "none"},
+		{"https://a.test/page", []string{"https://A.test:443/x"}, "same-origin"},
+		{"https://a.test/page", []string{"https://www.a.test/x"}, "same-site"},
+		{"https://h1.lab.test/", []string{"https://lab.test/x"}, "same-site"},
+		{"https://a.test/page", []string{"https://a.test:8443/x"}, "same-site"},
+		{"http://a.test/page", []string{"https://a.test/x"}, "cross-site"},
+		{"https://a.test/page", []string{"https://b.test/x"}, "cross-site"},
+		{"https://a.github.io/", []string{"https://b.github.io/x"}, "cross-site"},
+		{"https://x.a.co.uk/", []string{"https://y.a.co.uk/x"}, "same-site"},
+		{"https://b.co.uk/", []string{"https://a.co.uk/x"}, "cross-site"},
+		{"https://127.0.0.1/", []string{"https://127.0.0.1:8443/x"}, "same-site"},
+		{"https://127.0.0.1/", []string{"https://127.0.0.2/x"}, "cross-site"},
+		{"https://10.0.0.1/", []string{"https://10.1.0.1/x"}, "cross-site"},
+		{"https://localhost/", []string{"https://localhost:8443/x"}, "same-site"},
+		// The furthest URL of the chain counts.
+		{"https://a.test/", []string{"https://a.test/1", "https://www.a.test/2", "https://a.test/3"}, "same-site"},
+		{"https://a.test/", []string{"https://a.test/1", "https://b.test/2", "https://a.test/3"}, "cross-site"},
+		{"https://a.test/", []string{"https://www.a.test/1", "https://a.test/2"}, "same-site"},
+		{"https://a.test/", []string{"https://www.a.test/1", "https://b.test/2"}, "cross-site"},
 	} {
-		req := newReq(t, "GET", tt.url, http.Header{"Referer": {tt.referer}})
-		if got := site(req, tt.navigation); got != tt.want {
-			t.Errorf("site(%s from %q, navigation %v) = %q, want %q", tt.url, tt.referer, tt.navigation, got, tt.want)
+		var init *url.URL
+		if tt.init != "" {
+			init = mustURLs(t, tt.init)[0]
+		}
+		if got := fetchSite(mustURLs(t, tt.urls...), init); got != tt.want {
+			t.Errorf("fetchSite(%v from %q) = %q, want %q", tt.urls, tt.init, got, tt.want)
 		}
 	}
 	// A URL built by hand may spell its scheme in uppercase.
-	req := newReq(t, "GET", "https://a.test/", http.Header{"Referer": {"https://a.test/page"}})
-	req.URL = &url.URL{Scheme: "HTTPS", Host: "a.test", Path: "/"}
-	if got := site(req, false); got != "same-origin" {
-		t.Errorf("site with scheme HTTPS = %q", got)
+	u := &url.URL{Scheme: "HTTPS", Host: "a.test", Path: "/"}
+	if got := fetchSite([]*url.URL{u}, mustURLs(t, "https://a.test/page")[0]); got != "same-origin" {
+		t.Errorf("fetchSite with scheme HTTPS = %q", got)
+	}
+}
+
+func TestInitiator(t *testing.T) {
+	req := newReq(t, "GET", "https://a.test/x", http.Header{"Referer": {"https://b.test/page"}})
+	if got := initiator(req, true); got == nil || got.Host != "b.test" {
+		t.Errorf("with Referer: %v", got)
+	}
+	for _, ref := range []string{"", "/relative", "not a url\x7f"} {
+		req = newReq(t, "GET", "https://a.test/x", http.Header{"Referer": {ref}})
+		if got := initiator(req, true); got != nil {
+			t.Errorf("navigation with Referer %q: %v", ref, got)
+		}
+		if got := initiator(req, false); got != req.URL {
+			t.Errorf("subresource with Referer %q: %v", ref, got)
+		}
+	}
+}
+
+func TestOriginHeader(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		method, mode string
+		init         string
+		urls         []string
+		want         string // "" for none
+	}{
+		{"GET same origin", "GET", "cors", "https://a.test/", []string{"https://a.test/x"}, ""},
+		{"no method", "", "navigate", "https://a.test/", []string{"https://b.test/x"}, ""},
+		{"GET no-cors", "GET", "no-cors", "https://a.test/", []string{"https://b.test/x"}, ""},
+		{"HEAD navigate", "HEAD", "navigate", "https://a.test/", []string{"https://b.test/x"}, ""},
+		{"GET cors cross", "GET", "cors", "https://a.test/", []string{"https://b.test/x"}, "https://a.test"},
+		{"GET cors other port", "GET", "cors", "https://a.test/", []string{"https://a.test:8443/x"}, "https://a.test"},
+		{"POST same origin", "POST", "cors", "https://a.test/", []string{"https://a.test/x"}, "https://a.test"},
+		{"POST navigate", "POST", "navigate", "https://a.test/", []string{"https://b.test/x"}, "https://a.test"},
+		{"DELETE port", "DELETE", "cors", "https://a.test:8443/p", []string{"https://a.test:8443/x"}, "https://a.test:8443"},
+		{"default port", "PUT", "cors", "http://A.test:80/p", []string{"http://a.test/x"}, "http://a.test"},
+		{"uppercase", "PUT", "cors", "HTTPS://A.TEST:443/p", []string{"https://a.test/x"}, "https://a.test"},
+		{"IPv6", "POST", "cors", "https://[::1]/p", []string{"https://[::1]/x"}, "https://[::1]"},
+		{"no initiator", "POST", "navigate", "", []string{"https://a.test/x"}, ""},
+		{"downgrade", "POST", "navigate", "https://a.test/", []string{"http://a.test/x"}, "null"},
+		{"downgrade cors", "POST", "cors", "https://a.test/", []string{"http://a.test/x"}, "https://a.test"},
+		{"redirect across origins", "POST", "cors", "https://a.test/", []string{"https://b.test/1", "https://c.test/2"}, "null"},
+		{"redirect from initiator", "POST", "cors", "https://a.test/", []string{"https://a.test/1", "https://b.test/2"}, "https://a.test"},
+		{"redirect in one origin", "POST", "cors", "https://a.test/", []string{"https://b.test/1", "https://b.test/2"}, "https://a.test"},
+		{"redirect back", "GET", "cors", "https://a.test/", []string{"https://b.test/1", "https://a.test/2", "https://c.test/3"}, "null"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var init *url.URL
+			if tt.init != "" {
+				init = mustURLs(t, tt.init)[0]
+			}
+			got, ok := originHeader(tt.method, tt.mode, mustURLs(t, tt.urls...), init)
+			if ok != (tt.want != "") || got != tt.want {
+				t.Fatalf("originHeader = %q, %v; want %q", got, ok, tt.want)
+			}
+		})
+	}
+	// A URL built by hand may spell its scheme in uppercase.
+	init := &url.URL{Scheme: "HTTPS", Host: "a.test"}
+	if got, _ := originHeader("POST", "cors", mustURLs(t, "https://a.test/x"), init); got != "https://a.test" {
+		t.Errorf("Origin from scheme HTTPS = %q", got)
 	}
 }

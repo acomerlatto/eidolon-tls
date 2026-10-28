@@ -42,7 +42,15 @@ type Profile struct {
 	Headers, InsecureHeaders []HeaderField
 	// Dests holds the headers of each destination (WithFetchDest). Over
 	// https:// a request also sends Sec-Fetch-Site, Sec-Fetch-Mode and
-	// Sec-Fetch-Dest. A destination not listed gets Accept */*, no
+	// Sec-Fetch-Dest. Sec-Fetch-Site compares the initiator, the origin of
+	// the Referer of the first request of a redirect chain, with each URL
+	// of the chain, by origin and by site (scheme and registrable domain,
+	// by the public suffix list), and sends the furthest; without a
+	// Referer, a navigation sends "none" and another request counts as
+	// from its own origin. Origin is sent, over https:// and http://, by
+	// a method other than GET and HEAD and by a cors request to another
+	// origin, as the Fetch standard says, "null" after a redirect across
+	// origins. A destination not listed gets Accept */*, no
 	// Priority and the Sec-Fetch-Mode the Fetch standard gives it; an
 	// iframe or frame gets those of FetchDocument, without
 	// Sec-Fetch-User.

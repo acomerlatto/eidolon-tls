@@ -7,7 +7,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+
+	"golang.org/x/net/publicsuffix"
 
 	"github.com/acomerlatto/eidolon-tls/internal/fetch"
 	"github.com/acomerlatto/eidolon-tls/internal/order"
@@ -82,10 +85,13 @@ type Request struct {
 // request of a redirect chain, as Chrome keeps it across redirects. req
 // is not modified.
 func (h *Headers) Apply(req *http.Request) (*Request, error) {
+	urls := []*url.URL{req.URL}
 	first := req
 	for first.Response != nil && first.Response.Request != nil {
 		first = first.Response.Request
+		urls = append(urls, first.URL)
 	}
+	slices.Reverse(urls)
 	dest, err := fetch.Dest(first)
 	if err != nil {
 		return nil, err
@@ -108,9 +114,13 @@ func (h *Headers) Apply(req *http.Request) (*Request, error) {
 	if d.Accept != "" {
 		add = append(add, order.Field{Name: "Accept", Value: d.Accept})
 	}
+	init := initiator(first, d.Navigation)
+	if o, ok := originHeader(req.Method, d.Mode, urls, init); ok {
+		add = append(add, order.Field{Name: "Origin", Value: o})
+	}
 	if secure {
 		add = append(add,
-			order.Field{Name: "Sec-Fetch-Site", Value: site(req, d.Navigation)},
+			order.Field{Name: "Sec-Fetch-Site", Value: fetchSite(urls, init)},
 			order.Field{Name: "Sec-Fetch-Mode", Value: d.Mode},
 			order.Field{Name: "Sec-Fetch-Dest", Value: dest})
 		if d.User {
@@ -148,21 +158,95 @@ func (h *Headers) Apply(req *http.Request) (*Request, error) {
 	return &Request{Header: out, H1Header: h1, Order: o}, nil
 }
 
-// site returns the Sec-Fetch-Site of req by its Referer: "same-origin"
-// for the origin of req, "cross-site" for another; without one, "none"
-// for a navigation, as an address typed, and "same-origin" otherwise.
-func site(req *http.Request, navigation bool) string {
-	ref, err := url.Parse(req.Header.Get("Referer"))
-	switch {
-	case err != nil || ref.Host == "":
-		if navigation {
-			return "none"
-		}
-		return "same-origin"
-	case origin(ref) == origin(req.URL):
-		return "same-origin"
+// initiator returns the origin that started the redirect chain whose
+// first request is first: that of its Referer. Without one, a navigation
+// has none, as an address typed, and another request takes the origin of
+// its own URL, as a page fetching from itself.
+func initiator(first *http.Request, navigation bool) *url.URL {
+	if ref, err := url.Parse(first.Header.Get("Referer")); err == nil && ref.Host != "" {
+		return ref
 	}
-	return "cross-site"
+	if navigation {
+		return nil
+	}
+	return first.URL
+}
+
+// fetchSite returns the Sec-Fetch-Site of a request from init through
+// urls, its redirect chain: "none" without an initiator, otherwise the
+// furthest of the URLs from init, "same-origin", "same-site" or
+// "cross-site" (Fetch Metadata, section 2.1).
+func fetchSite(urls []*url.URL, init *url.URL) string {
+	if init == nil {
+		return "none"
+	}
+	out := "same-origin"
+	for _, u := range urls {
+		switch {
+		case origin(u) == origin(init):
+		case sameSite(u, init):
+			out = "same-site"
+		default:
+			return "cross-site"
+		}
+	}
+	return out
+}
+
+// sameSite reports whether a and b are of one site: the same scheme and
+// registrable domain, by the public suffix list, or the same IP address.
+func sameSite(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) && site(a) == site(b)
+}
+
+// site returns the registrable domain of u, or its host when there is
+// none, as for an IP address or localhost.
+func site(u *url.URL) string {
+	host := strings.ToLower(u.Hostname())
+	if d, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
+		return d
+	}
+	return host
+}
+
+// originHeader returns the Origin of a request with method and mode from
+// init through urls, and whether it sends one (Fetch, "append a request
+// Origin header"): a method other than GET and HEAD sends it, and so does
+// cors mode to another origin. It is "null" after a redirect across
+// origins the initiator is not one of, and for a method other than GET and
+// HEAD outside cors mode from https:// to http://. Without an initiator,
+// none is sent.
+func originHeader(method, mode string, urls []*url.URL, init *url.URL) (string, bool) {
+	if init == nil {
+		return "", false
+	}
+	cur := urls[len(urls)-1]
+	unsafe := method != "" && method != http.MethodGet && method != http.MethodHead
+	if !unsafe && (mode != "cors" || origin(cur) == origin(init)) {
+		return "", false
+	}
+	for i := 1; i < len(urls); i++ {
+		if origin(urls[i-1]) != origin(urls[i]) && origin(init) != origin(urls[i-1]) {
+			return "null", true
+		}
+	}
+	if mode != "cors" && strings.EqualFold(init.Scheme, "https") && strings.EqualFold(cur.Scheme, "http") {
+		return "null", true
+	}
+	return serialize(init), true
+}
+
+// serialize returns the origin of u as Origin sends it: scheme and host,
+// with the port only if it is not the default one.
+func serialize(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if p := u.Port(); p != "" && p != map[string]string{"http": "80", "https": "443"}[scheme] {
+		host = net.JoinHostPort(host, p)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return scheme + "://" + host
 }
 
 // origin returns the origin of u: scheme, host and port, the default

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	eidolon "github.com/acomerlatto/eidolon-tls"
 	"github.com/acomerlatto/eidolon-tls/internal/lab"
@@ -53,7 +54,7 @@ const (
 )
 
 // Over HTTP/2 each destination sends the fields and the order of the
-// capture (A10 section 4), Sec-Fetch-Site and Origin aside (part 4).
+// capture (A10 section 4).
 func TestProfileHeadersH2(t *testing.T) {
 	ctxDest := func(d eidolon.FetchDest) context.Context { return eidolon.WithFetchDest(context.Background(), d) }
 	for _, tt := range []struct {
@@ -94,7 +95,7 @@ func TestProfileHeadersH2(t *testing.T) {
 			{Name: "content-length", Value: "7"},
 			{Name: "sec-ch-ua-platform", Value: `"Linux"`}, {Name: "user-agent", Value: chromeUA}, {Name: "sec-ch-ua", Value: chromeHints},
 			{Name: "content-type", Value: "application/json"}, {Name: "sec-ch-ua-mobile", Value: "?0"}, {Name: "accept", Value: "*/*"},
-			{Name: "sec-fetch-site", Value: "same-origin"}, {Name: "sec-fetch-mode", Value: "cors"}, {Name: "sec-fetch-dest", Value: "empty"},
+			{Name: "origin", Value: "https://example.com"}, {Name: "sec-fetch-site", Value: "same-origin"}, {Name: "sec-fetch-mode", Value: "cors"}, {Name: "sec-fetch-dest", Value: "empty"},
 			{Name: "referer", Value: chromeRequest}, {Name: "accept-encoding", Value: chromeEncAll}, {Name: "accept-language", Value: chromeLang},
 			{Name: "priority", Value: "u=1, i"},
 		}},
@@ -165,6 +166,7 @@ func TestProfileHeadersInsecure(t *testing.T) {
 		"User-Agent: " + chromeUA + "\r\n" +
 		"Content-Type: application/json\r\n" +
 		"Accept: */*\r\n" +
+		"Origin: http://example.com\r\n" +
 		"Referer: http://example.com/\r\n" +
 		"Accept-Encoding: gzip, deflate\r\n" +
 		"Accept-Language: " + chromeLang + "\r\n\r\n" +
@@ -260,5 +262,61 @@ func TestProfileHeadersPartial(t *testing.T) {
 				t.Errorf("request %q", got)
 			}
 		})
+	}
+}
+
+// Sec-Fetch-Site compares the initiator, the Referer of the first request,
+// with every URL of the redirect chain by origin and by schemeful site,
+// and Origin follows the Fetch rules (A10: same-site from lab.test to
+// h1.lab.test, cross-site from http:// to https://).
+func TestProfileFetchSite(t *testing.T) {
+	cert, err := lab.NewCertificate(time.Hour, "example.com", "www.example.com", "other.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h hops
+	srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}, Certificate: &cert, Handler: redirector(&h)})
+	plain := lab.Start(t, lab.Options{Plain: true, Handler: redirector(&h)})
+	c := routedClient(t, srv, plain, eidolon.WithProfile(eidolon.Chrome156Linux()))
+	do := func(method, url, referer, contentType string) {
+		t.Helper()
+		var body io.Reader
+		if method == "POST" {
+			body = strings.NewReader("{}")
+		}
+		req, _ := http.NewRequest(method, url, body)
+		if referer != "" {
+			req.Header.Set("Referer", referer)
+		}
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	do("GET", "https://www.example.com/a", "https://example.com/", "")
+	do("GET", "https://example.com/b", "http://example.com/", "")
+	do("POST", "https://example.com/c?to=https://other.test/d", "https://example.com/", "application/json")
+	do("GET", "http://example.com/e?to=https://www.example.com/f", "", "")
+	for _, tt := range []struct {
+		path               string
+		site, mode, origin string
+	}{
+		{"/a", "same-site", "navigate", ""},
+		{"/b", "cross-site", "navigate", ""},
+		{"/c", "same-origin", "cors", "https://example.com"},
+		// 302 turns the POST into a GET; it stays a fetch.
+		{"/d", "cross-site", "cors", "https://example.com"},
+		{"/e", "", "", ""},
+		{"/f", "none", "navigate", ""},
+	} {
+		got := h.get(tt.path)
+		if s, m, o := got.Get("Sec-Fetch-Site"), got.Get("Sec-Fetch-Mode"), got.Get("Origin"); s != tt.site || m != tt.mode || o != tt.origin {
+			t.Errorf("%s: site %q, mode %q, origin %q; want %q, %q, %q", tt.path, s, m, o, tt.site, tt.mode, tt.origin)
+		}
 	}
 }
