@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	utls "github.com/acomerlatto/utls"
@@ -226,6 +227,19 @@ func TestWriteRequestBodyLongerThanContentLength(t *testing.T) {
 	}
 }
 
+// A body of unknown length that fails at its first byte writes nothing.
+func TestWriteRequestProbeFails(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "http://example.com/", nil)
+	req.Body = io.NopCloser(iotest.ErrReader(errors.New("boom")))
+	var buf bytes.Buffer
+	if err := http1.WriteRequest(&buf, req, nil); err == nil || err.Error() != "boom" {
+		t.Fatalf("err = %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("wrote %q", buf.String())
+	}
+}
+
 // Header normalizations shared with the H2 engine.
 func TestWriteRequestNormalizes(t *testing.T) {
 	tests := []struct {
@@ -274,29 +288,35 @@ func TestWriteRequestNormalizes(t *testing.T) {
 }
 
 // The body decides the framing: a known length gives Content-Length, an
-// unknown one chunked, and the framing fields of Header are ignored.
+// unknown one chunked, an empty one none, and the framing fields of Header
+// are ignored.
 func TestWriteRequestFraming(t *testing.T) {
 	tests := []struct {
 		name   string
+		method string
 		body   io.Reader
 		length int64
 		header http.Header
 		want   string
 	}{
-		{"unknown length", io.NopCloser(strings.NewReader("hello world")), -1, nil,
+		{"unknown length", "POST", io.NopCloser(strings.NewReader("hello world")), -1, nil,
 			"POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\nb\r\nhello world\r\n0\r\n\r\n"},
-		{"zero length with a body", io.NopCloser(strings.NewReader("")), 0, nil,
-			"POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"},
-		{"Content-Length in Header", strings.NewReader("abc"), 3, http.Header{"Content-Length": {"99"}},
+		{"unknown length of one byte", "POST", io.NopCloser(strings.NewReader("h")), 0, nil,
+			"POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nh\r\n0\r\n\r\n"},
+		{"zero length with a body", "POST", io.NopCloser(strings.NewReader("")), 0, nil,
+			"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"},
+		{"GET with an empty body", "GET", io.NopCloser(strings.NewReader("")), 0, nil,
+			"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"},
+		{"Content-Length in Header", "POST", strings.NewReader("abc"), 3, http.Header{"Content-Length": {"99"}},
 			"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 3\r\n\r\nabc"},
-		{"chunked in Header with a length", strings.NewReader("abc"), 3, http.Header{"Transfer-Encoding": {"chunked"}},
+		{"chunked in Header with a length", "POST", strings.NewReader("abc"), 3, http.Header{"Transfer-Encoding": {"chunked"}},
 			"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 3\r\n\r\nabc"},
-		{"no body", http.NoBody, 0, http.Header{"Content-Length": {"5"}},
+		{"no body", "POST", http.NoBody, 0, http.Header{"Content-Length": {"5"}},
 			"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, _ := http.NewRequest(http.MethodPost, "http://example.com/", nil)
+			req, _ := http.NewRequest(tt.method, "http://example.com/", nil)
 			req.Body = io.NopCloser(tt.body)
 			if tt.body == http.NoBody {
 				req.Body = http.NoBody

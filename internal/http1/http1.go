@@ -60,6 +60,10 @@ const max1xx = 5
 // order.FromContext(req.Context()); spelling from spell. Nothing is written
 // if the request is invalid.
 func WriteRequest(w io.Writer, req *http.Request, spell Spelling) error {
+	req, err := probeBody(req)
+	if err != nil {
+		return err
+	}
 	head, err := encodeHead(req, spell)
 	if err != nil {
 		return err
@@ -93,6 +97,43 @@ func WriteRequest(w io.Writer, req *http.Request, spell Spelling) error {
 // without content-length.
 func unknownLength(req *http.Request) bool {
 	return req.Body != nil && req.Body != http.NoBody && req.ContentLength <= 0
+}
+
+// probeBody reads the first byte of a body of unknown length, as net/http
+// does: an empty body is sent as no body, not as a chunked one.
+func probeBody(req *http.Request) (*http.Request, error) {
+	if !unknownLength(req) {
+		return req, nil
+	}
+	var b [1]byte
+	n, err := io.ReadFull(req.Body, b[:])
+	if n == 0 && err != io.EOF {
+		return nil, err
+	}
+	r := *req
+	r.Body = nil
+	if n > 0 {
+		r.Body = &probedBody{ReadCloser: req.Body, first: b[0]}
+	}
+	return &r, nil
+}
+
+// probedBody puts the byte read by probeBody back in front of the body,
+// in the same Read as the bytes after it, so it is not a chunk of its own.
+type probedBody struct {
+	io.ReadCloser
+	first byte
+	read  bool
+}
+
+func (b *probedBody) Read(p []byte) (int, error) {
+	if b.read || len(p) == 0 {
+		return b.ReadCloser.Read(p)
+	}
+	b.read = true
+	p[0] = b.first
+	n, err := b.ReadCloser.Read(p[1:])
+	return n + 1, err
 }
 
 // Conn is an HTTP/1.1 connection. Its reader lives as long as the
