@@ -272,7 +272,8 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			// remembers it for the origin and sends the request again
 			// over HTTP/1.1, whatever the method (HandleHttp11Required),
 			// also for a stream a GOAWAY covered, which RFC 9113 section
-			// 6.8 says might have been processed: Chrome is followed.
+			// 6.8 says might have been processed: Chrome is followed, and
+			// a request that is not idempotent may then run twice.
 			if !t.allows(tlsdial.ProtoHTTP1) {
 				return nil, fmt.Errorf("%w: the server requires HTTP/1.1: %w", ErrProtocolPolicy, err)
 			}

@@ -186,6 +186,11 @@ func (c *Conn) Sent() int64 { return c.sent }
 // informational responses. The response body reads from the connection;
 // the next request may start only after the body reached EOF.
 //
+// The response is read once the whole body was written, as Chrome
+// (HttpStreamParser); RFC 9112 section 9.5 suggests watching for it during
+// the upload. A server that answers early and stops reading without
+// closing, a half-close, leaves the write blocked until the context ends.
+//
 // A connection reset while the body is sent, the head sent whole, does not
 // end the request: as Chrome (HttpStreamParser), the response is read, and
 // a 4xx or 5xx is returned in place of the error, such as a 413 sent
