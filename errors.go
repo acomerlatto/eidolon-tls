@@ -44,4 +44,7 @@ var (
 	// the server did not process, as Chrome, or three replays after lost
 	// connections or three dials. It wraps the last error.
 	ErrRetryBudget = dispatch.ErrRetryBudget
+	// ErrTooManyRedirects reports a request stopped after 20 redirects,
+	// the limit of the Fetch standard and Chrome.
+	ErrTooManyRedirects = errors.New("eidolon: stopped after 20 redirects")
 )

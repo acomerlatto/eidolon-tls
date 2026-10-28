@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 
 	utls "github.com/acomerlatto/utls"
 
@@ -23,7 +24,11 @@ import (
 
 // HttpClient sends requests with the configured browser fingerprint.
 type HttpClient interface {
-	// Do sends a request, as http.Client.Do.
+	// Do sends a request, as http.Client.Do. Redirects are followed as
+	// the Fetch standard and Chrome do: up to 20, then ErrTooManyRedirects;
+	// 301 and 302 turn only a POST into a GET, 303 anything but GET and
+	// HEAD, and the other cases send the method and body again (GetBody).
+	// A body without GetBody stops at the redirect, which is returned.
 	Do(req *http.Request) (*http.Response, error)
 	// Get, Head and Post are the http.Client shortcuts.
 	Get(url string) (*http.Response, error)
@@ -46,7 +51,10 @@ type HttpClient interface {
 	// Transport returns the RoundTripper used by the client, for code that
 	// builds its own http.Client. It shares connections with the client.
 	// WithTimeout is not part of it: the http.Client that uses it sets
-	// its own timeout.
+	// its own timeout. That http.Client follows redirects by its own
+	// rules: at most 10, and PUT, DELETE and PATCH turned into GET at 301
+	// and 302. The transport still sets the Referer and drops the
+	// credentials at each hop as the client does.
 	Transport() http.RoundTripper
 }
 
@@ -84,22 +92,52 @@ func New(opts ...Option) (HttpClient, error) {
 		DisableDecompression: cfg.disableDecompression,
 	}
 	return &client{
-		hc: &http.Client{Transport: tr, Timeout: cfg.timeout, Jar: cfg.jar},
-		tr: tr,
+		// http.Client sends one hop at a time; the client follows the
+		// redirects (redirect.go) and sets the deadline.
+		hc: &http.Client{
+			Transport:     tr,
+			Jar:           cfg.jar,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		tr:      tr,
+		timeout: cfg.timeout,
 	}, nil
 }
 
 type client struct {
-	hc *http.Client
-	tr *dispatch.Transport
+	hc      *http.Client
+	tr      *dispatch.Transport
+	timeout time.Duration
 }
 
-func (c *client) Do(req *http.Request) (*http.Response, error) { return c.hc.Do(req) }
-func (c *client) Get(url string) (*http.Response, error)       { return c.hc.Get(url) }
-func (c *client) Head(url string) (*http.Response, error)      { return c.hc.Head(url) }
+func (c *client) Do(req *http.Request) (*http.Response, error) {
+	if c.timeout > 0 {
+		return c.withTimeout(req, c.timeout)
+	}
+	return c.do(req)
+}
+
+func (c *client) Get(url string) (*http.Response, error) {
+	return c.send(http.MethodGet, url, "", nil)
+}
+
+func (c *client) Head(url string) (*http.Response, error) {
+	return c.send(http.MethodHead, url, "", nil)
+}
 
 func (c *client) Post(url, contentType string, body io.Reader) (*http.Response, error) {
-	return c.hc.Post(url, contentType, body)
+	return c.send(http.MethodPost, url, contentType, body)
+}
+
+func (c *client) send(method, url, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	return c.Do(req)
 }
 
 func (c *client) GetCookies(u *url.URL) []*http.Cookie {

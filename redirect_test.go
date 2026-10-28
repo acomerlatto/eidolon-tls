@@ -2,12 +2,16 @@ package eidolon_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,7 +90,8 @@ func get(t *testing.T, do func(*http.Request) (*http.Response, error), url strin
 // Referer and credentials at each redirect hop follow the Fetch standard:
 // the Referer comes from the referrer of the first request under
 // strict-origin-when-cross-origin, and Authorization is dropped across
-// origins and from https to http.
+// origins and from https to http. A Cookie set by the caller is dropped
+// with it.
 func TestRedirectHeaders(t *testing.T) {
 	var h hops
 	srv := lab.Start(t, lab.Options{Handler: redirector(&h)})
@@ -115,7 +120,7 @@ func TestRedirectHeaders(t *testing.T) {
 			"", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			header := http.Header{"Authorization": {"Bearer t"}, "Proxy-Authorization": {"Basic p"}}
+			header := http.Header{"Authorization": {"Bearer t"}, "Proxy-Authorization": {"Basic p"}, "Cookie": {"k=v"}}
 			if tt.ref != "" {
 				header.Set("Referer", tt.ref)
 			}
@@ -131,6 +136,10 @@ func TestRedirectHeaders(t *testing.T) {
 				if _, ok := got[k]; ok != tt.auth {
 					t.Errorf("%s sent = %v, want %v", k, ok, tt.auth)
 				}
+			}
+			// A Cookie of the caller does not cross origins either.
+			if _, ok := got["Cookie"]; ok != tt.auth {
+				t.Errorf("Cookie sent = %v, want %v", ok, tt.auth)
 			}
 			// The first request keeps the Referer of the caller.
 			if ref := h.get("/from").Get("Referer"); ref != tt.ref {
@@ -217,44 +226,168 @@ func TestURLCredentials(t *testing.T) {
 	}
 }
 
-// The method and body at each hop are those of http.Client, which match
-// httpcloak: 301, 302 and 303 turn a POST into a GET without body or
-// Content-Type, and 307 and 308 send the same body again (GetBody).
+// The method and body at each hop follow Fetch: 301 and 302 turn only a
+// POST into a GET, without body or Content-Type; 303 turns anything but
+// GET and HEAD into a GET; 307 and 308, and 301 and 302 for other
+// methods, send the same method and body again (GetBody). http.Client
+// turns PUT, DELETE and PATCH into a GET at 301 and 302.
 func TestRedirectMethodAndBody(t *testing.T) {
 	type hit struct{ method, ctype, body string }
-	for _, tt := range []struct {
-		code int
-		want hit
-	}{
-		{http.StatusMovedPermanently, hit{"GET", "", ""}},
-		{http.StatusFound, hit{"GET", "", ""}},
-		{http.StatusSeeOther, hit{"GET", "", ""}},
-		{http.StatusTemporaryRedirect, hit{"POST", "text/plain", "payload"}},
-		{http.StatusPermanentRedirect, hit{"POST", "text/plain", "payload"}},
-	} {
-		for _, protos := range [][]string{{"http/1.1"}, {"h2"}} {
-			t.Run(http.StatusText(tt.code)+"/"+protos[0], func(t *testing.T) {
-				hits := make(chan hit, 1)
-				srv := lab.Start(t, lab.Options{NextProtos: protos, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path == "/from" {
-						io.Copy(io.Discard, r.Body)
-						http.Redirect(w, r, "/next", tt.code)
-						return
+	codes := []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect}
+	for _, method := range []string{"POST", "PUT", "DELETE", "PATCH", "HEAD"} {
+		for _, code := range codes {
+			want := hit{method, "text/plain", "payload"}
+			switch {
+			case method == "HEAD":
+				want = hit{"HEAD", "", ""}
+			case code == http.StatusSeeOther,
+				method == "POST" && (code == http.StatusMovedPermanently || code == http.StatusFound):
+				want = hit{"GET", "", ""}
+			}
+			for _, protos := range [][]string{{"http/1.1"}, {"h2"}} {
+				t.Run(fmt.Sprintf("%s %d %s", method, code, protos[0]), func(t *testing.T) {
+					hits := make(chan hit, 1)
+					srv := lab.Start(t, lab.Options{NextProtos: protos, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.URL.Path == "/from" {
+							io.Copy(io.Discard, r.Body)
+							w.Header().Set("Location", "/next")
+							w.WriteHeader(code)
+							return
+						}
+						b, _ := io.ReadAll(r.Body)
+						hits <- hit{r.Method, r.Header.Get("Content-Type"), string(b)}
+					})})
+					c := newClient(t, srv)
+					var body io.Reader
+					if method != "HEAD" {
+						body = strings.NewReader("payload")
 					}
-					b, _ := io.ReadAll(r.Body)
-					hits <- hit{r.Method, r.Header.Get("Content-Type"), string(b)}
-				})})
-				c := newClient(t, srv)
-				resp, err := c.Post("https://example.com/from", "text/plain", strings.NewReader("payload"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-				if got := <-hits; got != tt.want {
-					t.Fatalf("next hop got %+v, want %+v", got, tt.want)
-				}
-			})
+					req, err := http.NewRequest(method, "https://example.com/from", body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if body != nil {
+						req.Header.Set("Content-Type", "text/plain")
+					}
+					resp, err := c.Do(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+					if got := <-hits; got != want {
+						t.Fatalf("next hop got %+v, want %+v", got, want)
+					}
+				})
+			}
 		}
+	}
+}
+
+// A body that cannot be sent again stops at a redirect that would send
+// it, which is returned, as http.Client does; a redirect that drops it
+// is followed.
+func TestRedirectBodyWithoutGetBody(t *testing.T) {
+	srv := lab.Start(t, lab.Options{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		if r.URL.Path == "/from" {
+			w.Header().Set("Location", "/next")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+		}
+	})})
+	c := newClient(t, srv)
+	req, err := http.NewRequest("PUT", "https://example.com/from", io.NopCloser(strings.NewReader("payload")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want the redirect", resp.StatusCode)
+	}
+}
+
+// Redirects stop after 20, the limit of Fetch and Chrome, with
+// ErrTooManyRedirects.
+func TestRedirectLimit(t *testing.T) {
+	var hits atomic.Int32
+	srv := lab.Start(t, lab.Options{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		n, _ := strconv.Atoi(r.URL.Query().Get("n"))
+		if n > 0 {
+			http.Redirect(w, r, fmt.Sprintf("/?n=%d", n-1), http.StatusFound)
+		}
+	})})
+	c := newClient(t, srv)
+	resp, err := c.Get("https://example.com/?n=20")
+	if err != nil {
+		t.Fatalf("20 redirects: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || hits.Load() != 21 {
+		t.Fatalf("status %d after %d requests", resp.StatusCode, hits.Load())
+	}
+	hits.Store(0)
+	_, err = c.Get("https://example.com/?n=21")
+	var ue *url.Error
+	if !errors.Is(err, eidolon.ErrTooManyRedirects) || !errors.As(err, &ue) {
+		t.Fatalf("21 redirects: err = %v, want ErrTooManyRedirects in a url.Error", err)
+	}
+	if hits.Load() != 21 {
+		t.Fatalf("%d requests, want 21", hits.Load())
+	}
+}
+
+// WithTimeout limits the whole chain of redirects, as http.Client.Timeout.
+func TestRedirectTimeout(t *testing.T) {
+	srv := lab.Start(t, lab.Options{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(60 * time.Millisecond)
+		n, _ := strconv.Atoi(r.URL.Query().Get("n"))
+		if n > 0 {
+			http.Redirect(w, r, fmt.Sprintf("/?n=%d", n-1), http.StatusFound)
+		}
+	})})
+	c := newClient(t, srv, eidolon.WithTimeout(200*time.Millisecond))
+	_, err := c.Get("https://example.com/?n=10")
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Fatalf("err = %v, want a timeout", err)
+	}
+}
+
+// A Host set by the caller is kept at a relative redirect and dropped at
+// an absolute one, as http.Client.
+func TestRedirectHost(t *testing.T) {
+	var mu sync.Mutex
+	hosts := map[string]string{}
+	srv := lab.Start(t, lab.Options{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hosts[r.URL.Path] = r.Host
+		mu.Unlock()
+		if to := r.URL.Query().Get("to"); to != "" {
+			http.Redirect(w, r, to, http.StatusFound)
+		}
+	})})
+	c := newClient(t, srv)
+	for _, to := range []string{"/relative", "https://example.com/absolute"} {
+		req, err := http.NewRequest("GET", "https://example.com/from?to="+url.QueryEscape(to), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "alias.test"
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hosts["/relative"] != "alias.test" || hosts["/absolute"] != "example.com" {
+		t.Fatalf("hosts = %v", hosts)
 	}
 }
