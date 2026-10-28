@@ -1,0 +1,120 @@
+package eidolon_test
+
+import (
+	"errors"
+	"io"
+	"net/http"
+	"slices"
+	"testing"
+
+	eidolon "github.com/acomerlatto/eidolon-tls"
+	"github.com/acomerlatto/eidolon-tls/internal/lab"
+)
+
+// h2Preface returns the SETTINGS, the WINDOW_UPDATE increments on the
+// connection and the pseudo-headers of the first request that c sent to a
+// new lab server, with the order given in req.
+func h2Preface(t *testing.T, header http.Header, opts ...eidolon.Option) ([]lab.Setting, []uint32, []string) {
+	t.Helper()
+	srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
+	c := newClient(t, srv, opts...)
+	req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+	for k, v := range header {
+		req.Header[k] = v
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	frames, err := srv.NextConn(t).H2Frames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings []lab.Setting
+	var updates []uint32
+	var pseudo []string
+	for _, f := range frames {
+		switch {
+		case f.Type == "SETTINGS" && f.Flags&0x1 == 0 && settings == nil:
+			settings = append([]lab.Setting{}, f.Settings...)
+		case f.Type == "WINDOW_UPDATE" && f.StreamID == 0:
+			updates = append(updates, f.Increment)
+		case f.Type == "HEADERS" && pseudo == nil:
+			for _, h := range f.Headers {
+				if h.Name[0] == ':' {
+					pseudo = append(pseudo, h.Name)
+				}
+			}
+		}
+	}
+	return settings, updates, pseudo
+}
+
+// A new HTTP/2 connection starts as Chrome 156 does (A10), unless
+// WithHTTP2Settings says otherwise; the pseudo-headers follow Chrome
+// unless the request or the client orders them.
+func TestHTTP2Preface(t *testing.T) {
+	chrome := []lab.Setting{{ID: 1, Val: 65536}, {ID: 2, Val: 0}, {ID: 4, Val: 6291456}, {ID: 6, Val: 262144}}
+	masp := []string{":method", ":authority", ":scheme", ":path"}
+	for _, tt := range []struct {
+		name     string
+		header   http.Header
+		opts     []eidolon.Option
+		settings []lab.Setting
+		updates  []uint32
+		pseudo   []string
+	}{
+		{name: "default", settings: chrome, updates: []uint32{15663105}, pseudo: masp},
+		{
+			name: "custom",
+			opts: []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{Settings: []eidolon.HTTP2Setting{
+				{ID: eidolon.HTTP2SettingMaxConcurrentStreams, Value: 100},
+				{ID: eidolon.HTTP2SettingInitialWindowSize, Value: 131072},
+				{ID: 0x0a0a, Value: 7},
+			}})},
+			settings: []lab.Setting{{ID: 3, Val: 100}, {ID: 4, Val: 131072}, {ID: 0x0a0a, Val: 7}},
+			pseudo:   masp,
+		},
+		{
+			name:     "client order first",
+			opts:     []eidolon.Option{eidolon.WithDefaultOrder(eidolon.Order{Pseudo: []string{":path", ":scheme"}})},
+			settings: chrome, updates: []uint32{15663105},
+			pseudo: []string{":path", ":scheme", ":method", ":authority"},
+		},
+		{
+			name:     "request order first",
+			header:   http.Header{eidolon.PHeaderOrderKey: {":method", ":scheme", ":path", ":authority"}},
+			settings: chrome, updates: []uint32{15663105},
+			pseudo: []string{":method", ":scheme", ":path", ":authority"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			settings, updates, pseudo := h2Preface(t, tt.header, tt.opts...)
+			if !slices.Equal(settings, tt.settings) {
+				t.Errorf("SETTINGS %v, want %v", settings, tt.settings)
+			}
+			if !slices.Equal(updates, tt.updates) {
+				t.Errorf("WINDOW_UPDATE %v, want %v", updates, tt.updates)
+			}
+			if !slices.Equal(pseudo, tt.pseudo) {
+				t.Errorf("pseudo-headers %v, want %v", pseudo, tt.pseudo)
+			}
+		})
+	}
+}
+
+// Settings the client cannot honor are refused by New.
+func TestWithHTTP2SettingsInvalid(t *testing.T) {
+	for _, s := range []eidolon.HTTP2Settings{
+		{Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingEnablePush, Value: 1}}},
+		{Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingMaxFrameSize, Value: 1}}},
+		{Settings: []eidolon.HTTP2Setting{{ID: 4, Value: 1}, {ID: 4, Value: 2}}},
+		{ConnectionWindowUpdate: 1 << 31},
+	} {
+		if c, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithHTTP2Settings(s)); !errors.Is(err, eidolon.ErrConfig) || c != nil {
+			t.Errorf("New with %v = %v, %v; want ErrConfig", s, c, err)
+		}
+	}
+}

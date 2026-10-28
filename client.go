@@ -94,6 +94,7 @@ func New(opts ...Option) (HttpClient, error) {
 		Spelling:    cfg.spelling,
 		Order:       cfg.order,
 		Protocols:   alpn,
+		H2:          cfg.h2,
 
 		MaxConnsPerHost: cfg.maxConnsPerHost,
 		IdleConnTimeout: cfg.idleConnTimeout,

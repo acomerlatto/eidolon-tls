@@ -15,6 +15,7 @@ import (
 
 	utls "github.com/acomerlatto/utls"
 
+	"github.com/acomerlatto/eidolon-tls/internal/dispatch"
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/order"
 )
@@ -37,6 +38,7 @@ type config struct {
 
 	order    *order.Order
 	spelling http1.Spelling
+	h2       *dispatch.H2Preface
 
 	protocols    []Protocol // WithProtocols; nil if not used
 	force        int        // bits 1<<HTTP1 and 1<<HTTP2 of WithForceHTTP*
