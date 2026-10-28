@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"golang.org/x/crypto/cryptobyte"
@@ -87,181 +89,295 @@ func captureRequest(t *testing.T, method, url, referer, cookie, contentType, bod
 	return req
 }
 
-// The profile sends what Chrome sent in the capture, field by field and
-// in order, over HTTP/2, HTTP/1.1 and http://, with the requests a page
-// would make; over HTTP/2, the HPACK blocks are those of Chrome byte by
-// byte, the frames before the first HEADERS are those of Chrome, and so
-// are the Akamai fingerprint and its hash, the weight and the exclusive
-// flag of each HEADERS, and the ClientHello once normalized, with its
-// JA4. The requests go one after the other, so each HEADERS depends on
-// stream 0, where Chrome made some depend on a stream still open. Known
-// deviation: the favicon goes at the image priority, u=2, i, where Chrome
-// sent it at u=1, i, which changes the index of that field in its block
-// and its weight.
+// The profile sends what Chrome sent in the capture, over HTTP/2,
+// HTTP/1.1 and http://, with the requests a page would make, in a synctest
+// bubble against lab.Site, which holds each response until the page
+// load of the capture would have it: the streams are open when Chrome's
+// were, and the pause before the reload takes no time.
+//
+// Over HTTP/2, every frame but the SETTINGS ACK, whose place depends on
+// when the SETTINGS of the server arrive, is that of Chrome, in order:
+// the start of the connection, each HEADERS with its fields, HPACK block
+// and priority, which depends on the streams still open, the DATA of the
+// POST, and on the reload the PING after the first HEADERS and the
+// WINDOW_UPDATE of the connection. The Akamai fingerprint and its hash are
+// those of Chrome, and so is the ClientHello once normalized, with its
+// JA4. Known deviation: the favicon goes at the image priority, u=2, i,
+// where Chrome sent it at u=1, i, which changes the index of that field
+// in its block and its weight.
+//
+// Over HTTP/1.1 and http://, the six subresources at once open six
+// connections, the limit per host of Chrome, which TestH1PoolLimit
+// checks, and each request is the one Chrome sent byte by byte; which
+// connection carries which request depends on timing, there and in
+// Chrome.
 func TestChromeCapture(t *testing.T) {
 	c := loadCapture(t)
-	cert, err := lab.NewCertificate(time.Hour, "lab.test", "h1.lab.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	h2 := lab.Start(t, lab.Options{NextProtos: []string{"h2"}, Certificate: &cert})
-	h1 := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}, Certificate: &cert})
-	plain := lab.Start(t, lab.Options{Plain: true})
-	route := map[string]string{"lab.test:443": h2.Addr, "h1.lab.test:443": h1.Addr, "plain.lab.test:80": plain.Addr}
-	client, err := eidolon.New(
-		eidolon.WithProfile(eidolon.Chrome156Linux()),
-		eidolon.WithRootCAs(h2.RootCAs),
-		eidolon.WithDialContext(func(ctx context.Context, network, addr string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, network, route[addr])
-		}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	send := func(req *http.Request) {
-		t.Helper()
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-	}
-
 	t.Run("h2", func(t *testing.T) {
-		for _, want := range c.H2 {
-			f := map[string]string{}
-			for _, kv := range want {
-				f[kv[0]] = kv[1]
-			}
-			body := ""
-			if f[":method"] == "POST" {
-				body = `{"a":1}`
-			}
-			send(captureRequest(t, f[":method"], "https://"+f[":authority"]+f[":path"], f["referer"], f["cookie"], f["content-type"], body))
-		}
-		conn := h2.NextConn(t)
-		frames, err := conn.H2Frames()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got, want := frameStart(frames), frameStart(c.H2Frames); got != want {
-			t.Errorf("start of the connection:\n got %s\nwant %s", got, want)
-		}
-		profile := eidolon.Chrome156Linux()
-		akamai := eidolon.Akamai(profile.HTTP2, profile.PseudoOrder)
-		var first [][2]string
-		for _, fr := range frames {
-			if fr.Type == "HEADERS" {
-				first = fields(fr)
-				break
-			}
-		}
-		for _, got := range []string{akamaiOf(frames, first), akamaiOf(c.H2Frames, c.H2[0])} {
-			if got != akamai {
-				t.Errorf("Akamai fingerprint %s, want %s", got, akamai)
-			}
-		}
-		if sum := md5.Sum([]byte(akamai)); hex.EncodeToString(sum[:]) != "52d84b11737d980aef856699f885ca86" {
-			t.Errorf("Akamai hash %x", sum)
-		}
-		var wantPrio []lab.Priority
-		for _, fr := range c.H2Frames {
-			if fr.Type == "HEADERS" {
-				wantPrio = append(wantPrio, *fr.Priority)
-			}
-		}
-		i := 0
-		for _, fr := range frames {
-			if fr.Type != "HEADERS" {
-				continue
-			}
-			if i == len(c.H2) {
-				t.Fatalf("more than %d requests", i)
-			}
-			got, want := fields(fr), [][2]string(nil)
-			for _, kv := range c.H2[i] {
-				if kv == [2]string{"priority", "u=1, i"} && slices.Contains(c.H2[i], [2]string{":path", "/favicon.ico"}) {
-					kv[1] = "u=2, i" // the known deviation
+		synctest.Test(t, func(t *testing.T) {
+			var reqs []*http.Request
+			for _, want := range c.H2 {
+				f := map[string]string{}
+				for _, kv := range want {
+					f[kv[0]] = kv[1]
 				}
-				want = append(want, kv)
+				body := ""
+				if f[":method"] == "POST" {
+					body = `{"a":1}`
+				}
+				reqs = append(reqs, captureRequest(t, f[":method"], "https://"+f[":authority"]+f[":path"], f["referer"], f["cookie"], f["content-type"], body))
 			}
-			if !slices.Equal(got, want) {
-				t.Errorf("request %d:\n got %q\nwant %q", i, got, want)
+			// The load of the page, then the reload: the image and the
+			// script start while the stylesheet is open, and the POST of
+			// the reload while the fetch is.
+			l := newLoader(t, []string{"h2"}, reqs)
+			l.run("s0 f0 s1 s2 s3 f1 f2 f3 s4 f4 s5 f5 s6 f6 pause s7 f7 s8 s9 s10 f8 f9 f10 s11 s12 f11 f12")
+			conn := l.srv.NextConn(t)
+			frames, err := conn.H2Frames()
+			if err != nil {
+				t.Fatal(err)
 			}
-			favicon := slices.Contains(want, [2]string{":path", "/favicon.ico"})
-			if block := hex.EncodeToString(fr.Block); block != c.H2Blocks[i] && !favicon {
-				t.Errorf("request %d: HPACK block\n got %s\nwant %s", i, block, c.H2Blocks[i])
-			}
-			wp := wantPrio[i]
-			if favicon {
-				wp.Weight = 182 // u=2, the known deviation
-			}
-			if p := fr.Priority; p == nil || p.Exclusive != wp.Exclusive || p.Weight != wp.Weight || p.StreamDep != 0 {
-				t.Errorf("request %d: priority %+v, want %+v on stream 0", i, p, wp)
-			}
-			i++
-		}
-		if i != len(c.H2) {
-			t.Fatalf("%d requests, want %d", i, len(c.H2))
-		}
+			compareH2(t, c, frames)
 
-		raw, err := os.ReadFile("testdata/chrome156-linux-clienthello.bin")
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, want := parseHello(t, conn.ClientHello), parseHello(t, raw[5:])
-		if g, w := normalHello(got), normalHello(want); g != w {
-			t.Errorf("ClientHello, normalized:\n got %s\nwant %s", g, w)
-		}
-		if g, w := got.JA4(), want.JA4(); g != w {
-			t.Errorf("JA4 %s, want %s", g, w)
-		}
+			profile := eidolon.Chrome156Linux()
+			akamai := eidolon.Akamai(profile.HTTP2, profile.PseudoOrder)
+			var first [][2]string
+			for _, fr := range frames {
+				if fr.Type == "HEADERS" {
+					first = fields(fr)
+					break
+				}
+			}
+			for _, got := range []string{akamaiOf(frames, first), akamaiOf(c.H2Frames, c.H2[0])} {
+				if got != akamai {
+					t.Errorf("Akamai fingerprint %s, want %s", got, akamai)
+				}
+			}
+			if sum := md5.Sum([]byte(akamai)); hex.EncodeToString(sum[:]) != "52d84b11737d980aef856699f885ca86" {
+				t.Errorf("Akamai hash %x", sum)
+			}
+
+			raw, err := os.ReadFile("testdata/chrome156-linux-clienthello.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, want := parseHello(t, conn.ClientHello), parseHello(t, raw[5:])
+			if g, w := normalHello(got), normalHello(want); g != w {
+				t.Errorf("ClientHello, normalized:\n got %s\nwant %s", g, w)
+			}
+			if g, w := got.JA4(), want.JA4(); g != w {
+				t.Errorf("JA4 %s, want %s", g, w)
+			}
+		})
 	})
 
 	for _, tt := range []struct {
 		name, raw string
-		srv       *lab.Server
+		protos    []string
 		scheme    string
-	}{{"http/1.1", c.H1, h1, "https"}, {"http", c.Plain, plain, "http"}} {
+	}{{"http/1.1", c.H1, []string{"http/1.1"}, "https"}, {"http", c.Plain, nil, "http"}} {
 		t.Run(tt.name, func(t *testing.T) {
-			br := bufio.NewReader(strings.NewReader(tt.raw))
-			for {
-				r, err := http.ReadRequest(br)
-				if err == io.EOF {
+			synctest.Test(t, func(t *testing.T) {
+				want := splitRequests(t, tt.raw)
+				var reqs []*http.Request
+				for _, raw := range want {
+					r, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+					if err != nil {
+						t.Fatal(err)
+					}
+					body, _ := io.ReadAll(r.Body)
+					reqs = append(reqs, captureRequest(t, r.Method, tt.scheme+"://"+r.Host+r.URL.Path,
+						r.Header.Get("Referer"), r.Header.Get("Cookie"), r.Header.Get("Content-Type"), string(body)))
+				}
+				// The page, then its six subresources at once.
+				l := newLoader(t, tt.protos, reqs)
+				l.run("s0 f0 s1 s2 s3 s4 s5 s6 f1 f2 f3 f4 f5 f6")
+				var got []string
+				for conns := 0; ; conns++ {
+					select {
+					case conn := <-l.srv.Conns():
+						got = append(got, splitRequests(t, string(conn.Bytes()))...)
+						continue
+					default:
+					}
+					if conns != 6 {
+						t.Errorf("%d connections, want 6", conns)
+					}
 					break
 				}
-				if err != nil {
-					t.Fatal(err)
+				slices.Sort(got)
+				slices.Sort(want)
+				if !slices.Equal(got, want) {
+					t.Errorf("sent\n%q\nwant\n%q", got, want)
 				}
-				body, _ := io.ReadAll(r.Body)
-				send(captureRequest(t, r.Method, tt.scheme+"://"+r.Host+r.URL.Path,
-					r.Header.Get("Referer"), r.Header.Get("Cookie"), r.Header.Get("Content-Type"), string(body)))
-			}
-			if got := string(tt.srv.NextConn(t).Bytes()); got != tt.raw {
-				t.Fatalf("sent\n%s\nwant\n%s", got, tt.raw)
-			}
+			})
 		})
 	}
 }
 
-// frameStart describes the frames before the first HEADERS, but the
-// SETTINGS ACK, which goes when the SETTINGS of the server arrive: in the
-// lab, they may arrive before the first request.
-func frameStart(frames []lab.H2Frame) string {
-	var b strings.Builder
-	for _, f := range frames {
-		if f.Type == "HEADERS" {
-			break
+// compareH2 compares the frames of the HTTP/2 connection with those of
+// the capture, but the SETTINGS ACK and the known deviation of the
+// favicon.
+func compareH2(t *testing.T, c capture, frames []lab.H2Frame) {
+	t.Helper()
+	describe := func(frames []lab.H2Frame) []string {
+		var out []string
+		for _, f := range frames {
+			if f.Type == "SETTINGS" && f.Flags&1 != 0 {
+				continue
+			}
+			s := fmt.Sprintf("%s %d %#x %v %d", f.Type, f.StreamID, f.Flags, f.Settings, f.Increment)
+			if f.Priority != nil {
+				s += fmt.Sprintf(" %+v", *f.Priority)
+			}
+			out = append(out, s)
 		}
-		if f.Type == "SETTINGS" && f.Flags&1 != 0 {
+		return out
+	}
+	want := slices.Clone(c.H2Frames)
+	i := 0
+	for j, fr := range want {
+		if fr.Type != "HEADERS" {
 			continue
 		}
-		fmt.Fprintf(&b, "%s %d %#x %v %d; ", f.Type, f.StreamID, f.Flags, f.Settings, f.Increment)
+		if slices.Contains(c.H2[i], [2]string{":path", "/favicon.ico"}) {
+			p := *fr.Priority
+			p.Weight = 182 // u=2, the known deviation
+			want[j].Priority = &p
+		}
+		i++
 	}
-	return b.String()
+	if got, want := describe(frames), describe(want); !slices.Equal(got, want) {
+		t.Errorf("frames:\n got %q\nwant %q", got, want)
+	}
+	i = 0
+	for _, fr := range frames {
+		if fr.Type != "HEADERS" {
+			continue
+		}
+		if i == len(c.H2) {
+			t.Fatalf("more than %d requests", i)
+		}
+		got, want := fields(fr), [][2]string(nil)
+		for _, kv := range c.H2[i] {
+			if kv == [2]string{"priority", "u=1, i"} && slices.Contains(c.H2[i], [2]string{":path", "/favicon.ico"}) {
+				kv[1] = "u=2, i" // the known deviation
+			}
+			want = append(want, kv)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("request %d:\n got %q\nwant %q", i, got, want)
+		}
+		favicon := slices.Contains(want, [2]string{":path", "/favicon.ico"})
+		if block := hex.EncodeToString(fr.Block); block != c.H2Blocks[i] && !favicon {
+			t.Errorf("request %d: HPACK block\n got %s\nwant %s", i, block, c.H2Blocks[i])
+		}
+		i++
+	}
+	if i != len(c.H2) {
+		t.Fatalf("%d requests, want %d", i, len(c.H2))
+	}
+}
+
+// loader makes the requests of a page load with the Chrome profile
+// against lab.Site in a synctest bubble, whose server holds each response
+// until the load releases it.
+type loader struct {
+	t      *testing.T
+	srv    *lab.Server
+	client eidolon.HttpClient
+	reqs   []*http.Request
+
+	mu      sync.Mutex
+	queue   map[string][]chan struct{} // by path, in the order started
+	release map[int]chan struct{}      // by request
+	done    map[int]chan struct{}      // by request
+}
+
+func newLoader(t *testing.T, protos []string, reqs []*http.Request) *loader {
+	t.Helper()
+	cert, err := lab.NewCertificate(time.Hour, lab.SiteHost, lab.SiteH1Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &loader{t: t, reqs: reqs, queue: map[string][]chan struct{}{}, release: map[int]chan struct{}{}, done: map[int]chan struct{}{}}
+	site := lab.Site()
+	l.srv = lab.Start(t, lab.Options{NextProtos: protos, Plain: protos == nil, Certificate: &cert, Memory: true,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			l.mu.Lock()
+			q := l.queue[r.URL.Path]
+			release := q[0]
+			l.queue[r.URL.Path] = q[1:]
+			l.mu.Unlock()
+			<-release
+			site.ServeHTTP(w, r)
+		})})
+	l.client, err = eidolon.New(
+		eidolon.WithProfile(eidolon.Chrome156Linux()),
+		eidolon.WithRootCAs(l.srv.RootCAs),
+		eidolon.WithDialContext(l.srv.Dial),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.client.Close() })
+	return l
+}
+
+// run runs the steps of a load: "sN" starts request N and waits until
+// its server holds it, or until it waits for a connection; "fN" releases
+// its response and waits until it is read; "pause" lets 15 s pass, more
+// than the preface PING and the window update wait for.
+func (l *loader) run(steps string) {
+	for _, step := range strings.Fields(steps) {
+		if step == "pause" {
+			time.Sleep(15 * time.Second)
+			continue
+		}
+		n, err := strconv.Atoi(step[1:])
+		if err != nil {
+			l.t.Fatalf("step %q", step)
+		}
+		l.mu.Lock()
+		if step[0] == 's' {
+			req := l.reqs[n]
+			release, done := make(chan struct{}), make(chan struct{})
+			l.queue[req.URL.Path] = append(l.queue[req.URL.Path], release)
+			l.release[n], l.done[n] = release, done
+			l.mu.Unlock()
+			go func() {
+				defer close(done)
+				resp, err := l.client.Do(req)
+				if err != nil {
+					l.t.Errorf("request %d: %v", n, err)
+					return
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}()
+		} else {
+			release, done := l.release[n], l.done[n]
+			l.mu.Unlock()
+			close(release)
+			<-done
+		}
+		synctest.Wait()
+	}
+}
+
+// splitRequests splits raw HTTP/1.1 requests, each with its body.
+func splitRequests(t *testing.T, raw string) []string {
+	t.Helper()
+	var out []string
+	for raw != "" {
+		r, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := strings.Index(raw, "\r\n\r\n") + 4 + int(r.ContentLength)
+		out, raw = append(out, raw[:n]), raw[n:]
+	}
+	return out
 }
 
 // fields returns the header fields of a HEADERS frame.
