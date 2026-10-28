@@ -626,7 +626,11 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 	if connWindowUpdate > 0 {
 		cc.fr.WriteWindowUpdate(0, connWindowUpdate)
 	}
-	cc.inflow.init(int32(connWindowUpdate) + initialWindowSize)
+	if t.ChromiumWindowUpdate {
+		cc.inflow.initChromium(int32(connWindowUpdate) + initialWindowSize) // [eidolon]
+	} else {
+		cc.inflow.init(int32(connWindowUpdate) + initialWindowSize)
+	}
 	cc.bw.Flush()
 	if cc.werr != nil {
 		cc.Close()
@@ -1906,7 +1910,11 @@ type resAndError struct {
 // requires cc.mu be held.
 func (cc *ClientConn) addStreamLocked(cs *clientStream) {
 	cs.flow.conn = &cc.flow
-	cs.inflow.init(cc.initialStreamRecvWindowSize)
+	if cc.t.ChromiumWindowUpdate {
+		cs.inflow.initChromium(cc.initialStreamRecvWindowSize) // [eidolon]
+	} else {
+		cs.inflow.init(cc.initialStreamRecvWindowSize)
+	}
 	cs.ID = cc.nextStreamID
 	cc.nextStreamID += 2
 	cc.streams[cs.ID] = cs

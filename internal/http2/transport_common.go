@@ -156,6 +156,13 @@ type Transport struct {
 	// unanswered, the connection is closed as lost.
 	PrefacePing time.Duration
 
+	// [eidolon] ChromiumWindowUpdate gives the receive windows back as
+	// Chromium: a WINDOW_UPDATE once more than half of the window of the
+	// stream or the connection has been read, or once 5 s have passed
+	// since its last one, when more is read. Otherwise the window goes
+	// back every 4 KiB read.
+	ChromiumWindowUpdate bool
+
 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
 	// initial settings frame. It is the size in bytes of the largest frame
 	// payload that the sender is willing to receive. If 0, no setting is

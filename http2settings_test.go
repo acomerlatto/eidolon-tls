@@ -263,6 +263,62 @@ func TestHTTP2PrefacePing(t *testing.T) {
 	}
 }
 
+// The receive windows go back as Chromium by default: a response of 1 MiB
+// is read without any WINDOW_UPDATE after the first, since its windows
+// are of 6 and 15 MiB; with windows of 64 KiB, each update gives back more
+// than half of one. HTTP2WindowUpdateGo gives them back as they are read.
+func TestHTTP2WindowUpdate(t *testing.T) {
+	small := eidolon.HTTP2Settings{
+		Settings:     []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingInitialWindowSize, Value: 65536}},
+		WindowUpdate: eidolon.HTTP2WindowUpdateChromium,
+	}
+	for _, tt := range []struct {
+		name  string
+		opts  []eidolon.Option
+		first bool // a WINDOW_UPDATE follows SETTINGS
+		ok    func(updates []uint32) bool
+	}{
+		{"default", nil, true, func(u []uint32) bool { return len(u) == 0 }},
+		{"chromium", []eidolon.Option{eidolon.WithHTTP2Settings(small)}, false, func(u []uint32) bool {
+			return len(u) > 0 && !slices.ContainsFunc(u, func(n uint32) bool { return n <= 32767 })
+		}},
+		{"go", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{})}, false, func(u []uint32) bool {
+			return len(u) > 0
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write(make([]byte, 1<<20))
+			})})
+			c := newClient(t, srv, tt.opts...)
+			resp, err := c.Get("https://example.com/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n, _ := io.Copy(io.Discard, resp.Body); n != 1<<20 {
+				t.Fatalf("read %d", n)
+			}
+			resp.Body.Close()
+			frames, err := srv.NextConn(t).H2Frames()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var updates []uint32
+			for _, f := range frames {
+				if f.Type == "WINDOW_UPDATE" {
+					updates = append(updates, f.Increment)
+				}
+			}
+			if tt.first {
+				updates = updates[1:]
+			}
+			if !tt.ok(updates) {
+				t.Errorf("WINDOW_UPDATE %v", updates)
+			}
+		})
+	}
+}
+
 // Settings the client cannot honor are refused by New.
 func TestWithHTTP2SettingsInvalid(t *testing.T) {
 	for _, s := range []eidolon.HTTP2Settings{
@@ -274,6 +330,7 @@ func TestWithHTTP2SettingsInvalid(t *testing.T) {
 		{Priority: 7},
 		{HPACK: 7},
 		{PrefacePing: -1},
+		{WindowUpdate: 7},
 	} {
 		if c, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithHTTP2Settings(s)); !errors.Is(err, eidolon.ErrConfig) || c != nil {
 			t.Errorf("New with %v = %v, %v; want ErrConfig", s, c, err)

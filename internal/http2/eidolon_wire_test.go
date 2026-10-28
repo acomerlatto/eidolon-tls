@@ -91,11 +91,10 @@ func respond(writes chan<- func(), fr *Framer, id uint32, body []byte) {
 	hpack.NewEncoder(&block).WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
 	writes <- func() {
 		fr.WriteHeaders(HeadersFrameParam{StreamID: id, EndHeaders: true, EndStream: len(body) == 0, BlockFragment: block.Bytes()})
-	}
-	for b := body; len(b) > 0; {
-		n := min(len(b), 16384)
-		chunk, last := b[:n], n == len(b)
-		writes <- func() { fr.WriteData(id, last, chunk) }
-		b = b[n:]
+		for b := body; len(b) > 0; {
+			n := min(len(b), 16384)
+			fr.WriteData(id, n == len(b), b[:n])
+			b = b[n:]
+		}
 	}
 }

@@ -61,9 +61,23 @@ const (
 	HTTP2HPACKChromium
 )
 
+// HTTP2WindowUpdate is when an HTTP/2 connection gives back the receive
+// windows of the connection and of its streams with WINDOW_UPDATE.
+type HTTP2WindowUpdate int
+
+const (
+	// HTTP2WindowUpdateGo gives the window back as Go does, every 4 KiB
+	// read.
+	HTTP2WindowUpdateGo HTTP2WindowUpdate = iota
+	// HTTP2WindowUpdateChromium gives it back as Chromium: once more than
+	// half of the window has been read, or 5 s after the last update,
+	// when more is read.
+	HTTP2WindowUpdateChromium
+)
+
 // HTTP2Settings is what a new HTTP/2 connection sends before its first
 // request, how its requests announce their priority, and how it sends
-// DATA frames and header fields.
+// DATA frames, header fields, PINGs and window updates.
 type HTTP2Settings struct {
 	// Settings are sent exactly, in this order. Unknown IDs, such as
 	// GREASE values, are sent as given.
@@ -86,6 +100,8 @@ type HTTP2Settings struct {
 	// nothing is read for PrefacePing while it is unanswered, the
 	// connection is closed as lost, and its requests fail.
 	PrefacePing time.Duration
+	// WindowUpdate is when the receive windows are given back.
+	WindowUpdate HTTP2WindowUpdate
 }
 
 // WithHTTP2Settings sets the SETTINGS and the connection WINDOW_UPDATE of
@@ -93,7 +109,7 @@ type HTTP2Settings struct {
 // HEADER_TABLE_SIZE 65536, ENABLE_PUSH 0, INITIAL_WINDOW_SIZE 6291456 and
 // MAX_HEADER_LIST_SIZE 262144, then a WINDOW_UPDATE of 15663105, with
 // HTTP2PriorityChromium, DATA frames of at most 16375 bytes,
-// HTTP2HPACKChromium and a PrefacePing of 10 s.
+// HTTP2HPACKChromium, a PrefacePing of 10 s and HTTP2WindowUpdateChromium.
 //
 // The values announced are enforced: HEADER_TABLE_SIZE sizes the HPACK
 // decoder, INITIAL_WINDOW_SIZE the receive window of each stream, the
@@ -104,7 +120,8 @@ type HTTP2Settings struct {
 // return an error that wraps ErrConfig: a setting repeated, a value RFC
 // 9113 forbids, ENABLE_PUSH other than 0 (server push is refused),
 // INITIAL_WINDOW_SIZE or MAX_HEADER_LIST_SIZE of 0, a connection window
-// above 2^31-1, an unknown Priority or HPACK, a negative PrefacePing, or
+// above 2^31-1, an unknown Priority, HPACK or WindowUpdate, a negative
+// PrefacePing, or
 // HTTP2PriorityChromium with
 // NO_RFC7540_PRIORITIES 1, which says the client sends no such priority.
 // The settings are copied when WithHTTP2Settings is called.
@@ -153,6 +170,13 @@ func h2Preface(s HTTP2Settings) (*dispatch.H2Preface, error) {
 		pre.ChromiumHPACK = true
 	default:
 		return nil, fmt.Errorf("unknown HPACK %d", s.HPACK)
+	}
+	switch s.WindowUpdate {
+	case HTTP2WindowUpdateGo:
+	case HTTP2WindowUpdateChromium:
+		pre.ChromiumWindowUpdate = true
+	default:
+		return nil, fmt.Errorf("unknown WindowUpdate %d", s.WindowUpdate)
 	}
 	return pre, nil
 }

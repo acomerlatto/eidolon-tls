@@ -122,6 +122,7 @@ func Chrome156Linux() Profile {
 			MaxDataFrameSize:       16375,
 			HPACK:                  HTTP2HPACKChromium,
 			PrefacePing:            10 * time.Second,
+			WindowUpdate:           HTTP2WindowUpdateChromium,
 		},
 		PseudoOrder: []string{":method", ":authority", ":scheme", ":path"},
 		Headers: []HeaderField{

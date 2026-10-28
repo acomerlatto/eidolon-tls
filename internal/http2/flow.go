@@ -6,6 +6,8 @@
 
 package http2
 
+import "time"
+
 // inflowMinRefresh is the minimum number of bytes we'll send for a
 // flow control window update.
 const inflowMinRefresh = 4 << 10
@@ -19,11 +21,27 @@ const maxFlowWindow = (1 << 31) - 1
 type inflow struct {
 	avail  int32
 	unsent int32
+
+	// [eidolon] chromium (initChromium): max is the window, last the time
+	// of the last update.
+	max  int32
+	last time.Time
 }
 
 // init sets the initial window.
 func (f *inflow) init(n int32) {
 	f.avail = n
+}
+
+// [eidolon] chromiumWindowDelay is how long Chromium waits at most to
+// send a window update (kDefaultTimeToBufferSmallWindowUpdates).
+const chromiumWindowDelay = 5 * time.Second
+
+// [eidolon] initChromium sets the initial window n, and makes add return
+// the window as Chromium's IncreaseRecvWindowSize: when more than half of
+// n is unsent, or 5 s after the last update, at the next bytes added.
+func (f *inflow) initChromium(n int32) {
+	f.avail, f.max, f.last = n, n, time.Now()
 }
 
 // add adds n bytes to the window, with a maximum window size of max,
@@ -45,7 +63,14 @@ func (f *inflow) add(n int) (connAdd int32) {
 		panic("flow control update exceeds maximum window size")
 	}
 	f.unsent = int32(unsent)
-	if f.unsent < inflowMinRefresh && f.unsent < f.avail {
+	if f.max != 0 {
+		// [eidolon] initChromium. Nothing read, as for a DATA frame
+		// without padding, sends nothing.
+		if n == 0 || f.unsent <= f.max/2 && time.Since(f.last) < chromiumWindowDelay {
+			return 0
+		}
+		f.last = time.Now()
+	} else if f.unsent < inflowMinRefresh && f.unsent < f.avail {
 		// If there aren't at least inflowMinRefresh bytes of window to send,
 		// and this update won't at least double the window, buffer the update for later.
 		return 0
