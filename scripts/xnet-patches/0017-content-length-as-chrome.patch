@@ -1,0 +1,75 @@
+diff --git a/internal/httpcommon/eidolon_length_test.go b/internal/httpcommon/eidolon_length_test.go
+new file mode 100644
+index 0000000..f43071e
+--- /dev/null
++++ b/internal/httpcommon/eidolon_length_test.go
+@@ -0,0 +1,31 @@
++package httpcommon
++
++import (
++	"testing"
++
++	"github.com/acomerlatto/eidolon-tls/internal/order"
++)
++
++// An empty body states its length for POST and PUT only, as Chrome.
++func TestShouldSendReqContentLengthChrome(t *testing.T) {
++	for method, want := range map[string]bool{
++		"POST": true, "PUT": true, "PATCH": false, "DELETE": false, "GET": false, "OPTIONS": false,
++	} {
++		if got := shouldSendReqContentLength(method, 0); got != want {
++			t.Errorf("%s: got %v, want %v", method, got, want)
++		}
++	}
++}
++
++// An exact content-length is 1*DIGIT equal to the body length.
++func TestCheckExactContentLength(t *testing.T) {
++	for v, ok := range map[string]bool{
++		"7": true, "007": true, "+7": false, "-7": false, "": false, "7 ": false, "8": false,
++	} {
++		var host string
++		err := checkExact([]order.Field{{Name: "Content-Length", Value: v}}, 7, &host)
++		if (err == nil) != ok {
++			t.Errorf("%q: err = %v, want ok %v", v, err, ok)
++		}
++	}
++}
+diff --git a/internal/httpcommon/request.go b/internal/httpcommon/request.go
+index 64107d4..fb08c15 100644
+--- a/internal/httpcommon/request.go
++++ b/internal/httpcommon/request.go
+@@ -469,7 +469,7 @@ func checkExact(exact []order.Field, contentLength int64, host *string) error {
+ 			*host = f.Value
+ 		case asciiEqualFold(f.Name, "content-length"):
+ 			lengths++
+-			if n, err := strconv.ParseInt(f.Value, 10, 64); err != nil || n != contentLength || n < 0 {
++			if n, err := strconv.ParseInt(f.Value, 10, 64); err != nil || n != contentLength || !digits(f.Value) {
+ 				return fmt.Errorf("exact headers: content-length %q does not match the body", f.Value)
+ 			}
+ 		}
+@@ -480,6 +480,13 @@ func checkExact(exact []order.Field, contentLength int64, host *string) error {
+ 	return nil
+ }
+ 
++// digits reports whether s has digits only, as the Content-Length syntax
++// (RFC 9110 section 8.6, 1*DIGIT); ParseInt also takes a sign, and refuses
++// an empty s.
++func digits(s string) bool {
++	return strings.Trim(s, "0123456789") == ""
++}
++
+ // shouldSendReqContentLength reports whether we should send
+ // a "content-length" request header. This logic is basically a copy of the net/http
+ // transferWriter.shouldSendContentLength.
+@@ -494,8 +501,9 @@ func shouldSendReqContentLength(method string, contentLength int64) bool {
+ 	}
+ 	// For zero bodies, whether we send a content-length depends on the method.
+ 	// It also kinda doesn't matter for http2 either way, with END_STREAM.
++	// Only POST and PUT, as Chrome (HttpNetworkTransaction::BuildRequestHeaders).
+ 	switch method {
+-	case "POST", "PUT", "PATCH":
++	case "POST", "PUT":
+ 		return true
+ 	default:
+ 		return false

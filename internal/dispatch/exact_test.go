@@ -261,6 +261,8 @@ func TestExactHeadersRefused(t *testing.T) {
 		{"h1 with two Hosts", []string{"http/1.1"}, []order.Field{{Name: "Host", Value: "a"}, {Name: "Host", Value: "b"}}, ""},
 		{"h1 body without Content-Length", []string{"http/1.1"}, []order.Field{{Name: "Host", Value: "example.com"}}, "payload"},
 		{"h1 wrong Content-Length", []string{"http/1.1"}, []order.Field{{Name: "Host", Value: "example.com"}, {Name: "Content-Length", Value: "3"}}, "payload"},
+		{"h1 Content-Length with a sign", []string{"http/1.1"}, []order.Field{{Name: "Host", Value: "example.com"}, {Name: "Content-Length", Value: "+7"}}, "payload"},
+		{"h2 Content-Length with a sign", []string{"h2"}, []order.Field{{Name: "Content-Length", Value: "+7"}}, "payload"},
 		{"h1 Transfer-Encoding", []string{"http/1.1"}, []order.Field{{Name: "Host", Value: "example.com"}, {Name: "Transfer-Encoding", Value: "chunked"}}, ""},
 		{"h1 CRLF in value", []string{"http/1.1"}, []order.Field{{Name: "Host", Value: "example.com"}, {Name: "X-A", Value: "1\r\nX-B: 2"}}, ""},
 		{"h2 wrong Content-Length", []string{"h2"}, []order.Field{{Name: "Content-Length", Value: "3"}}, "payload"},

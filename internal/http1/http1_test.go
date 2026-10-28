@@ -256,7 +256,8 @@ func TestWriteRequestNormalizes(t *testing.T) {
 		// content, as the H2 engine does.
 		{name: "POST without body", method: http.MethodPost, want: "Content-Length: 0\r\n"},
 		{name: "PUT without body", method: http.MethodPut, want: "Content-Length: 0\r\n"},
-		{name: "PATCH without body", method: http.MethodPatch, want: "Content-Length: 0\r\n"},
+		// Chrome states the length of an empty POST or PUT only.
+		{name: "PATCH without body", method: http.MethodPatch, want: ""},
 		{name: "GET without body", method: http.MethodGet, want: ""},
 		{name: "DELETE without body", method: http.MethodDelete, want: ""},
 		// User-Agent as in the H2 engine and net/http: one value, and an

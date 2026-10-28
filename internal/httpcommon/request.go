@@ -469,7 +469,7 @@ func checkExact(exact []order.Field, contentLength int64, host *string) error {
 			*host = f.Value
 		case asciiEqualFold(f.Name, "content-length"):
 			lengths++
-			if n, err := strconv.ParseInt(f.Value, 10, 64); err != nil || n != contentLength || n < 0 {
+			if n, err := strconv.ParseInt(f.Value, 10, 64); err != nil || n != contentLength || !digits(f.Value) {
 				return fmt.Errorf("exact headers: content-length %q does not match the body", f.Value)
 			}
 		}
@@ -478,6 +478,13 @@ func checkExact(exact []order.Field, contentLength int64, host *string) error {
 		return errors.New("exact headers: Host or Content-Length repeated")
 	}
 	return nil
+}
+
+// digits reports whether s has digits only, as the Content-Length syntax
+// (RFC 9110 section 8.6, 1*DIGIT); ParseInt also takes a sign, and refuses
+// an empty s.
+func digits(s string) bool {
+	return strings.Trim(s, "0123456789") == ""
 }
 
 // shouldSendReqContentLength reports whether we should send
@@ -494,8 +501,9 @@ func shouldSendReqContentLength(method string, contentLength int64) bool {
 	}
 	// For zero bodies, whether we send a content-length depends on the method.
 	// It also kinda doesn't matter for http2 either way, with END_STREAM.
+	// Only POST and PUT, as Chrome (HttpNetworkTransaction::BuildRequestHeaders).
 	switch method {
-	case "POST", "PUT", "PATCH":
+	case "POST", "PUT":
 		return true
 	default:
 		return false

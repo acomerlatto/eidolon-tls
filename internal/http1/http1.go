@@ -416,9 +416,9 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 		fields = append(fields, order.Field{Name: "transfer-encoding", Value: "chunked"})
 	case req.ContentLength > 0:
 		fields = append(fields, order.Field{Name: "content-length", Value: strconv.FormatInt(req.ContentLength, 10)})
-	case method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch:
-		// RFC 9110 section 8.6: the method defines content, so its absence
-		// is stated; the H2 engine does the same.
+	case method == http.MethodPost || method == http.MethodPut:
+		// An empty POST or PUT states its length, as Chrome
+		// (HttpNetworkTransaction::BuildRequestHeaders) and the H2 engine.
 		fields = append(fields, order.Field{Name: "content-length", Value: "0"})
 	}
 
@@ -471,7 +471,7 @@ func encodeExact(method, target string, exact []order.Field, req *http.Request) 
 			}
 		case "content-length":
 			lengths++
-			if n, err := strconv.ParseInt(f.Value, 10, 64); err != nil || n != req.ContentLength {
+			if n, err := strconv.ParseInt(f.Value, 10, 64); err != nil || !digits(f.Value) || n != req.ContentLength {
 				return "", fmt.Errorf("http1: exact Content-Length %q does not match the body of %d bytes", f.Value, req.ContentLength)
 			}
 		case "transfer-encoding":
@@ -514,6 +514,13 @@ func spelled(name string, spell Spelling) (string, error) {
 		return "", fmt.Errorf("http1: spelling %q does not match header %q", s, name)
 	}
 	return s, nil
+}
+
+// digits reports whether s has digits only, as the Content-Length syntax
+// (RFC 9110 section 8.6, 1*DIGIT); ParseInt also takes a sign, and refuses
+// an empty s.
+func digits(s string) bool {
+	return strings.Trim(s, "0123456789") == ""
 }
 
 func validMethod(m string) bool {
