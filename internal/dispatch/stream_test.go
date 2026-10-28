@@ -118,6 +118,41 @@ func TestCancelDuringBody(t *testing.T) {
 	}
 }
 
+// The server can answer the close the context starts by ending the body,
+// here a handler that returns when its request is canceled: the Read still
+// fails with the context error, not as a body read in full.
+func TestCancelDuringBodyAnswered(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	srv := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}, Handler: stalling(release)})
+	tr := transport(srv)
+	dial := tr.DialContext
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := dial(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return slowClose{c}, nil
+	}
+	defer tr.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/stall", nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(resp.Body, make([]byte, len("first"))); err != nil {
+		t.Fatal(err)
+	}
+	time.AfterFunc(50*time.Millisecond, cancel)
+	_, err = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want %v", err, context.Canceled)
+	}
+}
+
 // CloseIdleConnections leaves a response still being read alone: its body
 // ends as the server sent it.
 func TestCloseIdleKeepsActiveResponse(t *testing.T) {

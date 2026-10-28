@@ -386,20 +386,27 @@ func closeRequested(req *http.Request) bool {
 // Close or a read error.
 type h1Body struct {
 	io.ReadCloser
-	c    *h1Conn
-	stop func() bool
-	keep bool
-	once sync.Once
-	ctx  context.Context
+	c     *h1Conn
+	stop  func() bool
+	keep  bool
+	once  sync.Once
+	ctx   context.Context
+	byCtx bool // the context closed the connection; set in once
 }
 
 func (b *h1Body) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if err != nil {
-		b.once.Do(func() { finishH1(b.c, b.stop, b.keep && err == io.EOF) })
+		b.once.Do(func() {
+			// stop fails once the context closed the connection.
+			b.byCtx = !b.stop()
+			finishH1(b.c, func() bool { return !b.byCtx }, b.keep && err == io.EOF)
+		})
 		// The context closed the connection: report its cause, as the H2
-		// engine does, not the closed connection.
-		if ctxErr := b.ctx.Err(); ctxErr != nil && err != io.EOF {
+		// engine does, not the closed connection. An EOF read then may be
+		// the server's answer to that close, such as a handler that
+		// returns when its request is canceled.
+		if ctxErr := b.ctx.Err(); ctxErr != nil && (err != io.EOF || b.byCtx) {
 			err = ctxErr
 		}
 	}
