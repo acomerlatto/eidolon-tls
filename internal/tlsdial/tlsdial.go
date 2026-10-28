@@ -187,7 +187,8 @@ func exactIP(ip netip.Addr, next func(utls.ConnectionState) error) func(utls.Con
 }
 
 // Check builds and applies one spec of cfg, as Dial does, without
-// connecting. TLS.ServerName may be empty.
+// connecting, and checks the ClientHello it marshals (checkHello).
+// TLS.ServerName may be empty.
 func Check(cfg Config) error {
 	if cfg.Spec == nil {
 		return errors.New("tlsdial: Config.Spec is nil")
@@ -200,8 +201,14 @@ func Check(cfg Config) error {
 		tc.ServerName = "eidolon.invalid"
 	}
 	cfg.TLS = tc
-	_, _, err := prepare(cfg)
-	return err
+	uconn, _, err := prepare(cfg)
+	if err != nil {
+		return err
+	}
+	if err := uconn.BuildHandshakeState(); err != nil {
+		return fmt.Errorf("%w: %w", ErrProfile, err)
+	}
+	return checkHello(uconn.HandshakeState.Hello.Raw)
 }
 
 // prepare builds a new spec and applies it to a client that has no

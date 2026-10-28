@@ -176,6 +176,9 @@ func TestErrALPN(t *testing.T) {
 			if alpn, ok := ext.(*utls.ALPNExtension); ok {
 				alpn.AlpnProtocols = []string{"spdy/3"}
 			}
+			if alps, ok := ext.(*utls.ApplicationSettingsExtensionNew); ok {
+				alps.SupportedProtocols = []string{"spdy/3"}
+			}
 		}
 		return spec, err
 	}))
