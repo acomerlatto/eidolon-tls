@@ -9,12 +9,14 @@ package lab
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"log"
 	"math/big"
@@ -59,11 +61,17 @@ type Options struct {
 	// Certificate is the server certificate. Nil generates a self-signed
 	// one for ServerName, valid for one hour.
 	Certificate *tls.Certificate
+
+	// Memory serves in-memory connections, dialed with Server.Dial,
+	// instead of TCP: a test in a synctest bubble, whose fake clock only
+	// advances when every goroutine waits on something of the bubble,
+	// starts it in the bubble.
+	Memory bool
 }
 
 // Server is a running lab server.
 type Server struct {
-	// Addr is the listening address, on 127.0.0.1.
+	// Addr is the listening address, on 127.0.0.1, or "memory".
 	Addr string
 	// RootCAs trusts the lab certificate.
 	RootCAs *x509.CertPool
@@ -118,9 +126,12 @@ func Listen(addr string, opts Options) (*Server, error) {
 		}
 		cert = &c
 	}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
+	var ln net.Listener = &memListener{conns: make(chan net.Conn), done: make(chan struct{})}
+	if !opts.Memory {
+		var err error
+		if ln, err = net.Listen("tcp", addr); err != nil {
+			return nil, err
+		}
 	}
 	s := &Server{
 		Addr:        ln.Addr().String(),
@@ -142,6 +153,55 @@ func Listen(addr string, opts Options) (*Server, error) {
 	go s.accept()
 	return s, nil
 }
+
+// Dial connects to a server with Options.Memory, as a DialContext; the
+// network and address are ignored.
+func (s *Server) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	ln, ok := s.ln.(*memListener)
+	if !ok {
+		return nil, errors.New("lab: Dial without Options.Memory")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err // before the select, which may accept anyway
+	}
+	client, server := net.Pipe()
+	select {
+	case ln.conns <- server:
+		return client, nil
+	case <-ln.done:
+		return nil, net.ErrClosed
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// memListener accepts the connections of Server.Dial.
+type memListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (l *memListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *memListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *memListener) Addr() net.Addr { return memAddr{} }
+
+type memAddr struct{}
+
+func (memAddr) Network() string { return "memory" }
+func (memAddr) String() string  { return "memory" }
 
 // Conns returns the accepted connections, after their TLS handshake.
 func (s *Server) Conns() <-chan *Conn { return s.conns }

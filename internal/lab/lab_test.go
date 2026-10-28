@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	utls "github.com/acomerlatto/utls"
@@ -185,4 +187,50 @@ func TestH1Capture(t *testing.T) {
 			t.Fatalf("captured %q, want %q", got, rawRequest)
 		}
 	})
+}
+
+// A server with Memory serves the connections of Dial, in a synctest
+// bubble, where a sleep takes no time; Dial fails without Memory, after
+// Close and with its context done.
+func TestMemory(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := lab.Start(t, lab.Options{Plain: true, Memory: true})
+		if srv.Addr != "memory" {
+			t.Errorf("Addr = %q", srv.Addr)
+		}
+		raw, err := srv.Dial(context.Background(), "tcp", "ignored:80")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		time.Sleep(time.Hour)
+		io.WriteString(raw, "GET / HTTP/1.1\r\nHost: lab\r\n\r\n")
+		resp, err := http.ReadResponse(bufio.NewReader(raw), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if body, _ := io.ReadAll(resp.Body); string(body) != "ok" {
+			t.Errorf("body %q", body)
+		}
+		if got := string(srv.NextConn(t).Bytes()); got != "GET / HTTP/1.1\r\nHost: lab\r\n\r\n" {
+			t.Errorf("received %q", got)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		for range 20 { // a select would pick at random
+			if c, err := srv.Dial(ctx, "tcp", ""); err != context.Canceled {
+				t.Errorf("Dial with a canceled context: %v", err)
+				if c != nil {
+					c.Close()
+				}
+			}
+		}
+		srv.Close()
+		if _, err := srv.Dial(context.Background(), "tcp", ""); !errors.Is(err, net.ErrClosed) {
+			t.Errorf("Dial after Close: %v", err)
+		}
+	})
+	if _, err := lab.Start(t, lab.Options{}).Dial(context.Background(), "tcp", ""); err == nil {
+		t.Error("Dial without Memory")
+	}
 }
