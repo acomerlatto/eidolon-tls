@@ -1,0 +1,223 @@
+diff --git a/internal/http2/transport_test.go b/internal/http2/transport_test.go
+index d939e8a..bb62dbe 100644
+--- a/internal/http2/transport_test.go
++++ b/internal/http2/transport_test.go
+@@ -1554,8 +1554,11 @@ func testTransportCookieHeaderSplit(t testing.TB) {
+ 	tc := newTestClientConn(t)
+ 	tc.greet()
+ 
++	// [eidolon] Split as Chrome: one space after ';' is dropped (two would
++	// leave a crumb starting with whitespace, which is refused), and an
++	// empty last crumb is kept.
+ 	req, _ := http.NewRequest("GET", "https://dummy.tld/", nil)
+-	req.Header.Add("Cookie", "a=b;c=d;  e=f;")
++	req.Header.Add("Cookie", "a=b;c=d; e=f;")
+ 	req.Header.Add("Cookie", "e=f;g=h; ")
+ 	req.Header.Add("Cookie", "i=j")
+ 	rt := tc.roundTrip(req)
+@@ -1564,7 +1567,7 @@ func testTransportCookieHeaderSplit(t testing.TB) {
+ 		streamID:  rt.streamID(),
+ 		endStream: true,
+ 		header: http.Header{
+-			"cookie": []string{"a=b", "c=d", "e=f", "e=f", "g=h", "i=j"},
++			"cookie": []string{"a=b", "c=d", "e=f", "", "e=f", "g=h", "", "i=j"},
+ 		},
+ 	})
+ 	tc.writeHeaders(HeadersFrameParam{
+diff --git a/internal/httpcommon/eidolon_cookie_test.go b/internal/httpcommon/eidolon_cookie_test.go
+new file mode 100644
+index 0000000..428cf68
+--- /dev/null
++++ b/internal/httpcommon/eidolon_cookie_test.go
+@@ -0,0 +1,87 @@
++package httpcommon
++
++import (
++	"context"
++	"net/http"
++	"net/url"
++	"slices"
++	"testing"
++
++	"github.com/acomerlatto/eidolon-tls/internal/order"
++)
++
++// Cookie is split as Chrome splits it (quiche CookieToCrumbs).
++func TestCookieCrumbs(t *testing.T) {
++	for _, tt := range []struct {
++		in   string
++		want []string
++	}{
++		{"a=1", []string{"a=1"}},
++		{"a=1; b=2", []string{"a=1", "b=2"}},
++		{"a=1;b=2", []string{"a=1", "b=2"}},
++		{" \ta=1; b=2 \t", []string{"a=1", "b=2"}},
++		{"a=1;  b=2", []string{"a=1", " b=2"}},
++		{"a=1 ; b=2", []string{"a=1 ", "b=2"}},
++		{"a=1;\tb=2", []string{"a=1", "\tb=2"}},
++		{"a=1;;b=2", []string{"a=1", "", "b=2"}},
++		{"a=1;", []string{"a=1", ""}},
++		{"a=1; ", []string{"a=1", ""}},
++		{"", []string{""}},
++		{" ", []string{""}},
++	} {
++		if got := cookieCrumbs(tt.in); !slices.Equal(got, tt.want) {
++			t.Errorf("cookieCrumbs(%q) = %q, want %q", tt.in, got, tt.want)
++		}
++	}
++}
++
++// Every Cookie field sent is free of whitespace at its ends (RFC 9113
++// section 8.2.1): a crumb that is not is refused, and in exact mode, where
++// Cookie is not split, so is the whole value.
++func TestCookieEdges(t *testing.T) {
++	for _, tt := range []struct {
++		name  string
++		value string
++		exact bool
++		want  []string // nil: refused
++	}{
++		{"trimmed", " a=1; b=2 ", false, []string{"a=1", "b=2"}},
++		{"empty crumbs", "a=1;;b=2;", false, []string{"a=1", "", "b=2", ""}},
++		{"space before ';'", "a=1 ;b=2", false, nil},
++		{"tab after ';'", "a=1;\tb=2", false, nil},
++		{"two spaces after ';'", "a=1;  b=2", false, nil},
++		{"exact", "a=1; b=2", true, []string{"a=1; b=2"}},
++		{"exact trailing space", "a=1; b=2 ", true, nil},
++		{"exact leading tab", "\ta=1", true, nil},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			req := &http.Request{Method: "GET", URL: &url.URL{Scheme: "https", Host: "example.com", Path: "/"}, Header: http.Header{}}
++			ctx := context.Background()
++			if tt.exact {
++				ctx = order.WithExact(ctx, []order.Field{{Name: "cookie", Value: tt.value}})
++			} else {
++				req.Header.Set("Cookie", tt.value)
++			}
++			var got []string
++			_, err := EncodeHeaders(ctx, EncodeHeadersParam{Request: Request{
++				Header: req.Header, URL: req.URL, Method: req.Method, ActualContentLength: 0,
++			}}, func(name, value string) {
++				if name == "cookie" {
++					got = append(got, value)
++				}
++			})
++			if tt.want == nil {
++				if err == nil {
++					t.Fatalf("sent %q", got)
++				}
++				return
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			if !slices.Equal(got, tt.want) {
++				t.Fatalf("cookie fields %q, want %q", got, tt.want)
++			}
++		})
++	}
++}
+diff --git a/internal/httpcommon/request.go b/internal/httpcommon/request.go
+index 852d894..64107d4 100644
+--- a/internal/httpcommon/request.go
++++ b/internal/httpcommon/request.go
+@@ -136,10 +136,10 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
+ 	// Check for any invalid headers+trailers and return an error before we
+ 	// potentially pollute our hpack state. (We want to be able to
+ 	// continue to reuse the hpack encoder for future requests)
+-	if err := validateHeaders(header); err != "" {
++	if err := validateHeaders(header, exact == nil); err != "" {
+ 		return res, fmt.Errorf("invalid HTTP header %s", err)
+ 	}
+-	if err := validateHeaders(req.Trailer); err != "" {
++	if err := validateHeaders(req.Trailer, false); err != "" {
+ 		return res, fmt.Errorf("invalid HTTP trailer %s", err)
+ 	}
+ 
+@@ -249,22 +249,10 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
+ 				// Per 8.1.2.5 To allow for better compression efficiency, the
+ 				// Cookie header field MAY be split into separate header fields,
+ 				// each with one or more cookie-pairs.
++				// [eidolon] Split as Chrome (cookieCrumbs).
+ 				for _, v := range vv {
+-					for {
+-						p := strings.IndexByte(v, ';')
+-						if p < 0 {
+-							break
+-						}
+-						f("cookie", v[:p])
+-						p++
+-						// strip space after semicolon if any.
+-						for p+1 <= len(v) && v[p] == ' ' {
+-							p++
+-						}
+-						v = v[p:]
+-					}
+-					if len(v) > 0 {
+-						f("cookie", v)
++					for _, c := range cookieCrumbs(v) {
++						f("cookie", c)
+ 					}
+ 				}
+ 				continue
+@@ -418,17 +406,22 @@ func validPseudoPath(v string) bool {
+ 	return (len(v) > 0 && v[0] == '/') || v == "*"
+ }
+ 
+-func validateHeaders(hdrs map[string][]string) string {
++// [eidolon] split reports whether Cookie is split into crumbs, as it is
++// outside exact mode.
++func validateHeaders(hdrs map[string][]string, split bool) string {
+ 	for k, vv := range hdrs {
+ 		if !httpguts.ValidHeaderFieldName(k) && k != ":protocol" {
+ 			return fmt.Sprintf("name %q", k)
+ 		}
+ 		for _, v := range vv {
+ 			// [eidolon] Leading and trailing whitespace is forbidden too
+-			// (RFC 9113 section 8.2.1). Cookie is split into crumbs that
+-			// drop the space after ';', so it is left to the crumbling.
+-			if !httpguts.ValidHeaderFieldValue(v) ||
+-				v != strings.Trim(v, " \t") && !asciiEqualFold(k, "cookie") {
++			// (RFC 9113 section 8.2.1), in every field sent: a split
++			// Cookie is checked crumb by crumb.
++			edges := []string{v}
++			if split && asciiEqualFold(k, "cookie") {
++				edges = cookieCrumbs(v)
++			}
++			if !httpguts.ValidHeaderFieldValue(v) || slices.ContainsFunc(edges, untrimmed) {
+ 				// Don't include the value in the error,
+ 				// because it may be sensitive.
+ 				return fmt.Sprintf("value for header %q", k)
+@@ -438,6 +431,32 @@ func validateHeaders(hdrs map[string][]string) string {
+ 	return ""
+ }
+ 
++// [eidolon] untrimmed reports whether v starts or ends with SP or HTAB.
++func untrimmed(v string) bool {
++	return v != strings.Trim(v, " \t")
++}
++
++// [eidolon] cookieCrumbs splits a Cookie value as Chrome does (quiche
++// HpackEncoder::CookieToCrumbs): without the whitespace at both ends,
++// at each ';', and without one space after it. Empty crumbs are kept, the
++// last one included. A crumb can still start or end with whitespace, as
++// "a=1 ; b" gives "a=1 "; validateHeaders refuses it.
++func cookieCrumbs(v string) []string {
++	v = strings.Trim(v, " \t")
++	var out []string
++	for {
++		p := strings.IndexByte(v, ';')
++		if p < 0 {
++			return append(out, v)
++		}
++		out = append(out, v[:p])
++		v = v[p+1:]
++		if len(v) > 0 && v[0] == ' ' {
++			v = v[1:]
++		}
++	}
++}
++
+ // checkExact checks the framing of exact fields before anything is sent:
+ // at most one Host, which replaces host, and a Content-Length, if any, equal
+ // to the body length. Nothing is corrected.

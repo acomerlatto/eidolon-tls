@@ -1554,8 +1554,11 @@ func testTransportCookieHeaderSplit(t testing.TB) {
 	tc := newTestClientConn(t)
 	tc.greet()
 
+	// [eidolon] Split as Chrome: one space after ';' is dropped (two would
+	// leave a crumb starting with whitespace, which is refused), and an
+	// empty last crumb is kept.
 	req, _ := http.NewRequest("GET", "https://dummy.tld/", nil)
-	req.Header.Add("Cookie", "a=b;c=d;  e=f;")
+	req.Header.Add("Cookie", "a=b;c=d; e=f;")
 	req.Header.Add("Cookie", "e=f;g=h; ")
 	req.Header.Add("Cookie", "i=j")
 	rt := tc.roundTrip(req)
@@ -1564,7 +1567,7 @@ func testTransportCookieHeaderSplit(t testing.TB) {
 		streamID:  rt.streamID(),
 		endStream: true,
 		header: http.Header{
-			"cookie": []string{"a=b", "c=d", "e=f", "e=f", "g=h", "i=j"},
+			"cookie": []string{"a=b", "c=d", "e=f", "", "e=f", "g=h", "", "i=j"},
 		},
 	})
 	tc.writeHeaders(HeadersFrameParam{

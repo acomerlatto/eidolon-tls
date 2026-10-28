@@ -136,10 +136,10 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 	// Check for any invalid headers+trailers and return an error before we
 	// potentially pollute our hpack state. (We want to be able to
 	// continue to reuse the hpack encoder for future requests)
-	if err := validateHeaders(header); err != "" {
+	if err := validateHeaders(header, exact == nil); err != "" {
 		return res, fmt.Errorf("invalid HTTP header %s", err)
 	}
-	if err := validateHeaders(req.Trailer); err != "" {
+	if err := validateHeaders(req.Trailer, false); err != "" {
 		return res, fmt.Errorf("invalid HTTP trailer %s", err)
 	}
 
@@ -249,22 +249,10 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 				// Per 8.1.2.5 To allow for better compression efficiency, the
 				// Cookie header field MAY be split into separate header fields,
 				// each with one or more cookie-pairs.
+				// [eidolon] Split as Chrome (cookieCrumbs).
 				for _, v := range vv {
-					for {
-						p := strings.IndexByte(v, ';')
-						if p < 0 {
-							break
-						}
-						f("cookie", v[:p])
-						p++
-						// strip space after semicolon if any.
-						for p+1 <= len(v) && v[p] == ' ' {
-							p++
-						}
-						v = v[p:]
-					}
-					if len(v) > 0 {
-						f("cookie", v)
+					for _, c := range cookieCrumbs(v) {
+						f("cookie", c)
 					}
 				}
 				continue
@@ -418,17 +406,22 @@ func validPseudoPath(v string) bool {
 	return (len(v) > 0 && v[0] == '/') || v == "*"
 }
 
-func validateHeaders(hdrs map[string][]string) string {
+// [eidolon] split reports whether Cookie is split into crumbs, as it is
+// outside exact mode.
+func validateHeaders(hdrs map[string][]string, split bool) string {
 	for k, vv := range hdrs {
 		if !httpguts.ValidHeaderFieldName(k) && k != ":protocol" {
 			return fmt.Sprintf("name %q", k)
 		}
 		for _, v := range vv {
 			// [eidolon] Leading and trailing whitespace is forbidden too
-			// (RFC 9113 section 8.2.1). Cookie is split into crumbs that
-			// drop the space after ';', so it is left to the crumbling.
-			if !httpguts.ValidHeaderFieldValue(v) ||
-				v != strings.Trim(v, " \t") && !asciiEqualFold(k, "cookie") {
+			// (RFC 9113 section 8.2.1), in every field sent: a split
+			// Cookie is checked crumb by crumb.
+			edges := []string{v}
+			if split && asciiEqualFold(k, "cookie") {
+				edges = cookieCrumbs(v)
+			}
+			if !httpguts.ValidHeaderFieldValue(v) || slices.ContainsFunc(edges, untrimmed) {
 				// Don't include the value in the error,
 				// because it may be sensitive.
 				return fmt.Sprintf("value for header %q", k)
@@ -436,6 +429,32 @@ func validateHeaders(hdrs map[string][]string) string {
 		}
 	}
 	return ""
+}
+
+// [eidolon] untrimmed reports whether v starts or ends with SP or HTAB.
+func untrimmed(v string) bool {
+	return v != strings.Trim(v, " \t")
+}
+
+// [eidolon] cookieCrumbs splits a Cookie value as Chrome does (quiche
+// HpackEncoder::CookieToCrumbs): without the whitespace at both ends,
+// at each ';', and without one space after it. Empty crumbs are kept, the
+// last one included. A crumb can still start or end with whitespace, as
+// "a=1 ; b" gives "a=1 "; validateHeaders refuses it.
+func cookieCrumbs(v string) []string {
+	v = strings.Trim(v, " \t")
+	var out []string
+	for {
+		p := strings.IndexByte(v, ';')
+		if p < 0 {
+			return append(out, v)
+		}
+		out = append(out, v[:p])
+		v = v[p+1:]
+		if len(v) > 0 && v[0] == ' ' {
+			v = v[1:]
+		}
+	}
 }
 
 // checkExact checks the framing of exact fields before anything is sent:
