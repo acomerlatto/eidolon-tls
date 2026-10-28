@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/acomerlatto/eidolon-tls/internal/dispatch"
+	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
 
@@ -25,4 +26,22 @@ var (
 	// ErrExactHeadersRedirect reports a redirect of a request sent with
 	// WithExactHeaders; see there.
 	ErrExactHeadersRedirect = dispatch.ErrExactHeadersRedirect
+	// ErrCertificate reports a server certificate refused by verification:
+	// unknown authority, wrong name, expired. The crypto/x509 error stays
+	// in the chain, for errors.As with x509.UnknownAuthorityError,
+	// x509.HostnameError or x509.CertificateInvalidError.
+	ErrCertificate = tlsdial.ErrCertificate
+	// ErrMalformedResponse reports an HTTP/1.1 response that cannot be
+	// read: a bad status line or header, conflicting Content-Length
+	// values, more than five 1xx responses. A connection lost while
+	// reading is not one.
+	ErrMalformedResponse = http1.ErrMalformedResponse
+	// ErrHeaderTooLarge reports response headers over the limit, 256 KiB
+	// as Chrome, over HTTP/1.1 (1xx responses included) and HTTP/2.
+	ErrHeaderTooLarge = http1.ErrHeaderTooLarge
+	// ErrRetryBudget reports a request that could have been sent again
+	// but was not, because its budget ran out: two retries of a request
+	// the server did not process, as Chrome, or three replays after lost
+	// connections or three dials. It wraps the last error.
+	ErrRetryBudget = dispatch.ErrRetryBudget
 )
