@@ -18,13 +18,23 @@ const maxRedirects = 20
 // credentials of the URL, and stops at the first response. The Referer and
 // the credentials of each hop are set by the transport, which also serves
 // an http.Client built on Transport().
+//
+// http.Client adds the cookies of the jar to the header of the request it
+// sends. Each hop gets a copy of the header, so the next hop starts from
+// the fields of the caller and the jar adds its cookies again as they are
+// then; the caller's request is not modified.
 func (c *client) do(req *http.Request) (*http.Response, error) {
 	for n := 0; ; n++ {
-		resp, err := c.hc.Do(req)
+		sent := *req
+		sent.Header = req.Header.Clone()
+		resp, err := c.hc.Do(&sent)
 		if err != nil {
 			return nil, err
 		}
 		next, err := redirect(req, resp)
+		if next != nil && c.hc.Jar != nil {
+			dropSetCookies(next.Header, resp.Cookies())
+		}
 		if next == nil && err == nil {
 			return resp, nil
 		}
@@ -115,6 +125,44 @@ func redirect(req *http.Request, resp *http.Response) (*http.Request, error) {
 		}
 	}
 	return next, nil
+}
+
+// dropSetCookies removes from the Cookie fields of h the cookies of the
+// caller named in set, as http.Client does when it follows redirects with
+// a jar: the jar now holds them, as set, and adds them itself. The other
+// cookies keep their order.
+func dropSetCookies(h http.Header, set []*http.Cookie) {
+	if len(set) == 0 {
+		return
+	}
+	names := make(map[string]bool, len(set))
+	for _, ck := range set {
+		names[ck.Name] = true
+	}
+	for k, vv := range h {
+		if !strings.EqualFold(k, "cookie") {
+			continue
+		}
+		var keep []string
+		for _, v := range vv {
+			var pairs []string
+			for _, p := range strings.Split(v, ";") {
+				p = strings.TrimSpace(p)
+				name, _, _ := strings.Cut(p, "=")
+				if p != "" && !names[strings.TrimSpace(name)] {
+					pairs = append(pairs, p)
+				}
+			}
+			if len(pairs) > 0 {
+				keep = append(keep, strings.Join(pairs, "; "))
+			}
+		}
+		if len(keep) == 0 {
+			delete(h, k)
+		} else {
+			h[k] = keep
+		}
+	}
 }
 
 // drain reads a little of a body that is not returned, so the connection

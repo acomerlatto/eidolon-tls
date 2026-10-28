@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
+	"strings"
+	"sync"
 	"testing"
 
 	eidolon "github.com/acomerlatto/eidolon-tls"
@@ -118,5 +121,71 @@ func TestCookieJarExactHeaders(t *testing.T) {
 				t.Fatalf("Cookie = %q", got)
 			}
 		})
+	}
+}
+
+// Each redirect hop sends the cookies the jar holds then, once, whatever
+// the earlier hops sent: a cookie set, changed or removed by a redirect
+// response shows at the next hop, and a cookie of the caller that a
+// redirect response sets again leaves the caller's field for the jar. The
+// caller's request is not modified.
+func TestCookieJarRedirectHops(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		caller string
+		set    *http.Cookie // set by /b
+		want   []string     // Cookie at /a, /b and /c
+	}{
+		{"kept", "", nil, []string{"", "s=1", "s=1"}},
+		{"changed", "", &http.Cookie{Name: "s", Value: "2", Path: "/"}, []string{"", "s=1", "s=2"}},
+		{"removed", "", &http.Cookie{Name: "s", Path: "/", MaxAge: -1}, []string{"", "s=1", ""}},
+		{"caller kept", "k=0", nil, []string{"k=0", "k=0; s=1", "k=0; s=1"}},
+		{"caller replaced", "k=0; c=0", &http.Cookie{Name: "c", Value: "9", Path: "/"}, []string{"k=0; c=0", "k=0; c=0; s=1", "k=0; s=1; c=9"}},
+	} {
+		for _, protos := range [][]string{{"http/1.1"}, {"h2"}} {
+			t.Run(tt.name+" "+protos[0], func(t *testing.T) {
+				var mu sync.Mutex
+				seen := map[string]string{}
+				srv := lab.Start(t, lab.Options{NextProtos: protos, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					seen[r.URL.Path] = strings.Join(r.Header.Values("Cookie"), " | ")
+					mu.Unlock()
+					switch r.URL.Path {
+					case "/a":
+						http.SetCookie(w, &http.Cookie{Name: "s", Value: "1", Path: "/"})
+						http.Redirect(w, r, "/b", http.StatusFound)
+					case "/b":
+						if tt.set != nil {
+							http.SetCookie(w, tt.set)
+						}
+						http.Redirect(w, r, "/c", http.StatusFound)
+					}
+				})})
+				c := newClient(t, srv, eidolon.WithCookieJar(eidolon.NewCookieJar()))
+				req, err := http.NewRequest(http.MethodGet, "https://example.com/a", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tt.caller != "" {
+					req.Header.Set("Cookie", tt.caller)
+				}
+				before := req.Header.Clone()
+				resp, err := c.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+				mu.Lock()
+				defer mu.Unlock()
+				for i, p := range []string{"/a", "/b", "/c"} {
+					if seen[p] != tt.want[i] {
+						t.Errorf("%s Cookie = %q, want %q", p, seen[p], tt.want[i])
+					}
+				}
+				if !reflect.DeepEqual(req.Header, before) {
+					t.Errorf("caller's header changed: %v, was %v", req.Header, before)
+				}
+			})
+		}
 	}
 }
