@@ -15,6 +15,7 @@ import (
 
 	"github.com/acomerlatto/eidolon-tls/internal/dispatch"
 	"github.com/acomerlatto/eidolon-tls/internal/lab"
+	"github.com/acomerlatto/eidolon-tls/internal/order"
 )
 
 // h1Lab starts an HTTP/1.1 lab over TLS, or over plain TCP when plain.
@@ -336,16 +337,26 @@ func TestH1PoolServerClosedWhileIdle(t *testing.T) {
 
 // The reused idle connection is lost after the request was written: a
 // replayable request goes again on a new connection, another fails
-// (section 6.3, same policy as HTTP/2).
+// (section 6.3, same policy as HTTP/2). In exact mode the idempotency key
+// counts only among the fields sent.
 func TestH1PoolReplayAfterLostIdleConnection(t *testing.T) {
+	host := order.Field{Name: "Host", Value: "example.com"}
+	key := order.Field{Name: "idempotency-key", Value: "k1"}
 	for _, tt := range []struct {
+		name   string
 		method string
+		key    bool          // Idempotency-Key in req.Header
+		exact  []order.Field // exact mode
 		replay bool
 	}{
-		{http.MethodGet, true},
-		{http.MethodPost, false},
+		{name: "GET", method: http.MethodGet, replay: true},
+		{name: "POST", method: http.MethodPost},
+		{name: "POST with key", method: http.MethodPost, key: true, replay: true},
+		{name: "exact POST with key in Header", method: http.MethodPost, key: true, exact: []order.Field{host}},
+		{name: "exact POST with key sent", method: http.MethodPost, exact: []order.Field{host, key}, replay: true},
+		{name: "exact POST with X- key sent", method: http.MethodPost, exact: []order.Field{host, {Name: "X-Idempotency-Key", Value: "k1"}}, replay: true},
 	} {
-		t.Run(tt.method, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			var n atomic.Int32
 			srv, base := h1Lab(t, false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if n.Add(1) == 2 {
@@ -357,10 +368,27 @@ func TestH1PoolReplayAfterLostIdleConnection(t *testing.T) {
 			tr := transport(srv)
 			defer tr.Close()
 			fetch(t, tr, base+"/warm")
-			got, err := send(context.Background(), tr, tt.method, base+"/", nil)
+			ctx := context.Background()
+			if tt.exact != nil {
+				ctx = order.WithExact(ctx, tt.exact)
+			}
+			req, _ := http.NewRequestWithContext(ctx, tt.method, base+"/", nil)
+			if tt.key {
+				req.Header.Set("Idempotency-Key", "k1")
+			}
+			var got string
+			resp, err := tr.RoundTrip(req)
+			if err == nil {
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				got = string(b)
+			}
 			if !tt.replay {
 				if err == nil {
 					t.Fatal("request replayed after the connection was lost")
+				}
+				if c := srv.Accepted(); c != 1 {
+					t.Fatalf("%d connections, want 1", c)
 				}
 				return
 			}

@@ -22,6 +22,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -419,13 +420,29 @@ func rewind(req *http.Request) (*http.Request, bool) {
 	switch req.Method {
 	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
 	default:
-		_, key := req.Header["Idempotency-Key"]
-		_, xkey := req.Header["X-Idempotency-Key"]
-		if !key && !xkey {
+		if !hasIdempotencyKey(req) {
 			return nil, false
 		}
 	}
 	return rewindBody(req)
+}
+
+// hasIdempotencyKey reports whether req sends an idempotency key: among
+// the exact fields in exact mode, which replace req.Header, otherwise in
+// req.Header, where an empty value marks the request without sending the
+// field, as in net/http.
+func hasIdempotencyKey(req *http.Request) bool {
+	if exact := order.ExactFromContext(req.Context()); exact != nil {
+		for _, f := range exact {
+			if strings.EqualFold(f.Name, "Idempotency-Key") || strings.EqualFold(f.Name, "X-Idempotency-Key") {
+				return true
+			}
+		}
+		return false
+	}
+	_, key := req.Header["Idempotency-Key"]
+	_, xkey := req.Header["X-Idempotency-Key"]
+	return key || xkey
 }
 
 // rewindBody returns req with its body obtained again, whatever the

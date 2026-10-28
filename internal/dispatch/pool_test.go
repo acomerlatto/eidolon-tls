@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/acomerlatto/eidolon-tls/internal/dispatch"
 	"github.com/acomerlatto/eidolon-tls/internal/lab"
+	"github.com/acomerlatto/eidolon-tls/internal/order"
 )
 
 // fetch sends a GET and reads the whole body.
@@ -187,15 +189,18 @@ func (c *dropConn) Write(p []byte) (int, error) {
 
 // Section 6.3: losing a reused idle connection replays the request on a new
 // connection only when it can be replayed (safe method or idempotency key,
-// and a body that GetBody can recreate).
+// and a body that GetBody can recreate). In exact mode the idempotency key
+// counts only among the fields sent.
 func TestPoolH2ReplayAfterLostIdleConnection(t *testing.T) {
+	exact := []order.Field{{Name: "Host", Value: "example.com"}}
 	tests := []struct {
 		name   string
 		method string
 		body   bool
 		getter bool
-		key    bool
-		fresh  bool // the lost connection is new, not reused
+		key    bool          // Idempotency-Key in req.Header
+		exact  []order.Field // exact mode
+		fresh  bool          // the lost connection is new, not reused
 		replay bool
 	}{
 		{name: "GET", method: http.MethodGet, replay: true},
@@ -203,6 +208,9 @@ func TestPoolH2ReplayAfterLostIdleConnection(t *testing.T) {
 		{name: "POST without GetBody", method: http.MethodPost, body: true, key: true},
 		{name: "POST without idempotency key", method: http.MethodPost, body: true, getter: true},
 		{name: "POST with key and GetBody", method: http.MethodPost, body: true, getter: true, key: true, replay: true},
+		{name: "exact POST with key in Header", method: http.MethodPost, body: true, getter: true, key: true, exact: exact},
+		{name: "exact POST with key sent", method: http.MethodPost, body: true, getter: true,
+			exact: append(slices.Clone(exact), order.Field{Name: "idempotency-key", Value: "k1"}), replay: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -237,7 +245,11 @@ func TestPoolH2ReplayAfterLostIdleConnection(t *testing.T) {
 			if tt.body {
 				body = io.NopCloser(strings.NewReader("payload")) // no GetBody
 			}
-			req, _ := http.NewRequest(tt.method, "https://example.com/", body)
+			ctx := context.Background()
+			if tt.exact != nil {
+				ctx = order.WithExact(ctx, tt.exact)
+			}
+			req, _ := http.NewRequestWithContext(ctx, tt.method, "https://example.com/", body)
 			if tt.getter {
 				req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader("payload")), nil }
 			}
