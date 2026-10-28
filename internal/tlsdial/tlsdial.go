@@ -29,6 +29,11 @@ var ErrALPN = errors.New("tlsdial: unsupported ALPN protocol")
 // the chain.
 var ErrCertificate = errors.New("eidolon: certificate verification failed")
 
+// ErrProfile reports a ClientHello spec that cannot be used: its function
+// failed or returned nil, it sets the SNI name, or uTLS refused to apply
+// it. No connection is opened for it.
+var ErrProfile = errors.New("eidolon: invalid ClientHello profile")
+
 // Config describes how to dial one destination.
 type Config struct {
 	// Spec returns a new ClientHello spec. It is called once per
@@ -54,23 +59,11 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 	if cfg.TLS == nil || cfg.TLS.ServerName == "" {
 		return nil, errors.New("tlsdial: Config.TLS.ServerName is empty")
 	}
-	// Build the spec before dialing, so a spec error opens no connection.
-	spec, err := cfg.Spec()
+	// Apply the spec before dialing, so a bad profile opens no connection.
+	uconn, err := prepare(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("tlsdial: ClientHello spec: %w", err)
+		return nil, err
 	}
-	if spec == nil {
-		return nil, errors.New("tlsdial: ClientHello spec is nil")
-	}
-	// uTLS copies a name set in the SNI extension into Config.ServerName,
-	// which is also the name the certificate is verified against: the spec
-	// would choose which certificate is accepted for the URL.
-	for _, ext := range spec.Extensions {
-		if sni, ok := ext.(*utls.SNIExtension); ok && sni.ServerName != "" {
-			return nil, fmt.Errorf("tlsdial: ClientHello spec sets the SNI name %q; it must come from the URL", sni.ServerName)
-		}
-	}
-
 	dial := cfg.DialContext
 	if dial == nil {
 		var d net.Dialer
@@ -80,12 +73,7 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 	if err != nil {
 		return nil, err
 	}
-
-	uconn := utls.UClient(conn, cfg.TLS.Clone(), utls.HelloCustom)
-	if err := uconn.ApplyPreset(spec); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("tlsdial: apply ClientHello spec: %w", err)
-	}
+	uconn.SetUnderlyingConn(conn)
 	if err := uconn.HandshakeContext(ctx); err != nil {
 		conn.Close()
 		var ve *utls.CertificateVerificationError
@@ -101,4 +89,47 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 		uconn.Close()
 		return nil, fmt.Errorf("%w: %q", ErrALPN, proto)
 	}
+}
+
+// Check builds and applies one spec of cfg, as Dial does, without
+// connecting. TLS.ServerName may be empty.
+func Check(cfg Config) error {
+	if cfg.Spec == nil {
+		return errors.New("tlsdial: Config.Spec is nil")
+	}
+	tc := &utls.Config{}
+	if cfg.TLS != nil {
+		tc = cfg.TLS.Clone()
+	}
+	if tc.ServerName == "" {
+		tc.ServerName = "eidolon.invalid"
+	}
+	cfg.TLS = tc
+	_, err := prepare(cfg)
+	return err
+}
+
+// prepare builds a new spec and applies it to a client that has no
+// connection yet. Every error wraps ErrProfile.
+func prepare(cfg Config) (*utls.UConn, error) {
+	spec, err := cfg.Spec()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrProfile, err)
+	}
+	if spec == nil {
+		return nil, fmt.Errorf("%w: the spec function returned nil", ErrProfile)
+	}
+	// uTLS copies a name set in the SNI extension into Config.ServerName,
+	// which is also the name the certificate is verified against: the spec
+	// would choose which certificate is accepted for the URL.
+	for _, ext := range spec.Extensions {
+		if sni, ok := ext.(*utls.SNIExtension); ok && sni.ServerName != "" {
+			return nil, fmt.Errorf("%w: the spec sets the SNI name %q; it must come from the URL", ErrProfile, sni.ServerName)
+		}
+	}
+	uconn := utls.UClient(nil, cfg.TLS.Clone(), utls.HelloCustom)
+	if err := uconn.ApplyPreset(spec); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrProfile, err)
+	}
+	return uconn, nil
 }

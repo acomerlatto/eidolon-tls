@@ -16,6 +16,12 @@ var (
 	ErrConfig = errors.New("eidolon: invalid configuration")
 	// ErrClosed reports a request on a closed client.
 	ErrClosed = dispatch.ErrClosed
+	// ErrProfile reports a ClientHello spec that cannot be used: the
+	// WithClientHello function failed or returned nil, the spec sets the
+	// SNI name, it offers none of the enabled protocols, or uTLS refused
+	// to apply it. New checks one spec; a later one that fails is
+	// reported by the request, before any connection is opened.
+	ErrProfile = tlsdial.ErrProfile
 	// ErrALPN reports a protocol negotiated by ALPN that no engine handles.
 	ErrALPN = tlsdial.ErrALPN
 	// ErrProtocolPolicy reports a protocol outside the ones enabled by

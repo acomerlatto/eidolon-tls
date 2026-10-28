@@ -59,7 +59,9 @@ type HttpClient interface {
 }
 
 // New returns a client configured by opts. WithClientHello is required.
-// Invalid or missing options return an error that wraps ErrConfig.
+// Invalid or missing options return an error that wraps ErrConfig. New
+// calls the ClientHello function once and applies the spec without
+// connecting: a profile that cannot be used also wraps ErrProfile.
 func New(opts ...Option) (HttpClient, error) {
 	var cfg config
 	for _, opt := range opts {
@@ -90,6 +92,11 @@ func New(opts ...Option) (HttpClient, error) {
 		IdleConnTimeout: cfg.idleConnTimeout,
 
 		DisableDecompression: cfg.disableDecompression,
+	}
+	// A profile that cannot be applied fails here, not at the first
+	// request.
+	if err := tr.CheckSpec(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
 	return &client{
 		// http.Client sends one hop at a time; the client follows the

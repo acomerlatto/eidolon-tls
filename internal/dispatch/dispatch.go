@@ -452,21 +452,8 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 	t.mu.Lock()
 	protos := t.offerLocked(key)
 	t.mu.Unlock()
-	spec := t.Spec
-	if protos != nil {
-		spec = func() (*utls.ClientHelloSpec, error) {
-			s, err := t.Spec()
-			if err != nil || s == nil {
-				return s, err
-			}
-			if err := tlsdial.RestrictALPN(s, protos); err != nil {
-				return nil, fmt.Errorf("%w: %w", ErrProtocolPolicy, err)
-			}
-			return s, nil
-		}
-	}
 	conn, err := tlsdial.Dial(ctx, "tcp", tgt.Addr(), tlsdial.Config{
-		Spec:        spec,
+		Spec:        t.spec(protos),
 		TLS:         cfg,
 		DialContext: t.trackedDial,
 	})
@@ -483,6 +470,30 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 	}
 	t.learn(key, proto)
 	return conn, nil
+}
+
+// spec returns the spec function of a connection that offers protos, or
+// the spec as it is for nil.
+func (t *Transport) spec(protos []string) func() (*utls.ClientHelloSpec, error) {
+	if protos == nil {
+		return t.Spec
+	}
+	return func() (*utls.ClientHelloSpec, error) {
+		s, err := t.Spec()
+		if err != nil || s == nil {
+			return s, err
+		}
+		if err := tlsdial.RestrictALPN(s, protos); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrProtocolPolicy, err)
+		}
+		return s, nil
+	}
+}
+
+// CheckSpec builds and applies one spec, restricted to Protocols, as a
+// dial does, without connecting. Its errors wrap tlsdial.ErrProfile.
+func (t *Transport) CheckSpec() error {
+	return tlsdial.Check(tlsdial.Config{Spec: t.spec(t.Protocols), TLS: t.TLS})
 }
 
 // offerLocked returns the protocols a new connection of key offers, or nil

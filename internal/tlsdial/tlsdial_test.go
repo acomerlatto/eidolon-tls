@@ -280,8 +280,8 @@ func TestDialSpecErrorOpensNoConnection(t *testing.T) {
 		TLS:         &utls.Config{ServerName: "example.com"},
 		DialContext: cc.dial,
 	})
-	if !errors.Is(err, specErr) {
-		t.Fatalf("err = %v, want the spec error", err)
+	if !errors.Is(err, specErr) || !errors.Is(err, ErrProfile) {
+		t.Fatalf("err = %v, want the spec error in ErrProfile", err)
 	}
 	if n := cc.dialed.Load(); n != 0 {
 		t.Fatalf("dialed %d connections, want 0", n)
@@ -331,7 +331,7 @@ func TestDialRefusesSpecServerName(t *testing.T) {
 		TLS:         tlsConfig(srv, "other.test"),
 		DialContext: cc.dial,
 	})
-	if err == nil || !strings.Contains(err.Error(), "SNI") {
+	if !errors.Is(err, ErrProfile) || !strings.Contains(err.Error(), "SNI") {
 		t.Fatalf("err = %v, want the spec refused for its SNI name", err)
 	}
 	if n := cc.dialed.Load(); n != 0 {
@@ -347,10 +347,41 @@ func TestDialNilSpecOpensNoConnection(t *testing.T) {
 		TLS:         &utls.Config{ServerName: "example.com"},
 		DialContext: cc.dial,
 	})
-	if err == nil {
-		t.Fatal("Dial accepted a nil spec")
+	if !errors.Is(err, ErrProfile) {
+		t.Fatalf("err = %v, want ErrProfile for a nil spec", err)
 	}
 	if n := cc.dialed.Load(); n != 0 {
 		t.Fatalf("dialed %d connections, want 0", n)
+	}
+}
+
+// A spec that uTLS refuses to apply fails with ErrProfile before any
+// connection is opened, through Dial and Check.
+func TestDialAppliesSpecBeforeConnecting(t *testing.T) {
+	bad := func() (*utls.ClientHelloSpec, error) {
+		spec, err := chromeSpec()
+		if err != nil {
+			return nil, err
+		}
+		spec.Extensions = append(spec.Extensions, &utls.SupportedVersionsExtension{Versions: []uint16{utls.VersionTLS13}})
+		return spec, nil
+	}
+	var cc closeCounter
+	_, err := Dial(context.Background(), "tcp", "127.0.0.1:1", Config{
+		Spec:        bad,
+		TLS:         &utls.Config{ServerName: "example.com"},
+		DialContext: cc.dial,
+	})
+	if !errors.Is(err, ErrProfile) {
+		t.Fatalf("err = %v, want ErrProfile", err)
+	}
+	if n := cc.dialed.Load(); n != 0 {
+		t.Fatalf("dialed %d connections, want 0", n)
+	}
+	if err := Check(Config{Spec: bad}); !errors.Is(err, ErrProfile) {
+		t.Fatalf("Check: err = %v, want ErrProfile", err)
+	}
+	if err := Check(Config{Spec: chromeSpec}); err != nil {
+		t.Fatalf("Check of the Chrome spec: %v", err)
 	}
 }

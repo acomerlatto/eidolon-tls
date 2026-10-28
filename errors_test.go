@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	utls "github.com/acomerlatto/utls"
 	"golang.org/x/net/http2/hpack"
 
 	eidolon "github.com/acomerlatto/eidolon-tls"
@@ -335,5 +336,86 @@ func TestHeaderInjectionRefused(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A profile that cannot be used fails in New with ErrConfig and
+// ErrProfile, without connecting.
+func TestErrProfileInNew(t *testing.T) {
+	h1Only := func() (*utls.ClientHelloSpec, error) {
+		spec, err := chromeSpec()
+		for _, ext := range spec.Extensions {
+			if alpn, ok := ext.(*utls.ALPNExtension); ok {
+				alpn.AlpnProtocols = []string{"http/1.1"}
+			}
+		}
+		return spec, err
+	}
+	for _, tt := range []struct {
+		name string
+		opts []eidolon.Option
+	}{
+		{"error", []eidolon.Option{eidolon.WithClientHello(func() (*utls.ClientHelloSpec, error) {
+			return nil, errors.New("no profile")
+		})}},
+		{"nil", []eidolon.Option{eidolon.WithClientHello(func() (*utls.ClientHelloSpec, error) { return nil, nil })}},
+		{"SNI", []eidolon.Option{eidolon.WithClientHello(func() (*utls.ClientHelloSpec, error) {
+			spec, err := chromeSpec()
+			for _, ext := range spec.Extensions {
+				if sni, ok := ext.(*utls.SNIExtension); ok {
+					sni.ServerName = "example.com"
+				}
+			}
+			return spec, err
+		})}},
+		{"apply", []eidolon.Option{eidolon.WithClientHello(func() (*utls.ClientHelloSpec, error) {
+			spec, err := chromeSpec()
+			spec.Extensions = append(spec.Extensions, &utls.SupportedVersionsExtension{Versions: []uint16{utls.VersionTLS13}})
+			return spec, err
+		})}},
+		{"no enabled protocol", []eidolon.Option{eidolon.WithClientHello(h1Only), eidolon.WithForceHTTP2()}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dialed := false
+			opts := append(tt.opts, eidolon.WithDialContext(func(context.Context, string, string) (net.Conn, error) {
+				dialed = true
+				return nil, errors.New("no dial")
+			}))
+			_, err := eidolon.New(opts...)
+			if !errors.Is(err, eidolon.ErrConfig) || !errors.Is(err, eidolon.ErrProfile) {
+				t.Fatalf("err = %v, want ErrConfig and ErrProfile", err)
+			}
+			if dialed {
+				t.Fatal("New dialed")
+			}
+		})
+	}
+}
+
+// A spec that fails after New fails the request with ErrProfile before any
+// connection is opened.
+func TestErrProfileInRequest(t *testing.T) {
+	var calls, dials atomic.Int32
+	c, err := eidolon.New(
+		eidolon.WithClientHello(func() (*utls.ClientHelloSpec, error) {
+			if calls.Add(1) > 1 {
+				return nil, errors.New("profile gone")
+			}
+			return chromeSpec()
+		}),
+		eidolon.WithDialContext(func(context.Context, string, string) (net.Conn, error) {
+			dials.Add(1)
+			return nil, errors.New("no dial")
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Get("https://example.com/"); !errors.Is(err, eidolon.ErrProfile) {
+		t.Fatalf("err = %v, want ErrProfile", err)
+	}
+	if n := dials.Load(); n != 0 {
+		t.Fatalf("%d dials, want 0", n)
 	}
 }
