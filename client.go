@@ -29,6 +29,12 @@ type HttpClient interface {
 	// 301 and 302 turn only a POST into a GET, 303 anything but GET and
 	// HEAD, and the other cases send the method and body again (GetBody).
 	// A body without GetBody stops at the redirect, which is returned.
+	//
+	// Request.Close ends the connection after the request without sending
+	// "Connection: close", which Chrome never sends: HTTP/1.1 closes it
+	// once the response was read, HTTP/2 takes no new streams on it and
+	// closes it when its streams end. A Connection field set by the caller
+	// is sent on HTTP/1.1 and has the same effect.
 	Do(req *http.Request) (*http.Response, error)
 	// Get, Head and Post are the http.Client shortcuts.
 	Get(url string) (*http.Response, error)

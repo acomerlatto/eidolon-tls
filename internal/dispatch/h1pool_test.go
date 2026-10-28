@@ -208,6 +208,7 @@ func TestH1PoolNotReused(t *testing.T) {
 		handler http.HandlerFunc
 		header  http.Header
 		partial bool // close the body before EOF
+		close   bool // Request.Close
 		body    string
 	}{
 		{
@@ -231,6 +232,19 @@ func TestH1PoolNotReused(t *testing.T) {
 			},
 			header: http.Header{"Connection": {"close"}},
 			body:   "ok",
+		},
+		{
+			// Request.Close sends no Connection field, as Chrome.
+			name: "Request.Close",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				body := "ok"
+				if r.Header["Connection"] != nil || r.Close {
+					body = "no"
+				}
+				hijack(w, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n"+body, false)
+			},
+			close: true,
+			body:  "ok",
 		},
 		{
 			name: "bytes after the response",
@@ -263,6 +277,7 @@ func TestH1PoolNotReused(t *testing.T) {
 			for k, v := range tt.header {
 				req.Header[k] = v
 			}
+			req.Close = tt.close
 			resp, err := tr.RoundTrip(req)
 			if err != nil {
 				t.Fatal(err)
