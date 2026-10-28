@@ -40,3 +40,36 @@ func CheckSettings(settings []Setting, connWindowUpdate uint32) error {
 	}
 	return nil
 }
+
+// PriorityFrameParam is a PRIORITY frame of Transport.PriorityFrames.
+type PriorityFrameParam struct {
+	StreamID uint32
+	PriorityParam
+}
+
+// maxStreamIDValue is the largest stream ID (RFC 9113 section 5.1.1).
+const maxStreamIDValue = 1<<31 - 1
+
+// CheckPriorities validates the PRIORITY frames, the HEADERS priority and
+// the first stream of Transport.PriorityFrames, HeaderPriority and
+// FirstStreamID: stream IDs within 2^31-1, a PRIORITY frame neither on
+// stream 0 nor depending on its own stream, and an odd first stream.
+func CheckPriorities(frames []PriorityFrameParam, header *PriorityParam, first uint32) error {
+	for _, f := range frames {
+		switch {
+		case f.StreamID == 0 || f.StreamID > maxStreamIDValue:
+			return fmt.Errorf("http2: PRIORITY frame on stream %d", f.StreamID)
+		case f.StreamDep > maxStreamIDValue:
+			return fmt.Errorf("http2: PRIORITY frame depending on stream %d", f.StreamDep)
+		case f.StreamDep == f.StreamID:
+			return fmt.Errorf("http2: PRIORITY frame on stream %d depending on itself", f.StreamID)
+		}
+	}
+	if header != nil && header.StreamDep > maxStreamIDValue {
+		return fmt.Errorf("http2: HEADERS priority depending on stream %d", header.StreamDep)
+	}
+	if first != 0 && (first%2 == 0 || first > maxStreamIDValue) {
+		return fmt.Errorf("http2: first stream %d is not an odd stream ID", first)
+	}
+	return nil
+}

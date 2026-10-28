@@ -192,6 +192,7 @@ type ClientConn struct {
 	born          time.Time            // [eidolon] creation, the clock of lastRead
 	lastRead      atomic.Int64         // [eidolon] time.Duration since born of the last frame read
 	prefacePing   prefacePing          // [eidolon] Transport.PrefacePing, under mu
+	firstStreamID uint32               // [eidolon] Transport.FirstStreamID
 	tconn         net.Conn             // usually *tls.Conn, except specialized impls
 	tlsState      *tls.ConnectionState // nil only for specialized impls
 	atomicReused  uint32               // whether conn is being reused; atomic
@@ -546,6 +547,10 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 		lastActive:                  time.Now(),
 		internalStateHook:           internalStateHook,
 		born:                        time.Now(),
+		firstStreamID:               1,
+	}
+	if t.FirstStreamID != 0 {
+		cc.nextStreamID, cc.firstStreamID = t.FirstStreamID, t.FirstStreamID // [eidolon]
 	}
 	if t.transportTestHooks != nil {
 		t.transportTestHooks.newclientconn(cc)
@@ -625,6 +630,9 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 	cc.fr.WriteSettings(initialSettings...)
 	if connWindowUpdate > 0 {
 		cc.fr.WriteWindowUpdate(0, connWindowUpdate)
+	}
+	for _, p := range t.PriorityFrames {
+		cc.fr.WritePriority(p.StreamID, p.PriorityParam) // [eidolon]
 	}
 	if t.ChromiumWindowUpdate {
 		cc.inflow.initChromium(int32(connWindowUpdate) + initialWindowSize) // [eidolon]
@@ -760,7 +768,7 @@ func (cc *ClientConn) idleState() clientConnIdleState {
 }
 
 func (cc *ClientConn) idleStateLocked() (st clientConnIdleState) {
-	if cc.singleUse && cc.nextStreamID > 1 {
+	if cc.singleUse && cc.nextStreamID > cc.firstStreamID { // [eidolon] was 1
 		return
 	}
 	var maxConcurrentOkay bool
@@ -789,7 +797,7 @@ func (cc *ClientConn) idleStateLocked() (st clientConnIdleState) {
 	//
 	// This avoids a situation where an error early in a connection's lifetime
 	// goes unreported.
-	if cc.nextStreamID == 1 && cc.streamsReserved == 0 && cc.closed && !cc.closedOnIdle {
+	if cc.nextStreamID == cc.firstStreamID && cc.streamsReserved == 0 && cc.closed && !cc.closedOnIdle { // [eidolon] was 1
 		st.canTakeNewRequest = true
 	}
 
@@ -1264,6 +1272,8 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 		// order their HEADERS are written.
 		cs.urgency = chainUrgency(req)
 		cc.chainAddLocked(cs)
+	} else if p := cc.t.HeaderPriority; p != nil {
+		cs.priority = *p // [eidolon]
 	}
 	if isConnectionCloseRequest(req) {
 		cc.doNotReuse = true

@@ -12,8 +12,9 @@ import (
 // request: the SETTINGS, in order, and the increment of the WINDOW_UPDATE
 // on the connection, 0 for none. It also says how the requests announce
 // their priority and how the connection sends: PriorityChain,
-// MaxDataFrameSize, ChromiumHPACK, PrefacePing, ChromiumWindowUpdate and
-// CancelWithoutPing are those of http2.Transport.
+// MaxDataFrameSize, ChromiumHPACK, PrefacePing, ChromiumWindowUpdate,
+// CancelWithoutPing, PriorityFrames, HeaderPriority and FirstStreamID are
+// those of http2.Transport.
 type H2Preface struct {
 	Settings             []http2.Setting
 	ConnWindowUpdate     uint32
@@ -23,6 +24,9 @@ type H2Preface struct {
 	PrefacePing          time.Duration
 	ChromiumWindowUpdate bool
 	CancelWithoutPing    bool
+	PriorityFrames       []http2.PriorityFrameParam
+	HeaderPriority       *http2.PriorityParam
+	FirstStreamID        uint32
 }
 
 // DefaultH2 is the preface of Chrome 156 (A10): a 64 KiB HPACK table, no

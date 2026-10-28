@@ -17,10 +17,11 @@ type wireFrame struct {
 	stream uint32
 	flags  Flags
 	length uint32
-	block  []byte  // HEADERS fragment
-	ping   [8]byte // PING payload
-	incr   uint32  // WINDOW_UPDATE increment
-	code   ErrCode // RST_STREAM and GOAWAY error code
+	block  []byte        // HEADERS fragment
+	ping   [8]byte       // PING payload
+	incr   uint32        // WINDOW_UPDATE increment
+	code   ErrCode       // RST_STREAM and GOAWAY error code
+	prio   PriorityParam // PRIORITY, and HEADERS with the flag
 }
 
 // wireOptions is how wireServer answers.
@@ -75,7 +76,10 @@ func wireServer(c net.Conn, o wireOptions) <-chan wireFrame {
 				w.code = f.ErrCode
 			case *GoAwayFrame:
 				w.code = f.ErrCode
+			case *PriorityFrame:
+				w.prio = f.PriorityParam
 			case *HeadersFrame:
+				w.prio = f.Priority
 				w.block = slices.Clone(f.HeaderBlockFragment())
 				end = f.StreamEnded()
 			case *DataFrame:

@@ -43,7 +43,31 @@ const (
 	// open stream of that urgency, or else of the closest more urgent one,
 	// or else on stream 0.
 	HTTP2PriorityChromium
+	// HTTP2PriorityFixed sends every HEADERS with the PRIORITY flag and
+	// HTTP2Settings.HeaderPriority, as Firefox up to version 88 did.
+	HTTP2PriorityFixed
 )
+
+// HTTP2PriorityParam is the priority of a stream, in a PRIORITY frame or in
+// HEADERS (RFC 9113 section 6.3): the stream it depends on, whether the
+// dependency is exclusive, and the weight as sent, one less than the
+// weight (255 is 256).
+type HTTP2PriorityParam struct {
+	StreamDep uint32
+	Exclusive bool
+	Weight    uint8
+}
+
+// engine returns p for the HTTP/2 engine.
+func (p HTTP2PriorityParam) engine() http2.PriorityParam {
+	return http2.PriorityParam{StreamDep: p.StreamDep, Exclusive: p.Exclusive, Weight: p.Weight}
+}
+
+// HTTP2PriorityFrame is a PRIORITY frame sent before the first request.
+type HTTP2PriorityFrame struct {
+	StreamID uint32
+	HTTP2PriorityParam
+}
 
 // HTTP2HPACK is how an HTTP/2 connection encodes header fields with HPACK
 // (RFC 7541).
@@ -107,6 +131,16 @@ type HTTP2Settings struct {
 	// request was sent, a PING goes with it, and the stream keeps its
 	// place in the server's concurrency limit until the PING is answered.
 	CancelWithoutPing bool
+	// PriorityFrames are sent in order right after SETTINGS and the
+	// connection WINDOW_UPDATE, as Firefox up to version 88 built its
+	// priority tree on idle streams. Chrome sends none.
+	PriorityFrames []HTTP2PriorityFrame
+	// HeaderPriority is the priority of every HEADERS with
+	// HTTP2PriorityFixed.
+	HeaderPriority HTTP2PriorityParam
+	// FirstStreamID, if non-zero, is the stream of the first request,
+	// above the streams of PriorityFrames; 0 is 1.
+	FirstStreamID uint32
 }
 
 // WithHTTP2Settings sets the SETTINGS and the connection WINDOW_UPDATE of
@@ -127,7 +161,10 @@ type HTTP2Settings struct {
 // 9113 forbids, ENABLE_PUSH other than 0 (server push is refused),
 // INITIAL_WINDOW_SIZE or MAX_HEADER_LIST_SIZE of 0, a connection window
 // above 2^31-1, an unknown Priority, HPACK or WindowUpdate, a negative
-// PrefacePing, or
+// PrefacePing, a PRIORITY frame on stream 0 or on its own stream, a stream
+// ID above 2^31-1, an even FirstStreamID, a HeaderPriority without
+// HTTP2PriorityFixed or a zero one with it, or PriorityFrames,
+// HTTP2PriorityFixed or
 // HTTP2PriorityChromium with
 // NO_RFC7540_PRIORITIES 1, which says the client sends no such priority.
 // The settings are copied when WithHTTP2Settings is called.
@@ -161,15 +198,38 @@ func h2Preface(s HTTP2Settings) (*dispatch.H2Preface, error) {
 	if err := http2.CheckSettings(pre.Settings, pre.ConnWindowUpdate); err != nil {
 		return nil, err
 	}
+	noRFC7540 := slices.Contains(pre.Settings, http2.Setting{ID: http2.SettingNoRFC7540Priorities, Val: 1})
 	switch s.Priority {
 	case HTTP2PriorityNone:
 	case HTTP2PriorityChromium:
-		if slices.Contains(pre.Settings, http2.Setting{ID: http2.SettingNoRFC7540Priorities, Val: 1}) {
+		if noRFC7540 {
 			return nil, errors.New("HTTP2PriorityChromium with NO_RFC7540_PRIORITIES 1")
 		}
 		pre.PriorityChain = true
+	case HTTP2PriorityFixed:
+		if noRFC7540 {
+			return nil, errors.New("HTTP2PriorityFixed with NO_RFC7540_PRIORITIES 1")
+		}
+		if s.HeaderPriority == (HTTP2PriorityParam{}) {
+			return nil, errors.New("HTTP2PriorityFixed with a zero HeaderPriority, which sends no PRIORITY flag")
+		}
+		p := s.HeaderPriority.engine()
+		pre.HeaderPriority = &p
 	default:
 		return nil, fmt.Errorf("unknown priority %d", s.Priority)
+	}
+	if s.Priority != HTTP2PriorityFixed && s.HeaderPriority != (HTTP2PriorityParam{}) {
+		return nil, errors.New("HeaderPriority without HTTP2PriorityFixed")
+	}
+	if len(s.PriorityFrames) > 0 && noRFC7540 {
+		return nil, errors.New("PriorityFrames with NO_RFC7540_PRIORITIES 1")
+	}
+	for _, f := range s.PriorityFrames {
+		pre.PriorityFrames = append(pre.PriorityFrames, http2.PriorityFrameParam{StreamID: f.StreamID, PriorityParam: f.engine()})
+	}
+	pre.FirstStreamID = s.FirstStreamID
+	if err := http2.CheckPriorities(pre.PriorityFrames, pre.HeaderPriority, pre.FirstStreamID); err != nil {
+		return nil, err
 	}
 	switch s.HPACK {
 	case HTTP2HPACKGo:

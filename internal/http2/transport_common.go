@@ -169,6 +169,20 @@ type Transport struct {
 	// keeps its place in the concurrency limit until the PING is answered.
 	CancelWithoutPing bool
 
+	// [eidolon] PriorityFrames are sent in order right after SETTINGS and
+	// the connection WINDOW_UPDATE, as some browsers build a priority tree
+	// with them (Firefox up to version 88). CheckPriorities validates them.
+	PriorityFrames []PriorityFrameParam
+
+	// [eidolon] HeaderPriority, if non-nil and PriorityChain is false, is
+	// the priority of every request HEADERS. A zero PriorityParam sends no
+	// PRIORITY flag.
+	HeaderPriority *PriorityParam
+
+	// [eidolon] FirstStreamID is the stream of the first request, then
+	// counting by 2; 0 is 1. It is odd.
+	FirstStreamID uint32
+
 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
 	// initial settings frame. It is the size in bytes of the largest frame
 	// payload that the sender is willing to receive. If 0, no setting is

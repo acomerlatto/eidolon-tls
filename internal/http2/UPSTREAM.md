@@ -43,6 +43,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0023-preface-ping.patch`
 - `scripts/xnet-patches/0024-chromium-window-update.patch`
 - `scripts/xnet-patches/0025-cancel-without-ping.patch`
+- `scripts/xnet-patches/0026-priority-tree.patch`
 
 ## Excluded files
 

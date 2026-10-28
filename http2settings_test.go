@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -373,6 +374,64 @@ func TestHTTP2CancelWithoutPing(t *testing.T) {
 	}
 }
 
+// A priority tree as Firefox up to version 88 built it, with one
+// dependency made exclusive to check the flag: PRIORITY frames after
+// SETTINGS and WINDOW_UPDATE, and the requests from stream 15 with a fixed
+// priority. The frames given are copied when the option is made.
+func TestHTTP2PriorityTree(t *testing.T) {
+	tree := []eidolon.HTTP2PriorityFrame{
+		{3, eidolon.HTTP2PriorityParam{Weight: 200}},
+		{5, eidolon.HTTP2PriorityParam{Weight: 100}},
+		{7, eidolon.HTTP2PriorityParam{}},
+		{9, eidolon.HTTP2PriorityParam{StreamDep: 7, Exclusive: true}},
+		{11, eidolon.HTTP2PriorityParam{StreamDep: 3}},
+		{13, eidolon.HTTP2PriorityParam{Weight: 240}},
+	}
+	header := eidolon.HTTP2PriorityParam{StreamDep: 13, Weight: 41}
+	opt := eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{
+		Settings:               []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingInitialWindowSize, Value: 131072}},
+		ConnectionWindowUpdate: 12517377,
+		Priority:               eidolon.HTTP2PriorityFixed,
+		HeaderPriority:         header,
+		PriorityFrames:         tree,
+		FirstStreamID:          15,
+	})
+	tree[0].Weight = 1
+	srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
+	c := newClient(t, srv, opt)
+	for range 2 {
+		resp, err := c.Get("https://example.com/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	frames, err := srv.NextConn(t).H2Frames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range frames {
+		switch f.Type {
+		case "WINDOW_UPDATE":
+			got = append(got, fmt.Sprint(f.Type, " ", f.Increment))
+		case "PRIORITY", "HEADERS":
+			got = append(got, fmt.Sprintf("%s %d %+v", f.Type, f.StreamID, *f.Priority))
+		}
+	}
+	want := []string{"WINDOW_UPDATE 12517377"}
+	tree[0].Weight = 200
+	for _, p := range tree {
+		want = append(want, fmt.Sprintf("PRIORITY %d %+v", p.StreamID, lab.Priority{StreamDep: p.StreamDep, Exclusive: p.Exclusive, Weight: p.Weight}))
+	}
+	h := lab.Priority{StreamDep: header.StreamDep, Weight: header.Weight}
+	want = append(want, fmt.Sprintf("HEADERS 15 %+v", h), fmt.Sprintf("HEADERS 17 %+v", h))
+	if !slices.Equal(got, want) {
+		t.Errorf("frames\n%q\nwant\n%q", got, want)
+	}
+}
+
 // Settings the client cannot honor are refused by New.
 func TestWithHTTP2SettingsInvalid(t *testing.T) {
 	for _, s := range []eidolon.HTTP2Settings{
@@ -385,6 +444,19 @@ func TestWithHTTP2SettingsInvalid(t *testing.T) {
 		{HPACK: 7},
 		{PrefacePing: -1},
 		{WindowUpdate: 7},
+		{Priority: eidolon.HTTP2PriorityFixed},
+		{HeaderPriority: eidolon.HTTP2PriorityParam{Weight: 41}},
+		{
+			Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingNoRFC7540Priorities, Value: 1}},
+			Priority: eidolon.HTTP2PriorityFixed, HeaderPriority: eidolon.HTTP2PriorityParam{Weight: 41},
+		},
+		{
+			Settings:       []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingNoRFC7540Priorities, Value: 1}},
+			PriorityFrames: []eidolon.HTTP2PriorityFrame{{StreamID: 3}},
+		},
+		{PriorityFrames: []eidolon.HTTP2PriorityFrame{{StreamID: 0, HTTP2PriorityParam: eidolon.HTTP2PriorityParam{StreamDep: 3}}}},
+		{Priority: eidolon.HTTP2PriorityFixed, HeaderPriority: eidolon.HTTP2PriorityParam{StreamDep: 1 << 31}},
+		{FirstStreamID: 2},
 	} {
 		if c, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithHTTP2Settings(s)); !errors.Is(err, eidolon.ErrConfig) || c != nil {
 			t.Errorf("New with %v = %v, %v; want ErrConfig", s, c, err)

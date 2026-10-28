@@ -1,0 +1,309 @@
+diff --git a/internal/http2/eidolon_settings.go b/internal/http2/eidolon_settings.go
+index 5c6611b..a7bc358 100644
+--- a/internal/http2/eidolon_settings.go
++++ b/internal/http2/eidolon_settings.go
+@@ -40,3 +40,36 @@ func CheckSettings(settings []Setting, connWindowUpdate uint32) error {
+ 	}
+ 	return nil
+ }
++
++// PriorityFrameParam is a PRIORITY frame of Transport.PriorityFrames.
++type PriorityFrameParam struct {
++	StreamID uint32
++	PriorityParam
++}
++
++// maxStreamIDValue is the largest stream ID (RFC 9113 section 5.1.1).
++const maxStreamIDValue = 1<<31 - 1
++
++// CheckPriorities validates the PRIORITY frames, the HEADERS priority and
++// the first stream of Transport.PriorityFrames, HeaderPriority and
++// FirstStreamID: stream IDs within 2^31-1, a PRIORITY frame neither on
++// stream 0 nor depending on its own stream, and an odd first stream.
++func CheckPriorities(frames []PriorityFrameParam, header *PriorityParam, first uint32) error {
++	for _, f := range frames {
++		switch {
++		case f.StreamID == 0 || f.StreamID > maxStreamIDValue:
++			return fmt.Errorf("http2: PRIORITY frame on stream %d", f.StreamID)
++		case f.StreamDep > maxStreamIDValue:
++			return fmt.Errorf("http2: PRIORITY frame depending on stream %d", f.StreamDep)
++		case f.StreamDep == f.StreamID:
++			return fmt.Errorf("http2: PRIORITY frame on stream %d depending on itself", f.StreamID)
++		}
++	}
++	if header != nil && header.StreamDep > maxStreamIDValue {
++		return fmt.Errorf("http2: HEADERS priority depending on stream %d", header.StreamDep)
++	}
++	if first != 0 && (first%2 == 0 || first > maxStreamIDValue) {
++		return fmt.Errorf("http2: first stream %d is not an odd stream ID", first)
++	}
++	return nil
++}
+diff --git a/internal/http2/eidolon_tree_test.go b/internal/http2/eidolon_tree_test.go
+new file mode 100644
+index 0000000..344380c
+--- /dev/null
++++ b/internal/http2/eidolon_tree_test.go
+@@ -0,0 +1,146 @@
++// PRIORITY frames, fixed HEADERS priority and first stream (patch 0026).
++
++package http2
++
++import (
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"slices"
++	"testing"
++	"testing/synctest"
++	"time"
++)
++
++// firefoxTree is the priority tree of Firefox up to version 88: six idle
++// streams, the requests from stream 15 depending on stream 13.
++var firefoxTree = []PriorityFrameParam{
++	{3, PriorityParam{StreamDep: 0, Weight: 200}},
++	{5, PriorityParam{StreamDep: 0, Weight: 100}},
++	{7, PriorityParam{StreamDep: 0, Weight: 0}},
++	{9, PriorityParam{StreamDep: 7, Weight: 0}},
++	{11, PriorityParam{StreamDep: 3, Weight: 0}},
++	{13, PriorityParam{StreamDep: 0, Weight: 240}},
++}
++
++// The PRIORITY frames follow SETTINGS and the connection WINDOW_UPDATE in
++// order, and the requests start at FirstStreamID with HeaderPriority.
++func TestPriorityTree(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		client, server := net.Pipe()
++		seen := wireServer(server, wireOptions{})
++		header := PriorityParam{StreamDep: 13, Weight: 41}
++		tr := &Transport{
++			Settings:         []Setting{{ID: SettingInitialWindowSize, Val: 131072}},
++			ConnWindowUpdate: 12517377,
++			PriorityFrames:   firefoxTree,
++			HeaderPriority:   &header,
++			FirstStreamID:    15,
++		}
++		cc, err := tr.newClientConn(client, false, nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for range 2 {
++			req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
++			resp, err := cc.RoundTrip(req)
++			if err != nil {
++				t.Fatal(err)
++			}
++			resp.Body.Close()
++		}
++		synctest.Wait()
++		client.Close()
++		var got []string
++		for f := range seen {
++			switch f.typ {
++			case FrameSettings:
++				if f.flags&FlagSettingsAck == 0 {
++					got = append(got, "SETTINGS")
++				}
++			case FrameWindowUpdate:
++				got = append(got, fmt.Sprint("WINDOW_UPDATE ", f.incr))
++			case FramePriority, FrameHeaders:
++				got = append(got, fmt.Sprintf("%v %d %+v", f.typ, f.stream, f.prio))
++			}
++		}
++		want := []string{"SETTINGS", "WINDOW_UPDATE 12517377"}
++		for _, p := range firefoxTree {
++			want = append(want, fmt.Sprintf("PRIORITY %d %+v", p.StreamID, p.PriorityParam))
++		}
++		want = append(want, fmt.Sprintf("HEADERS 15 %+v", header), fmt.Sprintf("HEADERS 17 %+v", header))
++		if !slices.Equal(got, want) {
++			t.Errorf("frames\n%q\nwant\n%q", got, want)
++		}
++	})
++}
++
++// With another first stream, a single-use connection still takes its
++// first request and only it, and a connection closed before any request
++// takes one, which then fails with the error of the connection.
++func TestFirstStreamIdle(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		client, server := net.Pipe()
++		wireServer(server, wireOptions{})
++		cc, err := (&Transport{FirstStreamID: 15}).newClientConn(client, true, nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !cc.idleState().canTakeNewRequest {
++			t.Fatal("new single-use connection takes no request")
++		}
++		req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
++		resp, err := cc.RoundTrip(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		io.Copy(io.Discard, resp.Body)
++		resp.Body.Close()
++		if cc.idleState().canTakeNewRequest {
++			t.Error("used single-use connection takes another request")
++		}
++		client.Close()
++
++		client, server = net.Pipe()
++		go io.Copy(io.Discard, server)
++		cc, err = (&Transport{FirstStreamID: 15}).newClientConn(client, false, nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		server.Close()
++		time.Sleep(time.Second)
++		synctest.Wait()
++		if !cc.State().Closed {
++			t.Fatal("connection open")
++		}
++		if !cc.idleState().canTakeNewRequest {
++			t.Error("connection closed before any request takes none")
++		}
++	})
++}
++
++func TestCheckPriorities(t *testing.T) {
++	for _, tt := range []struct {
++		frames []PriorityFrameParam
++		header *PriorityParam
++		first  uint32
++		ok     bool
++	}{
++		{firefoxTree, &PriorityParam{StreamDep: 13, Weight: 41}, 15, true},
++		{nil, nil, 0, true},
++		{nil, nil, 1, true},
++		{[]PriorityFrameParam{{StreamID: 0, PriorityParam: PriorityParam{StreamDep: 3}}}, nil, 0, false},
++		{[]PriorityFrameParam{{StreamID: 1 << 31}}, nil, 0, false},
++		{[]PriorityFrameParam{{StreamID: 3, PriorityParam: PriorityParam{StreamDep: 1 << 31}}}, nil, 0, false},
++		{[]PriorityFrameParam{{StreamID: 3, PriorityParam: PriorityParam{StreamDep: 3}}}, nil, 0, false},
++		{nil, &PriorityParam{StreamDep: 1 << 31}, 0, false},
++		{nil, nil, 2, false},
++		{nil, nil, 1 << 31, false},
++		{nil, nil, 1<<31 - 1, true},
++	} {
++		if err := CheckPriorities(tt.frames, tt.header, tt.first); (err == nil) != tt.ok {
++			t.Errorf("CheckPriorities(%v, %v, %d) = %v, want ok %v", tt.frames, tt.header, tt.first, err, tt.ok)
++		}
++	}
++}
+diff --git a/internal/http2/eidolon_wire_test.go b/internal/http2/eidolon_wire_test.go
+index e90d1af..dd85fdb 100644
+--- a/internal/http2/eidolon_wire_test.go
++++ b/internal/http2/eidolon_wire_test.go
+@@ -17,10 +17,11 @@ type wireFrame struct {
+ 	stream uint32
+ 	flags  Flags
+ 	length uint32
+-	block  []byte  // HEADERS fragment
+-	ping   [8]byte // PING payload
+-	incr   uint32  // WINDOW_UPDATE increment
+-	code   ErrCode // RST_STREAM and GOAWAY error code
++	block  []byte        // HEADERS fragment
++	ping   [8]byte       // PING payload
++	incr   uint32        // WINDOW_UPDATE increment
++	code   ErrCode       // RST_STREAM and GOAWAY error code
++	prio   PriorityParam // PRIORITY, and HEADERS with the flag
+ }
+ 
+ // wireOptions is how wireServer answers.
+@@ -75,7 +76,10 @@ func wireServer(c net.Conn, o wireOptions) <-chan wireFrame {
+ 				w.code = f.ErrCode
+ 			case *GoAwayFrame:
+ 				w.code = f.ErrCode
++			case *PriorityFrame:
++				w.prio = f.PriorityParam
+ 			case *HeadersFrame:
++				w.prio = f.Priority
+ 				w.block = slices.Clone(f.HeaderBlockFragment())
+ 				end = f.StreamEnded()
+ 			case *DataFrame:
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index 9ac3675..b79f073 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -192,6 +192,7 @@ type ClientConn struct {
+ 	born          time.Time            // [eidolon] creation, the clock of lastRead
+ 	lastRead      atomic.Int64         // [eidolon] time.Duration since born of the last frame read
+ 	prefacePing   prefacePing          // [eidolon] Transport.PrefacePing, under mu
++	firstStreamID uint32               // [eidolon] Transport.FirstStreamID
+ 	tconn         net.Conn             // usually *tls.Conn, except specialized impls
+ 	tlsState      *tls.ConnectionState // nil only for specialized impls
+ 	atomicReused  uint32               // whether conn is being reused; atomic
+@@ -546,6 +547,10 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook
+ 		lastActive:                  time.Now(),
+ 		internalStateHook:           internalStateHook,
+ 		born:                        time.Now(),
++		firstStreamID:               1,
++	}
++	if t.FirstStreamID != 0 {
++		cc.nextStreamID, cc.firstStreamID = t.FirstStreamID, t.FirstStreamID // [eidolon]
+ 	}
+ 	if t.transportTestHooks != nil {
+ 		t.transportTestHooks.newclientconn(cc)
+@@ -626,6 +631,9 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook
+ 	if connWindowUpdate > 0 {
+ 		cc.fr.WriteWindowUpdate(0, connWindowUpdate)
+ 	}
++	for _, p := range t.PriorityFrames {
++		cc.fr.WritePriority(p.StreamID, p.PriorityParam) // [eidolon]
++	}
+ 	if t.ChromiumWindowUpdate {
+ 		cc.inflow.initChromium(int32(connWindowUpdate) + initialWindowSize) // [eidolon]
+ 	} else {
+@@ -760,7 +768,7 @@ func (cc *ClientConn) idleState() clientConnIdleState {
+ }
+ 
+ func (cc *ClientConn) idleStateLocked() (st clientConnIdleState) {
+-	if cc.singleUse && cc.nextStreamID > 1 {
++	if cc.singleUse && cc.nextStreamID > cc.firstStreamID { // [eidolon] was 1
+ 		return
+ 	}
+ 	var maxConcurrentOkay bool
+@@ -789,7 +797,7 @@ func (cc *ClientConn) idleStateLocked() (st clientConnIdleState) {
+ 	//
+ 	// This avoids a situation where an error early in a connection's lifetime
+ 	// goes unreported.
+-	if cc.nextStreamID == 1 && cc.streamsReserved == 0 && cc.closed && !cc.closedOnIdle {
++	if cc.nextStreamID == cc.firstStreamID && cc.streamsReserved == 0 && cc.closed && !cc.closedOnIdle { // [eidolon] was 1
+ 		st.canTakeNewRequest = true
+ 	}
+ 
+@@ -1264,6 +1272,8 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
+ 		// order their HEADERS are written.
+ 		cs.urgency = chainUrgency(req)
+ 		cc.chainAddLocked(cs)
++	} else if p := cc.t.HeaderPriority; p != nil {
++		cs.priority = *p // [eidolon]
+ 	}
+ 	if isConnectionCloseRequest(req) {
+ 		cc.doNotReuse = true
+diff --git a/internal/http2/transport_common.go b/internal/http2/transport_common.go
+index cf64577..bbd9e2a 100644
+--- a/internal/http2/transport_common.go
++++ b/internal/http2/transport_common.go
+@@ -169,6 +169,20 @@ type Transport struct {
+ 	// keeps its place in the concurrency limit until the PING is answered.
+ 	CancelWithoutPing bool
+ 
++	// [eidolon] PriorityFrames are sent in order right after SETTINGS and
++	// the connection WINDOW_UPDATE, as some browsers build a priority tree
++	// with them (Firefox up to version 88). CheckPriorities validates them.
++	PriorityFrames []PriorityFrameParam
++
++	// [eidolon] HeaderPriority, if non-nil and PriorityChain is false, is
++	// the priority of every request HEADERS. A zero PriorityParam sends no
++	// PRIORITY flag.
++	HeaderPriority *PriorityParam
++
++	// [eidolon] FirstStreamID is the stream of the first request, then
++	// counting by 2; 0 is 1. It is odd.
++	FirstStreamID uint32
++
+ 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
+ 	// initial settings frame. It is the size in bytes of the largest frame
+ 	// payload that the sender is willing to receive. If 0, no setting is
