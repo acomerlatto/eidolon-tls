@@ -73,6 +73,11 @@ type Transport struct {
 	// from it, to tlsdial.ProtoHTTP1 and tlsdial.ProtoH2 as listed. Nil
 	// keeps the spec as it is and accepts both.
 	Protocols []string
+	// H2 sets the SETTINGS each new HTTP/2 connection starts with and the
+	// WINDOW_UPDATE sent with them, enforced as announced
+	// (http2.Transport.Settings). Nil sends DefaultH2, with the header
+	// list limit of MaxResponseHeaderBytes.
+	H2 *H2Preface
 
 	h2once sync.Once
 	h2     *http2.Transport
@@ -149,7 +154,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	// The order keys of Header are never sent; the order travels to the
 	// engines in the context.
-	merged := order.Merge(order.FromHeader(req.Header), order.FromContext(req.Context()), t.Order)
+	merged := order.Merge(order.FromHeader(req.Header), order.FromContext(req.Context()), t.Order, defaultOrder)
 	if merged != nil {
 		sent = *sent.WithContext(order.WithOrder(req.Context(), *merged))
 	}
@@ -635,8 +640,15 @@ func (t *Transport) h2t() *http2.Transport {
 		// One connection per key (C4): a request waits for a free stream
 		// instead of opening another connection.
 		t.h2.StrictMaxConcurrentStreams = true
-		// The limit is also what SETTINGS announces.
+		// The limit is also what SETTINGS announces, unless H2 leaves
+		// MAX_HEADER_LIST_SIZE out.
 		t.h2.MaxHeaderListSize = uint32(t.maxHeaderBytes())
+		pre := t.H2
+		if pre == nil {
+			pre = defaultH2(uint32(t.maxHeaderBytes()))
+		}
+		t.h2.Settings = append([]http2.Setting{}, pre.Settings...)
+		t.h2.ConnWindowUpdate = pre.ConnWindowUpdate
 	})
 	return t.h2
 }

@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/net/http2/hpack"
 
+	"github.com/acomerlatto/eidolon-tls/internal/dispatch"
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/http2"
 	"github.com/acomerlatto/eidolon-tls/internal/lab"
@@ -133,6 +134,10 @@ func TestResponseHeaderLimitSet(t *testing.T) {
 	}
 	if got := settingValue(frames, uint16(http2.SettingMaxHeaderListSize)); got != 64<<10 {
 		t.Fatalf("SETTINGS_MAX_HEADER_LIST_SIZE = %d", got)
+	}
+	// The limit goes into a copy of DefaultH2.
+	if got := dispatch.DefaultH2.Settings[3]; got.ID != http2.SettingMaxHeaderListSize || got.Val != 262144 {
+		t.Fatalf("DefaultH2 changed: %v", got)
 	}
 
 	// Above what the 32-bit setting announces, the limit is the largest
