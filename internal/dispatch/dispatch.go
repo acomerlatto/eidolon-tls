@@ -98,6 +98,16 @@ var ErrExactHeadersRedirect = errors.New("eidolon: redirect of a request with ex
 // by the server, required by it, or needed by the URL.
 var ErrProtocolPolicy = errors.New("eidolon: protocol outside the enabled set")
 
+// ErrRetryBudget reports a request that could have been sent again but
+// was not, because its budget ran out: maxRetries retries, maxDials
+// replays or dials. It wraps the last error.
+var ErrRetryBudget = errors.New("eidolon: retry budget exhausted")
+
+// overBudget reports err as the last error of a request out of budget.
+func overBudget(err error) error {
+	return fmt.Errorf("%w: %w", ErrRetryBudget, err)
+}
+
 // RoundTrip implements http.RoundTripper.
 //
 // The destination is normalized by internal/target: the URL decides the
@@ -142,6 +152,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		sent.URL = &u
 	}
 	resp, err := t.roundTrip(&sent, tgt)
+	var se http2.StreamError
+	if errors.As(err, &se) && se.Cause == http2.ErrHeaderListSize ||
+		errors.Is(err, http2.ErrHeaderListSize) {
+		// One error for the limit of both engines.
+		err = fmt.Errorf("%w: %w", http1.ErrHeaderTooLarge, err)
+	}
 	if err != nil && t.isClosed() && !errors.Is(err, ErrClosed) {
 		// Keep the cause, such as context.Canceled.
 		err = fmt.Errorf("%w: %w", ErrClosed, err)
@@ -209,8 +225,12 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 				return nil, err
 			}
 			resp, again, err := t.sendH1(c, req)
-			if again == nil || replays == maxDials {
+			if again == nil {
 				return resp, err
+			}
+			if replays == maxDials {
+				closeBody(again)
+				return nil, overBudget(err)
 			}
 			req, fresh = again, true
 		}
@@ -247,12 +267,16 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 				return nil, fmt.Errorf("%w: the server requires HTTP/1.1: %w", ErrProtocolPolicy, err)
 			}
 			t.requireH1(key)
-			if replays == maxDials || body.failed() || ctx.Err() != nil || t.isClosed() {
+			if body.failed() || ctx.Err() != nil || t.isClosed() {
 				return nil, err
 			}
 			r, ok := rewindBody(req)
 			if !ok {
 				return nil, err
+			}
+			if replays == maxDials {
+				closeBody(r)
+				return nil, overBudget(err)
 			}
 			replays++
 			req = r
@@ -263,8 +287,12 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			// REFUSED_STREAM, or a stream above the last one of a
 			// graceful GOAWAY. Chrome sends it again, whatever the
 			// method, at once and at most twice.
-			if retries == maxRetries || body.failed() || ctx.Err() != nil || t.isClosed() {
+			if body.failed() || ctx.Err() != nil || t.isClosed() {
 				return nil, err
+			}
+			if retries == maxRetries {
+				closeBody(next)
+				return nil, overBudget(err)
 			}
 			retries++
 			req = next
@@ -276,13 +304,16 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			// request can be replayed. WasIdle implies Reused. An error
 			// of the request body is not a lost connection, whatever it
 			// looks like.
-			if replays == maxDials || !got.WasIdle || !connLost(err) || body.failed() ||
-				ctx.Err() != nil || t.isClosed() {
+			if !got.WasIdle || !connLost(err) || body.failed() || ctx.Err() != nil || t.isClosed() {
 				return nil, err
 			}
 			r, ok := rewind(req)
 			if !ok {
 				return nil, err
+			}
+			if replays == maxDials {
+				closeBody(r)
+				return nil, overBudget(err)
 			}
 			replays++
 			req = r
@@ -291,7 +322,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 		req = next // watched
 		if dials == maxDials {
 			closeBody(req)
-			return nil, fmt.Errorf("eidolon: no usable connection to %s after %d dials", tgt.Origin(), dials)
+			return nil, fmt.Errorf("%w: no usable connection to %s after %d dials", ErrRetryBudget, tgt.Origin(), dials)
 		}
 
 		dials++
@@ -304,8 +335,12 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			continue // an h2 connection was pooled
 		}
 		resp, again, err := t.sendH1(c, req)
-		if again == nil || replays == maxDials {
+		if again == nil {
 			return resp, err
+		}
+		if replays == maxDials {
+			closeBody(again)
+			return nil, overBudget(err)
 		}
 		replays++
 		req, fresh = again, true

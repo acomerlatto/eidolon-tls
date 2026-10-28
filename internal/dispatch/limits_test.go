@@ -15,13 +15,16 @@ import (
 	"github.com/acomerlatto/eidolon-tls/internal/lab"
 )
 
-// writeBigHeaders answers stream with a header list of about size bytes,
-// split in HEADERS and CONTINUATION frames, whatever the client announced.
-func writeBigHeaders(fr *http2.Framer, stream uint32, size int) {
+// writeBigHeaders answers stream with a header list of about size bytes in
+// n fields, split in HEADERS and CONTINUATION frames, whatever the client
+// announced.
+func writeBigHeaders(fr *http2.Framer, stream uint32, size, n int) {
 	var block bytes.Buffer
 	enc := hpack.NewEncoder(&block)
 	enc.WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
-	enc.WriteField(hpack.HeaderField{Name: "x-big", Value: strings.Repeat("a", size)})
+	for i := range n {
+		enc.WriteField(hpack.HeaderField{Name: fmt.Sprintf("x-big-%d", i), Value: strings.Repeat("a", size/n)})
+	}
 	b := block.Bytes()
 	const chunk = 16 << 10
 	first := min(chunk, len(b))
@@ -35,7 +38,9 @@ func writeBigHeaders(fr *http2.Framer, stream uint32, size int) {
 }
 
 // Response headers are bounded to 256 KiB by default, as Chrome, on both
-// engines; over HTTP/2 the client announces the same limit.
+// engines, with one error; over HTTP/2 the client announces the same limit.
+// One field over the limit stops the HPACK decoder and the connection;
+// many smaller ones only fail the stream.
 func TestResponseHeaderLimit(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -60,25 +65,30 @@ func TestResponseHeaderLimit(t *testing.T) {
 				t.Fatalf("err = %v, want ErrHeaderTooLarge", err)
 			}
 		})
-		t.Run("h2/"+tt.name, func(t *testing.T) {
-			srv := lab.Start(t, lab.Options{H2Conn: rawH2(func(fr *http2.Framer, stream uint32, _ int) bool {
-				writeBigHeaders(fr, stream, tt.size)
-				return true
-			})})
-			tr := transport(srv)
-			defer tr.Close()
-			_, _, err := do(t, tr, http.MethodGet, "https://example.com/", "")
-			if (err == nil) != tt.ok {
-				t.Fatalf("err = %v, want ok = %v", err, tt.ok)
-			}
-			frames, ferr := srv.NextConn(t).H2Frames()
-			if ferr != nil {
-				t.Fatal(ferr)
-			}
-			if got := settingValue(frames, uint16(http2.SettingMaxHeaderListSize)); got != 256<<10 {
-				t.Fatalf("SETTINGS_MAX_HEADER_LIST_SIZE = %d, want %d", got, 256<<10)
-			}
-		})
+		for _, fields := range []int{1, 30} {
+			t.Run(fmt.Sprintf("h2/%s/%d fields", tt.name, fields), func(t *testing.T) {
+				srv := lab.Start(t, lab.Options{H2Conn: rawH2(func(fr *http2.Framer, stream uint32, _ int) bool {
+					writeBigHeaders(fr, stream, tt.size, fields)
+					return true
+				})})
+				tr := transport(srv)
+				defer tr.Close()
+				_, _, err := do(t, tr, http.MethodGet, "https://example.com/", "")
+				if tt.ok && err != nil {
+					t.Fatal(err)
+				}
+				if !tt.ok && !errors.Is(err, http1.ErrHeaderTooLarge) {
+					t.Fatalf("err = %v, want ErrHeaderTooLarge", err)
+				}
+				frames, ferr := srv.NextConn(t).H2Frames()
+				if ferr != nil {
+					t.Fatal(ferr)
+				}
+				if got := settingValue(frames, uint16(http2.SettingMaxHeaderListSize)); got != 256<<10 {
+					t.Fatalf("SETTINGS_MAX_HEADER_LIST_SIZE = %d, want %d", got, 256<<10)
+				}
+			})
+		}
 	}
 }
 
@@ -122,5 +132,32 @@ func TestResponseHeaderLimitSet(t *testing.T) {
 	}
 	if got := settingValue(frames, uint16(http2.SettingMaxHeaderListSize)); got != 64<<10 {
 		t.Fatalf("SETTINGS_MAX_HEADER_LIST_SIZE = %d", got)
+	}
+}
+
+// A header list over the limit within one HEADERS frame fails only its
+// stream, with the same error, and the connection goes on.
+func TestResponseHeaderLimitStream(t *testing.T) {
+	srv := lab.Start(t, lab.Options{H2Conn: rawH2(func(fr *http2.Framer, stream uint32, n int) bool {
+		if n == 1 {
+			writeBigHeaders(fr, stream, 4<<10, 8) // one frame, no CONTINUATION
+		} else {
+			writeOK(fr, stream)
+		}
+		return true
+	})})
+	tr := transport(srv)
+	tr.MaxResponseHeaderBytes = 2 << 10
+	defer tr.Close()
+	_, _, err := do(t, tr, http.MethodGet, "https://example.com/", "")
+	var se http2.StreamError
+	if !errors.Is(err, http1.ErrHeaderTooLarge) || !errors.As(err, &se) {
+		t.Fatalf("err = %v, want ErrHeaderTooLarge from a stream error", err)
+	}
+	if _, body, err := do(t, tr, http.MethodGet, "https://example.com/", ""); err != nil || body != "h2" {
+		t.Fatalf("next request: %q, %v", body, err)
+	}
+	if n := srv.Accepted(); n != 1 {
+		t.Fatalf("%d connections, want 1", n)
 	}
 }
