@@ -8,7 +8,6 @@ import (
 
 	utls "github.com/acomerlatto/utls"
 
-	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/target"
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
@@ -119,7 +118,7 @@ func (t *Transport) h1DialTLS(tgt target.Target, key string) func(context.Contex
 func (t *Transport) newH1Conn(key string, conn *utls.UConn) *h1Conn {
 	std := tlsdial.StdConn{UConn: conn}
 	state := std.ConnectionState()
-	return &h1Conn{Conn: http1.NewConn(std), t: t, key: key, state: &state}
+	return &h1Conn{Conn: t.newHTTP1(std), t: t, key: key, state: &state}
 }
 
 // addH2 puts an h2 connection in the pool. A connection the pool does not

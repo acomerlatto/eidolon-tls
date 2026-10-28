@@ -240,7 +240,7 @@ func (t *Transport) h1Get(ctx context.Context, key string, dial func(context.Con
 		t.h1Release(key)
 		return nil, nil
 	}
-	return &h1Conn{Conn: http1.NewConn(conn), t: t, key: key, state: state}, nil
+	return &h1Conn{Conn: t.newHTTP1(conn), t: t, key: key, state: state}, nil
 }
 
 // sendH1 sends req on c. The connection returns to the pool when the body
@@ -287,7 +287,7 @@ func (t *Transport) sendH1(c *h1Conn, req *http.Request) (resp *http.Response, a
 		finishH1(c, stop, keep)
 		return resp, nil, nil
 	}
-	resp.Body = &h1Body{ReadCloser: resp.Body, c: c, stop: stop, keep: keep}
+	resp.Body = &h1Body{ReadCloser: resp.Body, c: c, stop: stop, keep: keep, ctx: ctx}
 	return resp, nil, nil
 }
 
@@ -321,12 +321,18 @@ type h1Body struct {
 	stop func() bool
 	keep bool
 	once sync.Once
+	ctx  context.Context
 }
 
 func (b *h1Body) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if err != nil {
 		b.once.Do(func() { finishH1(b.c, b.stop, b.keep && err == io.EOF) })
+		// The context closed the connection: report its cause, as the H2
+		// engine does, not the closed connection.
+		if ctxErr := b.ctx.Err(); ctxErr != nil && err != io.EOF {
+			err = ctxErr
+		}
 	}
 	return n, err
 }

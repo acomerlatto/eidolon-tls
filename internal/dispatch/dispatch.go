@@ -53,6 +53,11 @@ type Transport struct {
 	// request (the keys of Header, then the context) in precedence
 	// (order.Merge). Nil leaves the request's.
 	Order *order.Order
+	// MaxResponseHeaderBytes bounds the headers of a response: over
+	// HTTP/1.1 the bytes read with them, 1xx included; over HTTP/2 the
+	// header list, as announced in SETTINGS_MAX_HEADER_LIST_SIZE. Zero
+	// means http1.DefaultMaxHeaderBytes (256 KiB, as Chrome).
+	MaxResponseHeaderBytes int64
 	// DisableDecompression delivers gzip and deflate bodies as they came,
 	// with Content-Encoding. By default they are decoded (decompress).
 	DisableDecompression bool
@@ -518,8 +523,25 @@ func (t *Transport) h2t() *http2.Transport {
 		// One connection per key (C4): a request waits for a free stream
 		// instead of opening another connection.
 		t.h2.StrictMaxConcurrentStreams = true
+		// The limit is also what SETTINGS announces.
+		t.h2.MaxHeaderListSize = uint32(t.maxHeaderBytes())
 	})
 	return t.h2
+}
+
+// maxHeaderBytes returns the response header limit of both engines.
+func (t *Transport) maxHeaderBytes() int64 {
+	if t.MaxResponseHeaderBytes > 0 {
+		return t.MaxResponseHeaderBytes
+	}
+	return http1.DefaultMaxHeaderBytes
+}
+
+// newHTTP1 returns an HTTP/1.1 connection over c with the header limit.
+func (t *Transport) newHTTP1(c net.Conn) *http1.Conn {
+	hc := http1.NewConn(c)
+	hc.MaxHeaderBytes = t.maxHeaderBytes()
+	return hc
 }
 
 func closeBody(req *http.Request) {
