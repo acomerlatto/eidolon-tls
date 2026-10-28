@@ -34,7 +34,8 @@ type HttpClient interface {
 	// "Connection: close", which Chrome never sends: HTTP/1.1 closes it
 	// once the response was read, HTTP/2 takes no new streams on it and
 	// closes it when its streams end. A Connection field set by the caller
-	// is sent on HTTP/1.1 and has the same effect.
+	// is sent on HTTP/1.1 and has the same effect, in exact mode
+	// (WithExactHeaders) when it is among the fields sent.
 	Do(req *http.Request) (*http.Response, error)
 	// Get, Head and Post are the http.Client shortcuts.
 	Get(url string) (*http.Response, error)

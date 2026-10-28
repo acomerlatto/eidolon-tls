@@ -209,8 +209,9 @@ func TestH1PoolNotReused(t *testing.T) {
 		name    string
 		handler http.HandlerFunc
 		header  http.Header
-		partial bool // close the body before EOF
-		close   bool // Request.Close
+		partial bool          // close the body before EOF
+		close   bool          // Request.Close
+		exact   []order.Field // exact mode
 		body    string
 	}{
 		{
@@ -234,6 +235,15 @@ func TestH1PoolNotReused(t *testing.T) {
 			},
 			header: http.Header{"Connection": {"close"}},
 			body:   "ok",
+		},
+		{
+			// The same in exact mode, from the fields sent.
+			name: "exact Connection: close",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				hijack(w, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", false)
+			},
+			exact: []order.Field{{Name: "Host", Value: "example.com"}, {Name: "connection", Value: "Close"}},
+			body:  "ok",
 		},
 		{
 			// Request.Close sends no Connection field, as Chrome.
@@ -275,7 +285,11 @@ func TestH1PoolNotReused(t *testing.T) {
 			srv, base := h1Lab(t, false, tt.handler)
 			tr := transport(srv)
 			defer tr.Close()
-			req, _ := http.NewRequest(http.MethodGet, base+"/", nil)
+			ctx := context.Background()
+			if tt.exact != nil {
+				ctx = order.WithExact(ctx, tt.exact)
+			}
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/", nil)
 			for k, v := range tt.header {
 				req.Header[k] = v
 			}
@@ -296,6 +310,28 @@ func TestH1PoolNotReused(t *testing.T) {
 				t.Fatal("connection kept open")
 			}
 		})
+	}
+}
+
+// In exact mode a Connection field of Request.Header is not sent and does
+// not close the connection, nor does a "close" in another field.
+func TestH1PoolExactIgnoresHeaderClose(t *testing.T) {
+	srv, base := h1Lab(t, false, nil)
+	tr := transport(srv)
+	defer tr.Close()
+	ctx := order.WithExact(context.Background(), []order.Field{{Name: "Host", Value: "example.com"}, {Name: "X-Mode", Value: "close"}})
+	for range 2 {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/", nil)
+		req.Header.Set("Connection", "close")
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+	if c := srv.Accepted(); c != 1 {
+		t.Fatalf("%d connections, want 1", c)
 	}
 }
 

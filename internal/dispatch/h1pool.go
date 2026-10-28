@@ -14,6 +14,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
+	"github.com/acomerlatto/eidolon-tls/internal/order"
 )
 
 // DefaultMaxConnsPerHost is the HTTP/1.1 connection limit per key, as in
@@ -341,7 +342,7 @@ func (t *Transport) sendH1(c *h1Conn, req *http.Request) (resp *http.Response, a
 		return nil, nil, ctxErr
 	}
 	resp.TLS = c.state
-	keep := c.KeepAlive(resp) && !req.Close && !closeRequested(req.Header)
+	keep := c.KeepAlive(resp) && !req.Close && !closeRequested(req)
 	if resp.Body == http.NoBody {
 		finishH1(c, stop, keep)
 		return resp, nil, nil
@@ -362,9 +363,18 @@ func finishH1(c *h1Conn, stop func() bool, keep bool) {
 }
 
 // closeRequested reports whether the request asked to close the
-// connection with "Connection: close".
-func closeRequested(h http.Header) bool {
-	for k, vv := range h {
+// connection with "Connection: close": among the exact fields in exact
+// mode, which replace req.Header, otherwise in req.Header.
+func closeRequested(req *http.Request) bool {
+	if exact := order.ExactFromContext(req.Context()); exact != nil {
+		for _, f := range exact {
+			if strings.EqualFold(f.Name, "connection") && httpguts.HeaderValuesContainsToken([]string{f.Value}, "close") {
+				return true
+			}
+		}
+		return false
+	}
+	for k, vv := range req.Header {
 		if strings.EqualFold(k, "connection") && httpguts.HeaderValuesContainsToken(vv, "close") {
 			return true
 		}
