@@ -27,6 +27,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0007-goaway-http11-required.patch`
 - `scripts/xnet-patches/0008-exact-headers.patch`
 - `scripts/xnet-patches/0009-linger-for-end-stream.patch`
+- `scripts/xnet-patches/0010-no-reset-after-headers-end-stream.patch`
 
 ## Excluded files
 

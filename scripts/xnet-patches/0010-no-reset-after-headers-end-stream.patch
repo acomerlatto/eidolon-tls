@@ -1,0 +1,48 @@
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index f035a68..47f98a0 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -328,6 +328,11 @@ type clientStream struct {
+ 	lingerTimer   *time.Timer   // guarded by cc.mu; see lingerForEndStream
+ 	lingerc       chan struct{} // closed when the stream starts lingering
+ 
++	// [eidolon] headersEndedStream is set when the response HEADERS frame
++	// carried END_STREAM. The read loop writes it before closing
++	// respHeaderRecv, so roundTrip may read it once that channel is closed.
++	headersEndedStream bool
++
+ 	// owned by clientConnReadLoop:
+ 	firstByte       bool  // got the first response byte
+ 	pastHeaders     bool  // got first MetaHeadersFrame (actual headers)
+@@ -1077,6 +1082,21 @@ func (cc *ClientConn) internalRoundTrip(req *http.Request, streamf func(*clientS
+ 				return nil, err
+ 			}
+ 		}
++		if cs.headersEndedStream {
++			// [eidolon] The response ended with its HEADERS frame, and the
++			// read loop closes peerClosed just after waking us. Wait for
++			// that. A caller that cancels its context the moment we return
++			// would otherwise race writeRequest, which can see the cancel
++			// before peerClosed and reset a stream both sides have already
++			// closed. The wait above covers requests without a body; this
++			// covers the rest. No browser sends RST_STREAM on a finished
++			// stream. From the sardanioss x/net fork, 59b8970.
++			select {
++			case <-cs.peerClosed:
++			case <-cs.abort:
++			case <-ctx.Done():
++			}
++		}
+ 		return res, nil
+ 	}
+ 
+@@ -2105,6 +2125,9 @@ func (rl *clientConnReadLoop) processHeaders(f *MetaHeadersFrame) error {
+ 	}
+ 	cs.resTrailer = &res.Trailer
+ 	cs.res = res
++	if f.StreamEnded() {
++		cs.headersEndedStream = true // [eidolon] before waking roundTrip
++	}
+ 	close(cs.respHeaderRecv)
+ 	if f.StreamEnded() {
+ 		rl.endStream(cs)
