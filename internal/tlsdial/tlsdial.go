@@ -24,6 +24,11 @@ const (
 // ErrALPN reports a protocol negotiated by ALPN that no engine handles.
 var ErrALPN = errors.New("tlsdial: unsupported ALPN protocol")
 
+// ErrCertificate reports a server certificate refused by verification:
+// unknown authority, wrong name, expired. The crypto/x509 error stays in
+// the chain.
+var ErrCertificate = errors.New("eidolon: certificate verification failed")
+
 // Config describes how to dial one destination.
 type Config struct {
 	// Spec returns a new ClientHello spec. It is called once per
@@ -83,6 +88,10 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 	}
 	if err := uconn.HandshakeContext(ctx); err != nil {
 		conn.Close()
+		var ve *utls.CertificateVerificationError
+		if errors.As(err, &ve) {
+			err = fmt.Errorf("%w: %w", ErrCertificate, err)
+		}
 		return nil, err
 	}
 	switch proto := uconn.ConnectionState().NegotiatedProtocol; proto {
