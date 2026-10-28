@@ -3336,41 +3336,23 @@ func testTransportRetryAfterGOAWAYSecondRequest(t testing.TB) {
 	rt1.wantStatus(200)
 
 	// Second request: Server sends a GOAWAY with
-	// a MaxStreamID less than the request ID.
-	// The server says it didn't see this request,
-	// so we retry it on a new connection.
+	// a MaxStreamID less than the request ID and an error code.
+	// [eidolon] Chrome retries only the streams of a graceful GOAWAY
+	// and fails the others (SpdySession::OnGoAway), so the request
+	// fails with the code instead of going to a new connection.
 	req, _ = http.NewRequest("GET", "https://dummy.tld/", nil)
 	rt2 := tt.roundTrip(req)
 
-	// Second request, first attempt.
 	tc.wantHeaders(wantHeader{
 		streamID:  3,
 		endStream: true,
 	})
 	tc.writeSettings()
 	tc.writeGoAway(1 /*max id*/, ErrCodeProtocol, nil)
-	if rt2.done() {
-		t.Fatalf("after GOAWAY, RoundTrip is done; want it to be retrying")
+	var ge GoAwayError
+	if err := rt2.err(); !errors.As(err, &ge) || ge.ErrCode != ErrCodeProtocol {
+		t.Fatalf("RoundTrip = %v, want GoAwayError with PROTOCOL_ERROR", err)
 	}
-
-	// Second request, second attempt.
-	tc = tt.getConn()
-	tc.wantFrameType(FrameSettings)
-	tc.wantFrameType(FrameWindowUpdate)
-	tc.wantHeaders(wantHeader{
-		streamID:  1,
-		endStream: true,
-	})
-	tc.writeSettings()
-	tc.writeHeaders(HeadersFrameParam{
-		StreamID:   1,
-		EndHeaders: true,
-		EndStream:  true,
-		BlockFragment: tc.makeHeaderBlockFragment(
-			":status", "200",
-		),
-	})
-	rt2.wantStatus(200)
 }
 
 func TestTransportRetryAfterRefusedStream(t *testing.T) {

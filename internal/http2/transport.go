@@ -652,20 +652,17 @@ func (cc *ClientConn) setGoAway(f *GoAwayFrame) {
 			// without doing so. Either way, leave the stream alone for now.
 			continue
 		}
-		if cc.goAway.ErrCode == ErrCodeHTTP11Required {
-			// [eidolon] Not retried on another HTTP/2 connection: the
-			// caller sees the code and sends the request over HTTP/1.1,
-			// as Chrome does.
+		if cc.goAway.ErrCode != ErrCodeNo {
+			// [eidolon] Not retried on another HTTP/2 connection, on any
+			// stream: Chrome retries only the streams of a graceful
+			// GOAWAY and fails the others with ERR_HTTP2_PROTOCOL_ERROR
+			// (SpdySession::OnGoAway). The caller sees the code; for
+			// HTTP_1_1_REQUIRED it sends the request over HTTP/1.1.
 			cs.abortStreamLocked(GoAwayError{
 				LastStreamID: last,
 				ErrCode:      cc.goAway.ErrCode,
 				DebugData:    cc.goAwayDebug,
 			})
-		} else if streamID == 1 && cc.goAway.ErrCode != ErrCodeNo {
-			// Don't retry the first stream on a connection if we get a non-NO error.
-			// If the server is sending an error on a new connection,
-			// retrying the request on a new one probably isn't going to work.
-			cs.abortStreamLocked(fmt.Errorf("http2: Transport received GOAWAY from server ErrCode:%v", cc.goAway.ErrCode))
 		} else {
 			// Aborting the stream with errClentConnGotGoAway indicates that
 			// the request should be retried on a new connection.
