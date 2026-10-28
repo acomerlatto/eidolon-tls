@@ -6,10 +6,13 @@
 package tlsdial
 
 import (
+	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 
 	utls "github.com/acomerlatto/utls"
 )
@@ -59,6 +62,11 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 	if cfg.TLS == nil || cfg.TLS.ServerName == "" {
 		return nil, errors.New("tlsdial: Config.TLS.ServerName is empty")
 	}
+	if ip, err := netip.ParseAddr(cfg.TLS.ServerName); err == nil && !cfg.TLS.InsecureSkipVerify {
+		tc := cfg.TLS.Clone()
+		tc.VerifyConnection = exactIP(ip, tc.VerifyConnection)
+		cfg.TLS = tc
+	}
 	// Apply the spec before dialing, so a bad profile opens no connection.
 	uconn, err := prepare(cfg)
 	if err != nil {
@@ -77,7 +85,8 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 	if err := uconn.HandshakeContext(ctx); err != nil {
 		conn.Close()
 		var ve *utls.CertificateVerificationError
-		if errors.As(err, &ve) {
+		var he x509.HostnameError
+		if errors.As(err, &ve) || errors.As(err, &he) {
 			err = fmt.Errorf("%w: %w", ErrCertificate, err)
 		}
 		return nil, err
@@ -88,6 +97,31 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 	default:
 		uconn.Close()
 		return nil, fmt.Errorf("%w: %q", ErrALPN, proto)
+	}
+}
+
+// exactIP returns a VerifyConnection that runs next and then requires an
+// IP address SAN with the bytes of ip, as RFC 9525 section 6.4 says and
+// Chrome does (X509Certificate::VerifyHostname): crypto/x509 takes an
+// IPv4 address and the same address mapped in IPv6 as equal.
+func exactIP(ip netip.Addr, next func(utls.ConnectionState) error) func(utls.ConnectionState) error {
+	want := ip.AsSlice()
+	return func(cs utls.ConnectionState) error {
+		if next != nil {
+			if err := next(cs); err != nil {
+				return err
+			}
+		}
+		if len(cs.PeerCertificates) == 0 {
+			return nil
+		}
+		leaf := cs.PeerCertificates[0]
+		for _, a := range leaf.IPAddresses {
+			if bytes.Equal(a, want) {
+				return nil
+			}
+		}
+		return x509.HostnameError{Certificate: leaf, Host: ip.String()}
 	}
 }
 

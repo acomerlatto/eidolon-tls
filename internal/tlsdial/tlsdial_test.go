@@ -385,3 +385,39 @@ func TestDialAppliesSpecBeforeConnecting(t *testing.T) {
 		t.Fatalf("Check of the Chrome spec: %v", err)
 	}
 }
+
+// An IP host matches an IP address SAN byte for byte, as Chrome does
+// (RFC 9525 section 6.4): the test certificate holds 127.0.0.1 in four
+// bytes, which crypto/x509 also takes for ::ffff:127.0.0.1.
+func TestDialIPAddressExact(t *testing.T) {
+	srv, _ := newTLSServer(t, []string{ProtoH2}, http.NotFoundHandler())
+	for _, tt := range []struct {
+		name string
+		ok   bool
+	}{
+		{"127.0.0.1", true},
+		{"::ffff:127.0.0.1", false},
+		{"::ffff:7f00:1", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var cc closeCounter
+			conn, err := Dial(context.Background(), "tcp", srv.Listener.Addr().String(), Config{
+				Spec:        chromeSpec,
+				TLS:         tlsConfig(srv, tt.name),
+				DialContext: cc.dial,
+			})
+			if tt.ok {
+				if err != nil {
+					t.Fatal(err)
+				}
+				conn.Close()
+				return
+			}
+			var he x509.HostnameError
+			if !errors.Is(err, ErrCertificate) || !errors.As(err, &he) {
+				t.Fatalf("err = %v, want ErrCertificate with a HostnameError", err)
+			}
+			cc.check(t)
+		})
+	}
+}
