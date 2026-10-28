@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/http/httpguts"
@@ -60,14 +61,25 @@ const max1xx = 5
 // order.FromContext(req.Context()); spelling from spell. Nothing is written
 // if the request is invalid.
 func WriteRequest(w io.Writer, req *http.Request, spell Spelling) error {
+	_, err := writeRequest(w, req, spell)
+	return err
+}
+
+// writeRequest is WriteRequest that also returns the length of the head,
+// once it is known.
+func writeRequest(w io.Writer, req *http.Request, spell Spelling) (int64, error) {
 	req, err := probeBody(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	head, err := encodeHead(req, spell)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	return int64(len(head)), writeMessage(w, req, head)
+}
+
+func writeMessage(w io.Writer, req *http.Request, head string) error {
 	bw := bufio.NewWriter(w)
 	bw.WriteString(head)
 	if unknownLength(req) {
@@ -143,6 +155,7 @@ type Conn struct {
 	tap  tap
 	br   *bufio.Reader
 	sent int64 // bytes written by the last RoundTrip
+	werr error // the write error of the last RoundTrip
 	// closing: the last response had both Transfer-Encoding and
 	// Content-Length, or was read from a normalized head; the connection
 	// ends with it.
@@ -172,10 +185,17 @@ func (c *Conn) Sent() int64 { return c.sent }
 // RoundTrip writes req and reads the final response, skipping 1xx
 // informational responses. The response body reads from the connection;
 // the next request may start only after the body reached EOF.
+//
+// A connection reset while the body is sent, the head sent whole, does not
+// end the request: as Chrome (HttpStreamParser), the response is read, and
+// a 4xx or 5xx is returned in place of the error, such as a 413 sent
+// before the server closed. Any other outcome returns the error. The
+// connection ends with the response.
 func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, error) {
-	c.sent = 0
-	if err := WriteRequest(writeCounter{c}, req, spell); err != nil {
-		return nil, err
+	c.sent, c.werr = 0, nil
+	headLen, uploadErr := writeRequest(writeCounter{c}, req, spell)
+	if uploadErr != nil && (!errors.Is(uploadErr, c.werr) || !reset(uploadErr) || c.sent < headLen) {
+		return nil, uploadErr
 	}
 	limit := c.MaxHeaderBytes
 	if limit <= 0 {
@@ -204,6 +224,9 @@ func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, err
 			}
 		}
 		if err != nil {
+			if uploadErr != nil {
+				return nil, uploadErr
+			}
 			if c.tap.left <= 0 {
 				return nil, fmt.Errorf("%w of %d bytes", ErrHeaderTooLarge, limit)
 			}
@@ -223,7 +246,13 @@ func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, err
 			}
 			continue
 		}
-		c.closing = normalized || bothFramings(c.tap.rec)
+		if uploadErr != nil {
+			if class := resp.StatusCode / 100; class != 4 && class != 5 {
+				resp.Body.Close()
+				return nil, uploadErr
+			}
+		}
+		c.closing = uploadErr != nil || normalized || bothFramings(c.tap.rec)
 		return resp, nil
 	}
 }
@@ -390,12 +419,22 @@ func normalizeHead(raw []byte) ([]byte, bool) {
 	return head, true
 }
 
-// writeCounter counts the bytes written to the connection.
+// reset reports whether err is a connection reset by the peer; Chrome
+// reports EPIPE as one too (ERR_CONNECTION_RESET).
+func reset(err error) bool {
+	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
+}
+
+// writeCounter counts the bytes written to the connection and keeps its
+// error.
 type writeCounter struct{ c *Conn }
 
 func (w writeCounter) Write(p []byte) (int, error) {
 	n, err := w.c.conn.Write(p)
 	w.c.sent += int64(n)
+	if err != nil {
+		w.c.werr = err
+	}
 	return n, err
 }
 

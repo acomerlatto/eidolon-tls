@@ -10,7 +10,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -402,6 +404,137 @@ func TestRoundTripHeaderLimits(t *testing.T) {
 }
 
 var errAny = errors.New("any error")
+
+// tcpServer returns the client side of a TCP connection whose server runs
+// serve on the one connection it accepts, and closes it after.
+func tcpServer(t *testing.T, serve func(c net.Conn, br *bufio.Reader)) net.Conn {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		serve(c, bufio.NewReader(c))
+	}()
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { client.Close() })
+	client.SetDeadline(time.Now().Add(10 * time.Second))
+	return client
+}
+
+// readHead reads the head of a request.
+func readHead(br *bufio.Reader) {
+	for {
+		if line, err := br.ReadString('\n'); err != nil || line == "\r\n" {
+			return
+		}
+	}
+}
+
+// earlyAnswer returns the client side of a TCP connection whose server
+// reads the head of one request, answers raw and closes with the body
+// unread, which resets the connection.
+func earlyAnswer(t *testing.T, raw string) net.Conn {
+	return tcpServer(t, func(c net.Conn, br *bufio.Reader) {
+		readHead(br)
+		io.WriteString(c, raw)
+	})
+}
+
+// A server that answers before the body ends and resets the connection:
+// a 4xx or 5xx is returned, as Chrome, and anything else gives the error.
+func TestRoundTripEarlyAnswer(t *testing.T) {
+	for _, tt := range []struct {
+		name, raw string
+		status    int // 0: the reset error
+	}{
+		{"413", "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 3\r\n\r\nbig", 413},
+		{"1xx then 503", "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 503 Service Unavailable\r\nContent-Length: 3\r\n\r\nbig", 503},
+		{"200", "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nbig", 0},
+		{"301", "HTTP/1.1 301 Moved Permanently\r\nLocation: /\r\nContent-Length: 3\r\n\r\nbig", 0},
+		{"no answer", "", 0},
+		{"malformed answer", "HTTP/1.1 OK\r\n\r\n", 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := http1.NewConn(earlyAnswer(t, tt.raw))
+			req, _ := http.NewRequest(http.MethodPost, "http://example.com/", bytes.NewReader(make([]byte, 64<<20)))
+			resp, err := c.RoundTrip(req, nil)
+			if tt.status == 0 {
+				if !errors.Is(err, syscall.ECONNRESET) && !errors.Is(err, syscall.EPIPE) {
+					t.Fatalf("err = %v, want the reset", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != tt.status || string(body) != "big" {
+				t.Fatalf("got %d %q", resp.StatusCode, body)
+			}
+			if c.KeepAlive(resp) {
+				t.Error("connection kept after a reset")
+			}
+		})
+	}
+}
+
+// Only a reset while the body is sent leads to the response: a reset in
+// the head, a body that fails and a write that times out are returned,
+// though the server answered 413.
+func TestRoundTripEarlyAnswerOnlyAfterReset(t *testing.T) {
+	const answer = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 3\r\n\r\nbig"
+	t.Run("reset in the head", func(t *testing.T) {
+		conn := tcpServer(t, func(c net.Conn, br *bufio.Reader) {
+			br.ReadString('\n') // the request line
+			io.WriteString(c, answer)
+		})
+		req, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
+		req.Header.Set("X-Big", strings.Repeat("a", 32<<20))
+		if _, err := http1.NewConn(conn).RoundTrip(req, nil); !errors.Is(err, syscall.ECONNRESET) && !errors.Is(err, syscall.EPIPE) {
+			t.Fatalf("err = %v, want the reset", err)
+		}
+	})
+	t.Run("body fails with a reset", func(t *testing.T) {
+		// The server answers once the start of the body arrived, and keeps
+		// reading, so no write fails; the body fails right after its start.
+		conn := tcpServer(t, func(c net.Conn, br *bufio.Reader) {
+			readHead(br)
+			io.ReadFull(br, make([]byte, 32<<10)) // less than what is flushed
+			io.WriteString(c, answer)
+			io.Copy(io.Discard, br)
+		})
+		body := io.MultiReader(bytes.NewReader(make([]byte, 64<<10)), iotest.ErrReader(syscall.ECONNRESET))
+		req, _ := http.NewRequest(http.MethodPost, "http://example.com/", body)
+		req.ContentLength = 128 << 10
+		if _, err := http1.NewConn(conn).RoundTrip(req, nil); err != syscall.ECONNRESET {
+			t.Fatalf("err = %v, want the error of the body", err)
+		}
+	})
+	t.Run("write timeout", func(t *testing.T) {
+		done := make(chan struct{})
+		conn := tcpServer(t, func(c net.Conn, br *bufio.Reader) {
+			readHead(br)
+			io.WriteString(c, answer)
+			<-done // the body is never read
+		})
+		defer close(done)
+		conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+		req, _ := http.NewRequest(http.MethodPost, "http://example.com/", bytes.NewReader(make([]byte, 64<<20)))
+		if _, err := http1.NewConn(conn).RoundTrip(req, nil); !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("err = %v, want the timeout", err)
+		}
+	})
+}
 
 // Framings http.ReadResponse refuses and RFC 9112 accepts are read, and the
 // connection ends with the response. Conflicting ones stay malformed.

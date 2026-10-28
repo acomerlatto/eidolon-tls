@@ -1,6 +1,7 @@
 package dispatch_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -465,4 +466,27 @@ func TestH1PoolIdleTimeout(t *testing.T) {
 			t.Fatalf("%d connections, want 1", n)
 		}
 	})
+}
+
+// A 413 sent before the body ends, the connection then reset, is the
+// response, as Chrome, over TLS too; the connection is not reused.
+func TestH1EarlyAnswer(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		t.Run(map[bool]string{false: "TLS", true: "plain"}[plain], func(t *testing.T) {
+			srv, base := h1Lab(t, plain, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hijack(w, "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 3\r\n\r\nbig", true)
+			}))
+			tr := transport(srv)
+			defer tr.Close()
+			body, err := send(context.Background(), tr, http.MethodPost, base+"/", bytes.NewReader(make([]byte, 64<<20)))
+			if err != nil || body != "big" {
+				t.Fatalf("body %q, %v", body, err)
+			}
+			select {
+			case <-srv.NextConn(t).Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("connection kept open")
+			}
+		})
+	}
 }
