@@ -98,6 +98,10 @@ type Transport struct {
 	// (http2.Transport.Settings). Nil sends DefaultH2, with the header
 	// list limit of MaxResponseHeaderBytes.
 	H2 *H2Preface
+	// NewConnPerRequest gives each request connections of its own, closed
+	// when its response ends: none is reused, and a proxy opens a tunnel
+	// per request. The learned protocols go with them.
+	NewConnPerRequest bool
 
 	h2once sync.Once
 	h2     *http2.Transport
@@ -117,6 +121,9 @@ type Transport struct {
 	// dialCtx is the context of the shared dials, canceled by Close.
 	dialCtx     context.Context
 	cancelDials context.CancelFunc
+	// alone holds the transports of the requests in progress with
+	// NewConnPerRequest, closed by Close.
+	alone map[*Transport]struct{}
 }
 
 // ErrClosed reports a request on a closed Transport.
@@ -244,11 +251,94 @@ func (t *Transport) Close() error {
 		t.cancelDials()
 	}
 	t.stopH1Locked()
+	alone := t.alone
+	t.alone = nil
 	t.mu.Unlock()
 	for c := range conns {
 		c.Conn.Close()
 	}
+	for a := range alone {
+		a.Close()
+	}
 	return nil
+}
+
+// roundTripAlone sends req on a transport of its own, closed once the
+// response body is read to its end or closed, or at once on an error.
+func (t *Transport) roundTripAlone(req *http.Request, tgt target.Target) (*http.Response, error) {
+	a := t.child()
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		closeBody(req)
+		return nil, ErrClosed
+	}
+	if t.alone == nil {
+		t.alone = make(map[*Transport]struct{})
+	}
+	t.alone[a] = struct{}{}
+	t.mu.Unlock()
+	done := sync.OnceFunc(func() {
+		a.Close()
+		t.mu.Lock()
+		delete(t.alone, a)
+		t.mu.Unlock()
+	})
+	resp, err := a.roundTrip(req, tgt)
+	if err != nil {
+		done()
+		return nil, err
+	}
+	if resp.Body == http.NoBody || bodyless(req.Method, resp.StatusCode) {
+		resp.Body = http.NoBody
+		done()
+		return resp, nil
+	}
+	resp.Body = &aloneBody{ReadCloser: resp.Body, done: done}
+	return resp, nil
+}
+
+// child returns a transport with the settings of t, without
+// NewConnPerRequest.
+func (t *Transport) child() *Transport {
+	return &Transport{
+		Spec:                   t.Spec,
+		TLS:                    t.TLS,
+		DialContext:            t.DialContext,
+		Proxy:                  t.Proxy,
+		Spelling:               t.Spelling,
+		MaxConnsPerHost:        t.MaxConnsPerHost,
+		IdleConnTimeout:        t.IdleConnTimeout,
+		Order:                  t.Order,
+		Headers:                t.Headers,
+		MaxResponseHeaderBytes: t.MaxResponseHeaderBytes,
+		DisableDecompression:   t.DisableDecompression,
+		StrictTLS12:            t.StrictTLS12,
+		ECH:                    t.ECH,
+		ECHRequired:            t.ECHRequired,
+		Protocols:              t.Protocols,
+		H2:                     t.H2,
+	}
+}
+
+// aloneBody ends the transport of its request at its end or Close.
+type aloneBody struct {
+	io.ReadCloser
+	done func()
+}
+
+func (b *aloneBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.done()
+	}
+	return n, err
+}
+
+func (b *aloneBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.done()
+	return err
 }
 
 func (t *Transport) isClosed() bool {
@@ -258,6 +348,9 @@ func (t *Transport) isClosed() bool {
 }
 
 func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Response, error) {
+	if t.NewConnPerRequest {
+		return t.roundTripAlone(req, tgt)
+	}
 	ctx := req.Context()
 	// The key holds what can differ between requests of one Transport:
 	// the origin and the endpoint dialed.

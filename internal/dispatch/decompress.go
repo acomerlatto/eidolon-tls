@@ -34,14 +34,19 @@ var (
 // ZstdSourceStream (window_log_max 23): a frame that needs more fails.
 const zstdMaxWindow = 8 << 20
 
+// bodyless reports whether the response to a request of method, with
+// status, has no body (RFC 9110 sections 9.3.2, 15.3.5 and 15.4.5).
+func bodyless(method string, status int) bool {
+	return method == http.MethodHead || status == http.StatusNoContent || status == http.StatusNotModified
+}
+
 // decompress decodes a gzip, deflate, br or zstd body, as browsers do: the
 // response loses Content-Encoding and Content-Length, and Uncompressed is
 // set. Other codings, several codings, and responses without a body are
 // left as they came. Decoding starts at the first Read, so a malformed body is reported
 // by Read, never by RoundTrip.
 func decompress(resp *http.Response) {
-	if resp.Request != nil && resp.Request.Method == http.MethodHead ||
-		resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified ||
+	if resp.Request != nil && bodyless(resp.Request.Method, resp.StatusCode) ||
 		resp.Body == nil || resp.Body == http.NoBody {
 		return
 	}

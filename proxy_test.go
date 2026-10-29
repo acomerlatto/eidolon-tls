@@ -333,3 +333,67 @@ func TestProxyConfig(t *testing.T) {
 		}
 	}
 }
+
+// With WithNewConnectionPerRequest each request opens a tunnel of its
+// own, closed when its body ends, HEAD included; without it, one tunnel
+// carries them all.
+func TestProxyNewConnectionPerRequest(t *testing.T) {
+	for _, perRequest := range []bool{false, true} {
+		srv, p := proxyLab(t, "", "", "site.test")
+		var opts []eidolon.Option
+		if perRequest {
+			opts = append(opts, eidolon.WithNewConnectionPerRequest())
+		}
+		c := proxyClient(t, srv, "socks5://"+p.Addr, opts...)
+		for range 3 {
+			if _, err := echGet(c, "https://site.test/"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if perRequest {
+			for range 3 {
+				select {
+				case <-srv.NextConn(t).Done():
+				case <-time.After(5 * time.Second):
+					t.Fatal("a connection stayed open after its response")
+				}
+			}
+			resp, err := c.Head("https://site.test/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-srv.NextConn(t).Done():
+			case <-time.After(5 * time.Second):
+				t.Fatalf("the connection of a HEAD (%v) stayed open", resp.Body == http.NoBody)
+			}
+		}
+		want := 1
+		if perRequest {
+			want = 4
+		}
+		if n := len(p.Destinations()); n != want {
+			t.Errorf("per request %v: %d tunnels, want %d", perRequest, n, want)
+		}
+	}
+}
+
+// Close ends a response in progress of WithNewConnectionPerRequest.
+func TestNewConnectionPerRequestClose(t *testing.T) {
+	srv, p := proxyLab(t, "", "", "site.test")
+	c := proxyClient(t, srv, "socks5://"+p.Addr, eidolon.WithNewConnectionPerRequest())
+	resp, err := c.Get("https://site.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	c.Close()
+	select {
+	case <-srv.NextConn(t).Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close left the connection open")
+	}
+	if _, err := c.Get("https://site.test/"); !errors.Is(err, eidolon.ErrClosed) {
+		t.Errorf("after Close: %v, want ErrClosed", err)
+	}
+}

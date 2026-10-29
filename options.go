@@ -40,8 +40,9 @@ type config struct {
 	echMode ECHMode
 	ech     map[string][]byte // WithECHConfig, by origin
 
-	maxConnsPerHost int
-	idleConnTimeout time.Duration
+	maxConnsPerHost   int
+	idleConnTimeout   time.Duration
+	newConnPerRequest bool
 
 	order    *order.Order
 	spelling http1.Spelling
@@ -150,7 +151,7 @@ func WithDialContext(dial func(ctx context.Context, network, addr string) (net.C
 //
 // The proxy chooses its exit when a connection opens: connections are
 // reused as Chrome reuses them, every request of an origin over HTTP/2
-// going through one. Errors of the proxy wrap ErrProxy, or ErrProxyAuth
+// going through one, unless WithNewConnectionPerRequest. Errors of the proxy wrap ErrProxy, or ErrProxyAuth
 // for credentials, a 407 included.
 func WithProxy(rawURL string) Option {
 	return func(c *config) error {
@@ -162,6 +163,19 @@ func WithProxy(rawURL string) Option {
 			return fmt.Errorf("WithProxy: %w", err)
 		}
 		c.proxy = p
+		return nil
+	}
+}
+
+// WithNewConnectionPerRequest gives each request connections of its own,
+// closed when its response body is read to its end or closed: none is
+// reused, so a rotating proxy chooses a new exit for each request, a
+// redirect hop included. Without it, connections are reused as Chrome
+// reuses them. What the client learns from a connection, such as a server that
+// requires HTTP/1.1, goes with it.
+func WithNewConnectionPerRequest() Option {
+	return func(c *config) error {
+		c.newConnPerRequest = true
 		return nil
 	}
 }

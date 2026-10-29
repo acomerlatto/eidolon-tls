@@ -104,8 +104,9 @@ func New(opts ...Option) (HttpClient, error) {
 		Protocols:   alpn,
 		H2:          cfg.h2,
 
-		MaxConnsPerHost: cfg.maxConnsPerHost,
-		IdleConnTimeout: cfg.idleConnTimeout,
+		MaxConnsPerHost:   cfg.maxConnsPerHost,
+		IdleConnTimeout:   cfg.idleConnTimeout,
+		NewConnPerRequest: cfg.newConnPerRequest,
 
 		DisableDecompression: cfg.disableDecompression,
 		StrictTLS12:          cfg.strictTLS12,
