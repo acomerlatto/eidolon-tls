@@ -150,9 +150,9 @@ func TestProfileClientHello(t *testing.T) {
 // WithHTTP2Settings and WithDefaultOrder take precedence.
 func TestProfileHTTP2(t *testing.T) {
 	derived := eidolon.Chrome156Linux()
-	derived.HTTP2 = eidolon.HTTP2Settings{Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingMaxConcurrentStreams, Value: 50}}}
+	derived.HTTP2 = pushOff(eidolon.HTTP2Settings{Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingMaxConcurrentStreams, Value: 50}}})
 	derived.PseudoOrder = []string{":path", ":authority", ":scheme", ":method"}
-	other := eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingInitialWindowSize, Value: 70000}}})
+	other := eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingInitialWindowSize, Value: 70000}}}))
 	order := eidolon.WithDefaultOrder(eidolon.Order{Pseudo: []string{":scheme"}})
 	for _, tt := range []struct {
 		name     string
@@ -161,11 +161,11 @@ func TestProfileHTTP2(t *testing.T) {
 		pseudo   []string
 	}{
 		{"profile", []eidolon.Option{eidolon.WithProfile(derived)},
-			[]lab.Setting{{ID: 3, Val: 50}}, []string{":path", ":authority", ":scheme", ":method"}},
+			[]lab.Setting{{ID: 2, Val: 0}, {ID: 3, Val: 50}}, []string{":path", ":authority", ":scheme", ":method"}},
 		{"options after", []eidolon.Option{eidolon.WithProfile(derived), other, order},
-			[]lab.Setting{{ID: 4, Val: 70000}}, []string{":scheme", ":method", ":authority", ":path"}},
+			[]lab.Setting{{ID: 2, Val: 0}, {ID: 4, Val: 70000}}, []string{":scheme", ":method", ":authority", ":path"}},
 		{"options before", []eidolon.Option{other, order, eidolon.WithProfile(derived)},
-			[]lab.Setting{{ID: 4, Val: 70000}}, []string{":scheme", ":method", ":authority", ":path"}},
+			[]lab.Setting{{ID: 2, Val: 0}, {ID: 4, Val: 70000}}, []string{":scheme", ":method", ":authority", ":path"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			settings, updates, pseudo, prio := h2Preface(t, nil, tt.opts...)

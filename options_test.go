@@ -17,10 +17,10 @@ import (
 // made before New does not reach the client.
 func TestOptionsCopied(t *testing.T) {
 	t.Run("WithHTTP2Settings", func(t *testing.T) {
-		s := eidolon.HTTP2Settings{Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingInitialWindowSize, Value: 70000}}}
+		s := eidolon.HTTP2Settings{Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingInitialWindowSize, Value: 70000}, {ID: eidolon.HTTP2SettingEnablePush}}}
 		opt := eidolon.WithHTTP2Settings(s)
 		s.Settings[0].Value = 80000
-		if settings, _, _, _ := h2Preface(t, nil, opt); !slices.Equal(settings, []lab.Setting{{ID: 4, Val: 70000}}) {
+		if settings, _, _, _ := h2Preface(t, nil, opt); !slices.Equal(settings, []lab.Setting{{ID: 4, Val: 70000}, {ID: 2, Val: 0}}) {
 			t.Fatalf("SETTINGS %v", settings)
 		}
 	})

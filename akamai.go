@@ -60,8 +60,9 @@ func Akamai(s HTTP2Settings, pseudo []string) string {
 // Besides what Akamai writes, SETTINGS may be joined with ",", and
 // WINDOW_UPDATE may be "0" or empty for none. An empty SETTINGS part, or
 // "0", is no setting. The pseudo-header letters are m, a, s and p, each at
-// most once. The result is validated as WithHTTP2Settings validates;
-// every error wraps ErrConfig.
+// most once. The result is validated as WithHTTP2Settings validates, so a
+// fingerprint without ENABLE_PUSH 0 is refused; every error wraps
+// ErrConfig.
 func ParseAkamai(fp string, base HTTP2Settings) (HTTP2Settings, []string, error) {
 	s, pseudo, err := parseAkamai(fp, base)
 	if err == nil {

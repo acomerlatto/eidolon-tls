@@ -27,8 +27,8 @@ type Profile struct {
 	// WithClientHello. Without it, WithClientHello is required.
 	ClientHello func() (*utls.ClientHelloSpec, error)
 	// HTTP2 is what a new HTTP/2 connection sends, as WithHTTP2Settings,
-	// taken as given: its zero value sends no SETTINGS parameter, no
-	// WINDOW_UPDATE and no HEADERS priority.
+	// taken as given and validated the same way: its Settings need
+	// ENABLE_PUSH 0, so its zero value is refused.
 	HTTP2 HTTP2Settings
 	// PseudoOrder orders the HTTP/2 pseudo-headers, as Order.Pseudo.
 	PseudoOrder []string

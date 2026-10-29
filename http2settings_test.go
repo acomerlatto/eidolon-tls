@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,17 +83,17 @@ func TestHTTP2Preface(t *testing.T) {
 		},
 		{
 			name: "custom with Chromium priority", header: http.Header{"Priority": {"u=2"}},
-			opts:     []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{Priority: eidolon.HTTP2PriorityChromium})},
-			settings: []lab.Setting{}, pseudo: masp, prio: &lab.Priority{Exclusive: true, Weight: 182},
+			opts:     []eidolon.Option{eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{Priority: eidolon.HTTP2PriorityChromium}))},
+			settings: []lab.Setting{{ID: 2, Val: 0}}, pseudo: masp, prio: &lab.Priority{Exclusive: true, Weight: 182},
 		},
 		{
 			name: "custom",
-			opts: []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{Settings: []eidolon.HTTP2Setting{
+			opts: []eidolon.Option{eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{Settings: []eidolon.HTTP2Setting{
 				{ID: eidolon.HTTP2SettingMaxConcurrentStreams, Value: 100},
 				{ID: eidolon.HTTP2SettingInitialWindowSize, Value: 131072},
 				{ID: 0x0a0a, Value: 7},
-			}})},
-			settings: []lab.Setting{{ID: 3, Val: 100}, {ID: 4, Val: 131072}, {ID: 0x0a0a, Val: 7}},
+			}}))},
+			settings: []lab.Setting{{ID: 2, Val: 0}, {ID: 3, Val: 100}, {ID: 4, Val: 131072}, {ID: 0x0a0a, Val: 7}},
 			pseudo:   masp,
 		},
 		{
@@ -137,8 +138,8 @@ func TestHTTP2DataFrames(t *testing.T) {
 		want []uint32
 	}{
 		{"default", nil, []uint32{16375, 16375, 16375, 16375, 36}},
-		{"custom", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{MaxDataFrameSize: 20000})}, []uint32{20000, 20000, 20000, 5536}},
-		{"none", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{})}, []uint32{65536}},
+		{"custom", []eidolon.Option{eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{MaxDataFrameSize: 20000}))}, []uint32{20000, 20000, 20000, 5536}},
+		{"none", []eidolon.Option{eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{}))}, []uint32{65536}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -186,8 +187,8 @@ func TestHTTP2HPACK(t *testing.T) {
 		literal bool
 	}{
 		{"default", nil, true},
-		{"chromium", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{HPACK: eidolon.HTTP2HPACKChromium})}, true},
-		{"go", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{})}, false},
+		{"chromium", []eidolon.Option{eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{HPACK: eidolon.HTTP2HPACKChromium}))}, true},
+		{"go", []eidolon.Option{eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{}))}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
@@ -233,7 +234,7 @@ func TestHTTP2PrefacePing(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
-			c := newClient(t, srv, eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{PrefacePing: tt.ping}))
+			c := newClient(t, srv, eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{PrefacePing: tt.ping})))
 			for i := range 2 {
 				if i == 1 {
 					time.Sleep(300 * time.Millisecond)
@@ -281,10 +282,10 @@ func TestHTTP2WindowUpdate(t *testing.T) {
 		ok    func(updates []uint32) bool
 	}{
 		{"default", nil, true, func(u []uint32) bool { return len(u) == 0 }},
-		{"chromium", []eidolon.Option{eidolon.WithHTTP2Settings(small)}, false, func(u []uint32) bool {
+		{"chromium", []eidolon.Option{eidolon.WithHTTP2Settings(pushOff(small))}, false, func(u []uint32) bool {
 			return len(u) > 0 && !slices.ContainsFunc(u, func(n uint32) bool { return n <= 32767 })
 		}},
-		{"go", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{})}, false, func(u []uint32) bool {
+		{"go", []eidolon.Option{eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{}))}, false, func(u []uint32) bool {
 			return len(u) > 0
 		}},
 	} {
@@ -331,8 +332,8 @@ func TestHTTP2CancelWithoutPing(t *testing.T) {
 		want []string
 	}{
 		{"default", nil, []string{"HEADERS", "HEADERS", "RST_STREAM"}},
-		{"set", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{CancelWithoutPing: true})}, []string{"HEADERS", "HEADERS", "RST_STREAM"}},
-		{"go", []eidolon.Option{eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{})}, []string{"HEADERS", "HEADERS", "RST_STREAM", "PING"}},
+		{"set", []eidolon.Option{eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{CancelWithoutPing: true}))}, []string{"HEADERS", "HEADERS", "RST_STREAM"}},
+		{"go", []eidolon.Option{eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{}))}, []string{"HEADERS", "HEADERS", "RST_STREAM", "PING"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -388,14 +389,14 @@ func TestHTTP2PriorityTree(t *testing.T) {
 		{13, eidolon.HTTP2PriorityParam{Weight: 240}},
 	}
 	header := eidolon.HTTP2PriorityParam{StreamDep: 13, Weight: 41}
-	opt := eidolon.WithHTTP2Settings(eidolon.HTTP2Settings{
+	opt := eidolon.WithHTTP2Settings(pushOff(eidolon.HTTP2Settings{
 		Settings:               []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingInitialWindowSize, Value: 131072}},
 		ConnectionWindowUpdate: 12517377,
 		Priority:               eidolon.HTTP2PriorityFixed,
 		HeaderPriority:         header,
 		PriorityFrames:         tree,
 		FirstStreamID:          15,
-	})
+	}))
 	tree[0].Weight = 1
 	srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
 	c := newClient(t, srv, opt)
@@ -461,8 +462,26 @@ func TestWithHTTP2SettingsInvalid(t *testing.T) {
 		{Priority: eidolon.HTTP2PriorityFixed, HeaderPriority: eidolon.HTTP2PriorityParam{StreamDep: 1 << 31}},
 		{FirstStreamID: 2},
 	} {
-		if c, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithHTTP2Settings(s)); !errors.Is(err, eidolon.ErrConfig) || c != nil {
+		if c, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithHTTP2Settings(pushOff(s))); !errors.Is(err, eidolon.ErrConfig) || c != nil {
 			t.Errorf("New with %v = %v, %v; want ErrConfig", s, c, err)
 		}
 	}
+	// Without ENABLE_PUSH, whose initial value 1 allows server push.
+	for _, s := range []eidolon.HTTP2Settings{{}, {Settings: []eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingInitialWindowSize, Value: 65536}}}} {
+		if _, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithHTTP2Settings(s)); !errors.Is(err, eidolon.ErrConfig) || !strings.Contains(err.Error(), "ENABLE_PUSH") {
+			t.Errorf("New with %v = %v; want ErrConfig for ENABLE_PUSH", s, err)
+		}
+	}
+}
+
+// pushOff returns s with ENABLE_PUSH 0 first, unless s sets ENABLE_PUSH:
+// every SETTINGS list needs it.
+func pushOff(s eidolon.HTTP2Settings) eidolon.HTTP2Settings {
+	for _, st := range s.Settings {
+		if st.ID == eidolon.HTTP2SettingEnablePush {
+			return s
+		}
+	}
+	s.Settings = append([]eidolon.HTTP2Setting{{ID: eidolon.HTTP2SettingEnablePush}}, s.Settings...)
+	return s
 }

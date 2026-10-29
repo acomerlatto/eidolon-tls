@@ -1,0 +1,44 @@
+diff --git a/internal/http2/eidolon_settings.go b/internal/http2/eidolon_settings.go
+index a7bc358..2678106 100644
+--- a/internal/http2/eidolon_settings.go
++++ b/internal/http2/eidolon_settings.go
+@@ -7,9 +7,9 @@ import (
+ 
+ // CheckSettings validates the SETTINGS of Transport.Settings and the
+ // ConnWindowUpdate sent with them: no setting twice, values allowed by RFC
+-// 9113 section 6.5.2, ENABLE_PUSH never 1, since the client refuses server
+-// push, a stream window and a header list limit above zero, and a
+-// connection window within 2^31-1.
++// 9113 section 6.5.2, ENABLE_PUSH present and 0, since the client refuses
++// server push and the initial value is 1, a stream window and a header
++// list limit above zero, and a connection window within 2^31-1.
+ func CheckSettings(settings []Setting, connWindowUpdate uint32) error {
+ 	seen := make(map[SettingID]bool, len(settings))
+ 	for _, s := range settings {
+@@ -35,6 +35,9 @@ func CheckSettings(settings []Setting, connWindowUpdate uint32) error {
+ 			}
+ 		}
+ 	}
++	if !seen[SettingEnablePush] {
++		return errors.New("http2: no ENABLE_PUSH: its initial value 1 allows server push, which is refused")
++	}
+ 	if connWindowUpdate > 1<<31-1-initialWindowSize {
+ 		return fmt.Errorf("http2: connection window update %d above 2^31-1-%d", connWindowUpdate, initialWindowSize)
+ 	}
+diff --git a/internal/http2/eidolon_settings_test.go b/internal/http2/eidolon_settings_test.go
+index fb8249d..c1794e0 100644
+--- a/internal/http2/eidolon_settings_test.go
++++ b/internal/http2/eidolon_settings_test.go
+@@ -225,8 +225,10 @@ func TestCheckSettings(t *testing.T) {
+ 		ok       bool
+ 	}{
+ 		{chromeSettings, 15663105, true},
+-		{nil, 0, true},
+-		{[]Setting{{ID: 0x0a0a, Val: 1}, {ID: SettingNoRFC7540Priorities, Val: 1}}, 1<<31 - 1 - initialWindowSize, true},
++		{[]Setting{{ID: SettingEnablePush, Val: 0}}, 0, true},
++		{[]Setting{{ID: 0x0a0a, Val: 1}, {ID: SettingNoRFC7540Priorities, Val: 1}, {ID: SettingEnablePush, Val: 0}}, 1<<31 - 1 - initialWindowSize, true},
++		{nil, 0, false},
++		{[]Setting{{ID: SettingInitialWindowSize, Val: 65536}}, 0, false},
+ 		{[]Setting{{ID: SettingEnablePush, Val: 0}, {ID: SettingEnablePush, Val: 0}}, 0, false},
+ 		{[]Setting{{ID: SettingEnablePush, Val: 1}}, 0, false},
+ 		{[]Setting{{ID: SettingEnablePush, Val: 2}}, 0, false},

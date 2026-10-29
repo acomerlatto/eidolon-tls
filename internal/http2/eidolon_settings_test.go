@@ -225,8 +225,10 @@ func TestCheckSettings(t *testing.T) {
 		ok       bool
 	}{
 		{chromeSettings, 15663105, true},
-		{nil, 0, true},
-		{[]Setting{{ID: 0x0a0a, Val: 1}, {ID: SettingNoRFC7540Priorities, Val: 1}}, 1<<31 - 1 - initialWindowSize, true},
+		{[]Setting{{ID: SettingEnablePush, Val: 0}}, 0, true},
+		{[]Setting{{ID: 0x0a0a, Val: 1}, {ID: SettingNoRFC7540Priorities, Val: 1}, {ID: SettingEnablePush, Val: 0}}, 1<<31 - 1 - initialWindowSize, true},
+		{nil, 0, false},
+		{[]Setting{{ID: SettingInitialWindowSize, Val: 65536}}, 0, false},
 		{[]Setting{{ID: SettingEnablePush, Val: 0}, {ID: SettingEnablePush, Val: 0}}, 0, false},
 		{[]Setting{{ID: SettingEnablePush, Val: 1}}, 0, false},
 		{[]Setting{{ID: SettingEnablePush, Val: 2}}, 0, false},

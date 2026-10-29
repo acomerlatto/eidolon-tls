@@ -156,7 +156,8 @@ const (
 // handles the errors of the server.
 type HTTP2Settings struct {
 	// Settings are sent exactly, in this order. Unknown IDs, such as
-	// GREASE values, are sent as given.
+	// GREASE values, are sent as given. ENABLE_PUSH 0 is required: its
+	// initial value, 1, would allow the server push the client refuses.
 	Settings []HTTP2Setting
 	// ConnectionWindowUpdate is the increment of the WINDOW_UPDATE sent on
 	// the connection right after SETTINGS; 0 sends none.
@@ -217,7 +218,8 @@ type HTTP2Settings struct {
 // left out keeps its RFC 9113 initial value; without MAX_HEADER_LIST_SIZE
 // the response headers are still limited to 256 KiB. Invalid settings
 // return an error that wraps ErrConfig: a setting repeated, a value RFC
-// 9113 forbids, ENABLE_PUSH other than 0 (server push is refused),
+// 9113 forbids, ENABLE_PUSH left out or other than 0 (server push is
+// refused, and its initial value is 1),
 // INITIAL_WINDOW_SIZE or MAX_HEADER_LIST_SIZE of 0, a connection window
 // above 2^31-1, an unknown Priority, HPACK, WindowUpdate, Errors, ALPS or
 // HeaderFraming, a negative

@@ -7,9 +7,9 @@ import (
 
 // CheckSettings validates the SETTINGS of Transport.Settings and the
 // ConnWindowUpdate sent with them: no setting twice, values allowed by RFC
-// 9113 section 6.5.2, ENABLE_PUSH never 1, since the client refuses server
-// push, a stream window and a header list limit above zero, and a
-// connection window within 2^31-1.
+// 9113 section 6.5.2, ENABLE_PUSH present and 0, since the client refuses
+// server push and the initial value is 1, a stream window and a header
+// list limit above zero, and a connection window within 2^31-1.
 func CheckSettings(settings []Setting, connWindowUpdate uint32) error {
 	seen := make(map[SettingID]bool, len(settings))
 	for _, s := range settings {
@@ -34,6 +34,9 @@ func CheckSettings(settings []Setting, connWindowUpdate uint32) error {
 				return fmt.Errorf("http2: invalid %v", s)
 			}
 		}
+	}
+	if !seen[SettingEnablePush] {
+		return errors.New("http2: no ENABLE_PUSH: its initial value 1 allows server push, which is refused")
 	}
 	if connWindowUpdate > 1<<31-1-initialWindowSize {
 		return fmt.Errorf("http2: connection window update %d above 2^31-1-%d", connWindowUpdate, initialWindowSize)
