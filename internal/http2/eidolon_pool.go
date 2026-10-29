@@ -50,7 +50,8 @@ func (t *Transport) RoundTripPooled(req *http.Request, key string) (*http.Respon
 // Chromium does with a session whose TLS HTTP/2 forbids
 // (ERR_HTTP2_INADEQUATE_TRANSPORT_SECURITY). c is closed.
 func (t *Transport) RefuseConn(c net.Conn, code ErrCode) {
-	cc, err := t.newClientConn(c, false, nil)
+	// Chromium refuses the session before it reads the ALPS: hide it.
+	cc, err := t.newClientConn(struct{ net.Conn }{c}, false, nil)
 	if err != nil {
 		c.Close()
 		return

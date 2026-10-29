@@ -3,10 +3,12 @@ package dispatch
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 
 	utls "github.com/acomerlatto/utls"
 
+	"github.com/acomerlatto/eidolon-tls/internal/http2"
 	"github.com/acomerlatto/eidolon-tls/internal/target"
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
@@ -103,8 +105,7 @@ func (t *Transport) h1DialTLS(tgt target.Target, key string) func(context.Contex
 			return nil, nil, err
 		}
 		if conn.ConnectionState().NegotiatedProtocol == tlsdial.ProtoH2 {
-			t.addH2(key, conn)
-			return nil, nil, nil
+			return nil, nil, t.addH2(key, conn)
 		}
 		std := tlsdial.StdConn{UConn: conn}
 		state := std.ConnectionState()
@@ -122,12 +123,18 @@ func (t *Transport) newH1Conn(key string, conn *utls.UConn) *h1Conn {
 // take, because a usable one is already there, is closed. So is one lost
 // before any request, whose preface could not be written: the requests
 // find no connection and dial again, within their budget, as nothing was
-// sent.
-func (t *Transport) addH2(key string, conn *utls.UConn) {
+// sent. A connection the engine closed with an HTTP/2 error, such as
+// malformed ALPS, fails the dial with it, as Chromium fails the request.
+func (t *Transport) addH2(key string, conn *utls.UConn) error {
 	std := tlsdial.StdConn{UConn: conn}
-	if used, err := t.h2t().AddConn(key, std); err != nil || !used {
+	used, err := t.h2t().AddConn(key, std)
+	if err != nil || !used {
 		std.Close()
 	}
+	if errors.As(err, new(http2.ConnectionError)) {
+		return err
+	}
+	return nil
 }
 
 // sharedDial runs one dial for the waiters of key. An h2 connection enters
@@ -139,7 +146,7 @@ func (t *Transport) sharedDial(call *dialCall, tgt target.Target, key string) {
 	// at its own context.
 	conn, err := t.dialTLS(t.dialContext(), tgt, key)
 	if err == nil && conn.ConnectionState().NegotiatedProtocol == tlsdial.ProtoH2 {
-		t.addH2(key, conn)
+		err = t.addH2(key, conn)
 		conn = nil
 	}
 

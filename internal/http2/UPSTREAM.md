@@ -46,6 +46,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0026-priority-tree.patch`
 - `scripts/xnet-patches/0027-refuse-conn.patch`
 - `scripts/xnet-patches/0028-chromium-errors.patch`
+- `scripts/xnet-patches/0029-chromium-alps.patch`
 
 ## Excluded files
 

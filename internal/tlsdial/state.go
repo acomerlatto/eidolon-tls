@@ -10,7 +10,7 @@ import (
 // used by http.Response.TLS. Every exported field of crypto/tls is copied.
 //
 // PeerApplicationSettings (ALPS) has no crypto/tls equivalent and is dropped;
-// read it from the uTLS connection.
+// StdConn has it.
 //
 // ExportKeyingMaterial cannot be rebuilt: crypto/tls keeps the exporter in an
 // unexported field, so calling it on the result panics with a nil function
@@ -48,4 +48,10 @@ type StdConn struct {
 // ConnectionState returns the converted state; see ConnectionState.
 func (c StdConn) ConnectionState() tls.ConnectionState {
 	return ConnectionState(c.UConn.ConnectionState())
+}
+
+// PeerApplicationSettings returns the ALPS of the server, nil without
+// ALPS, for the HTTP/2 engine.
+func (c StdConn) PeerApplicationSettings() []byte {
+	return c.UConn.ConnectionState().PeerApplicationSettings
 }

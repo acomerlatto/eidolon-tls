@@ -207,6 +207,11 @@ type ClientConn struct {
 	idleTimeout time.Duration // or 0 for never
 	idleTimer   *time.Timer
 
+	// [eidolon] alpsMaxConcurrentStreams reports MAX_CONCURRENT_STREAMS in
+	// the ALPS of the server (Transport.ChromiumALPS): the first SETTINGS
+	// frame without it keeps it.
+	alpsMaxConcurrentStreams bool
+
 	mu               sync.Mutex  // guards following
 	cond             *sync.Cond  // hold mu; broadcast on flow/closed changes
 	flow             connOutflow // our conn-level flow control quota (cs.outflow is per stream)
@@ -650,6 +655,12 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 	if cc.werr != nil {
 		cc.Close()
 		return nil, cc.werr
+	}
+
+	if t.ChromiumALPS {
+		if err := cc.applyALPS(c); err != nil { // [eidolon]
+			return nil, err
+		}
 	}
 
 	// Start the idle timer after the connection is fully initialized.
@@ -2809,52 +2820,11 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
 		return ConnectionError(ErrCodeProtocol)
 	}
 
-	var seenMaxConcurrentStreams bool
+	seenMaxConcurrentStreams := cc.alpsMaxConcurrentStreams // [eidolon]
 	err := f.ForeachSetting(func(s Setting) error {
-		if cc.t.ChromiumErrors {
-			// [eidolon]
-			if ignore, err := cc.chromiumSetting(s); ignore || err != nil {
-				return err
-			}
-		} else if err := s.Valid(); err != nil {
-			return err
-		}
-		switch s.ID {
-		case SettingMaxFrameSize:
-			cc.maxFrameSize = s.Val
-		case SettingMaxConcurrentStreams:
-			cc.maxConcurrentStreams = s.Val
-			seenMaxConcurrentStreams = true
-		case SettingMaxHeaderListSize:
-			cc.peerMaxHeaderListSize = uint64(s.Val)
-		case SettingInitialWindowSize:
-			if !cc.flow.changeInitialWindowSize(int64(s.Val)) {
-				return ConnectionError(ErrCodeFlowControl)
-			}
-			cc.cond.Broadcast()
-		case SettingHeaderTableSize:
-			if cc.t.ChromiumHPACK {
-				cc.henc.ApplyHeaderTableSizeSetting(s.Val) // [eidolon]
-			} else {
-				cc.henc.SetMaxDynamicTableSize(s.Val)
-			}
-			cc.peerMaxHeaderTableSize = s.Val
-		case SettingEnableConnectProtocol:
-			// If the peer wants to send us SETTINGS_ENABLE_CONNECT_PROTOCOL,
-			// we require that it do so in the first SETTINGS frame.
-			//
-			// When we attempt to use extended CONNECT, we wait for the first
-			// SETTINGS frame to see if the server supports it. If we let the
-			// server enable the feature with a later SETTINGS frame, then
-			// users will see inconsistent results depending on whether we've
-			// seen that frame or not.
-			if !cc.seenSettings {
-				cc.extendedConnectAllowed = s.Val == 1
-			}
-		default:
-			cc.vlogf("Unhandled Setting: %v", s)
-		}
-		return nil
+		seenMax, err := cc.applySetting(s)
+		seenMaxConcurrentStreams = seenMaxConcurrentStreams || seenMax
+		return err
 	})
 	if err != nil {
 		return err
@@ -2874,6 +2844,56 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
 	}
 
 	return nil
+}
+
+// [eidolon] applySetting applies a setting of the server, from a SETTINGS
+// frame or the ALPS (applyALPS), with cc.mu and cc.wmu held; seenMax
+// reports MAX_CONCURRENT_STREAMS.
+func (cc *ClientConn) applySetting(s Setting) (seenMax bool, err error) {
+	if cc.t.ChromiumErrors {
+		// [eidolon]
+		if ignore, err := cc.chromiumSetting(s); ignore || err != nil {
+			return false, err
+		}
+	} else if err := s.Valid(); err != nil {
+		return false, err
+	}
+	switch s.ID {
+	case SettingMaxFrameSize:
+		cc.maxFrameSize = s.Val
+	case SettingMaxConcurrentStreams:
+		cc.maxConcurrentStreams = s.Val
+		seenMax = true
+	case SettingMaxHeaderListSize:
+		cc.peerMaxHeaderListSize = uint64(s.Val)
+	case SettingInitialWindowSize:
+		if !cc.flow.changeInitialWindowSize(int64(s.Val)) {
+			return seenMax, ConnectionError(ErrCodeFlowControl)
+		}
+		cc.cond.Broadcast()
+	case SettingHeaderTableSize:
+		if cc.t.ChromiumHPACK {
+			cc.henc.ApplyHeaderTableSizeSetting(s.Val) // [eidolon]
+		} else {
+			cc.henc.SetMaxDynamicTableSize(s.Val)
+		}
+		cc.peerMaxHeaderTableSize = s.Val
+	case SettingEnableConnectProtocol:
+		// If the peer wants to send us SETTINGS_ENABLE_CONNECT_PROTOCOL,
+		// we require that it do so in the first SETTINGS frame.
+		//
+		// When we attempt to use extended CONNECT, we wait for the first
+		// SETTINGS frame to see if the server supports it. If we let the
+		// server enable the feature with a later SETTINGS frame, then
+		// users will see inconsistent results depending on whether we've
+		// seen that frame or not.
+		if !cc.seenSettings {
+			cc.extendedConnectAllowed = s.Val == 1
+		}
+	default:
+		cc.vlogf("Unhandled Setting: %v", s)
+	}
+	return seenMax, nil
 }
 
 func (rl *clientConnReadLoop) processWindowUpdate(f *WindowUpdateFrame) error {

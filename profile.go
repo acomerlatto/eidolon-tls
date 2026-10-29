@@ -134,6 +134,7 @@ func Chrome156Linux() Profile {
 			WindowUpdate:           HTTP2WindowUpdateChromium,
 			CancelWithoutPing:      true,
 			Errors:                 HTTP2ErrorsChromium,
+			ALPS:                   HTTP2ALPSChromium,
 		},
 		PseudoOrder: []string{":method", ":authority", ":scheme", ":path"},
 		Headers: []HeaderField{

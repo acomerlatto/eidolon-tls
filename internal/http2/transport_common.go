@@ -177,6 +177,14 @@ type Transport struct {
 	// connection is closed with GOAWAY PROTOCOL_ERROR "Failed ping.".
 	ChromiumErrors bool
 
+	// [eidolon] ChromiumALPS reads the ALPS of the server, on a connection
+	// with a PeerApplicationSettings method, as Chromium's
+	// SpdySession::ParseAlps, before the first frame of the server: its
+	// SETTINGS apply as those of a SETTINGS frame, by order of ID and
+	// without ACK, and malformed ALPS closes the connection with GOAWAY
+	// PROTOCOL_ERROR "Error parsing ALPS: N". Otherwise ALPS is ignored.
+	ChromiumALPS bool
+
 	// [eidolon] PriorityFrames are sent in order right after SETTINGS and
 	// the connection WINDOW_UPDATE, as some browsers build a priority tree
 	// with them (Firefox up to version 88). CheckPriorities validates them.

@@ -445,6 +445,7 @@ func TestWithHTTP2SettingsInvalid(t *testing.T) {
 		{PrefacePing: -1},
 		{WindowUpdate: 7},
 		{Errors: 7},
+		{ALPS: 7},
 		{Priority: eidolon.HTTP2PriorityFixed},
 		{HeaderPriority: eidolon.HTTP2PriorityParam{Weight: 41}},
 		{

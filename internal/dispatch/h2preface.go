@@ -13,8 +13,8 @@ import (
 // on the connection, 0 for none. It also says how the requests announce
 // their priority and how the connection sends: PriorityChain,
 // MaxDataFrameSize, ChromiumHPACK, PrefacePing, ChromiumWindowUpdate,
-// CancelWithoutPing, PriorityFrames, HeaderPriority, FirstStreamID and
-// ChromiumErrors are those of http2.Transport.
+// CancelWithoutPing, PriorityFrames, HeaderPriority, FirstStreamID,
+// ChromiumErrors and ChromiumALPS are those of http2.Transport.
 type H2Preface struct {
 	Settings             []http2.Setting
 	ConnWindowUpdate     uint32
@@ -28,14 +28,16 @@ type H2Preface struct {
 	HeaderPriority       *http2.PriorityParam
 	FirstStreamID        uint32
 	ChromiumErrors       bool
+	ChromiumALPS         bool
 }
 
 // DefaultH2 is the preface of Chrome 156 (A10): a 64 KiB HPACK table, no
 // server push, windows of 6 MiB per stream and 15 MiB per connection, a
 // header list of 256 KiB, the priority chain of Chromium, DATA frames of
 // at most 16375 bytes, the HPACK encoding of Chromium, its PING after 10 s
-// without a read, its window updates, its RST_STREAM without PING, and
-// its handling of the errors of the server.
+// without a read, its window updates, its RST_STREAM without PING, its
+// handling of the errors of the server, and its reading of the ALPS of
+// the server.
 var DefaultH2 = H2Preface{
 	Settings: []http2.Setting{
 		{ID: http2.SettingHeaderTableSize, Val: 65536},
@@ -51,6 +53,7 @@ var DefaultH2 = H2Preface{
 	ChromiumWindowUpdate: true,
 	CancelWithoutPing:    true,
 	ChromiumErrors:       true,
+	ChromiumALPS:         true,
 }
 
 // defaultH2 returns DefaultH2 with maxHeaderList as MAX_HEADER_LIST_SIZE,

@@ -116,6 +116,23 @@ const (
 	HTTP2ErrorsChromium
 )
 
+// HTTP2ALPS is how an HTTP/2 connection reads the ALPS of the server, the
+// HTTP/2 frames the server sends in the TLS handshake when the ClientHello
+// offers ALPS (application_settings) for h2.
+type HTTP2ALPS int
+
+const (
+	// HTTP2ALPSIgnore ignores them, as Go, which has no ALPS.
+	HTTP2ALPSIgnore HTTP2ALPS = iota
+	// HTTP2ALPSChromium reads them as Chromium, before the first frame of
+	// the server: their SETTINGS apply as those of a SETTINGS frame,
+	// without ACK, and malformed ALPS, such as a frame other than SETTINGS
+	// or ACCEPT_CH, closes the connection with GOAWAY PROTOCOL_ERROR
+	// "Error parsing ALPS: N" and fails the request. ACCEPT_CH is not
+	// used.
+	HTTP2ALPSChromium
+)
+
 // HTTP2Settings is what a new HTTP/2 connection sends before its first
 // request, how its requests announce their priority, how it sends DATA
 // frames, header fields, PINGs, window updates and resets, and how it
@@ -161,6 +178,8 @@ type HTTP2Settings struct {
 	FirstStreamID uint32
 	// Errors is how the errors of the server are handled.
 	Errors HTTP2Errors
+	// ALPS is how the ALPS of the server is read.
+	ALPS HTTP2ALPS
 }
 
 // WithHTTP2Settings sets the SETTINGS and the connection WINDOW_UPDATE of
@@ -169,7 +188,7 @@ type HTTP2Settings struct {
 // MAX_HEADER_LIST_SIZE 262144, then a WINDOW_UPDATE of 15663105, with
 // HTTP2PriorityChromium, DATA frames of at most 16375 bytes,
 // HTTP2HPACKChromium, a PrefacePing of 10 s, HTTP2WindowUpdateChromium,
-// CancelWithoutPing and HTTP2ErrorsChromium.
+// CancelWithoutPing, HTTP2ErrorsChromium and HTTP2ALPSChromium.
 //
 // The values announced are enforced: HEADER_TABLE_SIZE sizes the HPACK
 // decoder, INITIAL_WINDOW_SIZE the receive window of each stream, the
@@ -180,7 +199,7 @@ type HTTP2Settings struct {
 // return an error that wraps ErrConfig: a setting repeated, a value RFC
 // 9113 forbids, ENABLE_PUSH other than 0 (server push is refused),
 // INITIAL_WINDOW_SIZE or MAX_HEADER_LIST_SIZE of 0, a connection window
-// above 2^31-1, an unknown Priority, HPACK, WindowUpdate or Errors, a negative
+// above 2^31-1, an unknown Priority, HPACK, WindowUpdate, Errors or ALPS, a negative
 // PrefacePing, a PRIORITY frame on stream 0 or on its own stream, a stream
 // ID above 2^31-1, an even FirstStreamID, a HeaderPriority without
 // HTTP2PriorityFixed or a zero one with it, or PriorityFrames,
@@ -271,6 +290,13 @@ func h2Preface(s HTTP2Settings) (*dispatch.H2Preface, error) {
 		pre.ChromiumErrors = true
 	default:
 		return nil, fmt.Errorf("unknown Errors %d", s.Errors)
+	}
+	switch s.ALPS {
+	case HTTP2ALPSIgnore:
+	case HTTP2ALPSChromium:
+		pre.ChromiumALPS = true
+	default:
+		return nil, fmt.Errorf("unknown ALPS %d", s.ALPS)
 	}
 	return pre, nil
 }
