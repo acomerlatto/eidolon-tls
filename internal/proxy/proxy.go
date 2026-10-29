@@ -23,7 +23,7 @@ var ErrProxyAuth = errors.New("eidolon: proxy authentication failed")
 
 // Proxy is a parsed proxy URL.
 type Proxy struct {
-	// Scheme is socks4 (SOCKS4a) or socks5.
+	// Scheme is socks4 (SOCKS4a), socks5 or http (CONNECT).
 	Scheme string
 	// Addr is the host:port of the proxy.
 	Addr string
@@ -31,6 +31,8 @@ type Proxy struct {
 	// a URL with them.
 	User, Password string
 	HasAuth        bool
+	// UserAgent is sent in the CONNECT requests; "" sends none.
+	UserAgent string
 }
 
 // Parse parses a proxy URL: socks4://, socks4a:// and socks5:// or
@@ -90,6 +92,8 @@ func (p *Proxy) Tunnel(ctx context.Context, conn net.Conn, addr string) error {
 	switch p.Scheme {
 	case "socks4":
 		err = p.socks4(conn, host, port)
+	case "http":
+		err = p.connect(conn, addr)
 	default:
 		err = p.socks5(conn, host, port)
 	}
