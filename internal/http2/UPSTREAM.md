@@ -54,6 +54,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0034-chain-unsent-stream.patch`
 - `scripts/xnet-patches/0035-chromium-reset-ping-ack.patch`
 - `scripts/xnet-patches/0036-alps-empty-payload.patch`
+- `scripts/xnet-patches/0037-chromium-altsvc-value.patch`
 
 ## Excluded files
 

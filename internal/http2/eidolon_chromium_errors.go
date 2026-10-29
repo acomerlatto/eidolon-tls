@@ -215,8 +215,11 @@ func (fr *Framer) chromiumPayloadError(fh FrameHeader, p []byte) error {
 		if fh.StreamID != 0 || (uint32(p[0])&0x7f|uint32(p[1])|uint32(p[2])|uint32(p[3])) == 0 {
 			return feInvalidStreamID.err()
 		}
-	case 0xa: // ALTSVC: the origin length, then the origin
-		if len(p) < 2 || int(p[0])<<8|int(p[1]) > len(p)-2 {
+	case 0xa: // ALTSVC: the origin length, the origin, then the value
+		if len(p) < 2 {
+			return feInvalidControlFrame.err()
+		}
+		if n := int(p[0])<<8 | int(p[1]); n > len(p)-2 || !altSvcValid(p[2+n:]) {
 			return feInvalidControlFrame.err()
 		}
 	}

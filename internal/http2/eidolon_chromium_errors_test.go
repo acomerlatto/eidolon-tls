@@ -225,6 +225,8 @@ func TestChromiumConnectionErrors(t *testing.T) {
 		{"PRIORITY_UPDATE on stream 1", func(s *errorServer) { s.raw(FramePriorityUpdate, 0, 1, 0, 0, 0, 1) }, framer(1, "INVALID_STREAM_ID")},
 		{"PRIORITY_UPDATE of stream 0", func(s *errorServer) { s.raw(FramePriorityUpdate, 0, 0, 0x80, 0, 0, 0) }, framer(1, "INVALID_STREAM_ID")},
 		{"ALTSVC size", func(s *errorServer) { s.raw(0xa, 0, 0, 0, 2, 'a') }, framer(2, "INVALID_CONTROL_FRAME")},
+		{"ALTSVC without value", func(s *errorServer) { s.raw(0xa, 0, 0, 0, 0) }, framer(2, "INVALID_CONTROL_FRAME")},
+		{"ALTSVC value", func(s *errorServer) { s.raw(0xa, 0, 0, append([]byte{0, 1, 'o'}, `h3=":0"`...)...) }, framer(2, "INVALID_CONTROL_FRAME")},
 		// HPACK.
 		{"index 0", func(s *errorServer) { headers(s, []byte{0x80}) }, framer(19, "HPACK_INVALID_INDEX")},
 		{"index", func(s *errorServer) { headers(s, []byte{0xff, 0x00}) }, framer(19, "HPACK_INVALID_INDEX")},
@@ -365,8 +367,8 @@ func TestChromiumIgnored(t *testing.T) {
 		{"MAX_FRAME_SIZE 1", func(s *errorServer) { s.fr.WriteSettings(Setting{SettingMaxFrameSize, 1}) }},
 		{"DATA on a stream not opened", func(s *errorServer) { s.raw(FrameData, 0, 5, 'x') }},
 		{"unknown on stream 1", func(s *errorServer) { s.raw(0x20, 0, 1) }},
-		{"ALTSVC", func(s *errorServer) { s.raw(0xa, 0, 0, 0, 0) }},
-		{"ALTSVC on stream 2", func(s *errorServer) { s.raw(0xa, 0, 2, 0, 0) }},
+		{"ALTSVC", func(s *errorServer) { s.raw(0xa, 0, 0, append([]byte{0, 1, 'o'}, `h3=":443"; ma=86400`...)...) }},
+		{"ALTSVC on stream 2", func(s *errorServer) { s.raw(0xa, 0, 2, append([]byte{0, 0}, "clear"...)...) }},
 		{"empty DATA before HEADERS", func(s *errorServer) { s.raw(FrameData, 0, 1) }},
 		{"trailers", func(s *errorServer) {
 			s.raw(FrameHeaders, FlagHeadersEndHeaders, 1, status200...)

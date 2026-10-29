@@ -59,7 +59,8 @@ func TestDecodeALPS(t *testing.T) {
 		{"unknown frame on a stream", alpsFrame(0xfa, 0xff, 3, 1, 2), nil, 0},
 		{"ACCEPT_CH", cat(acceptCH, alpsSettings(Setting{SettingEnablePush, 0})), []Setting{{SettingEnablePush, 0}}, 0},
 		{"malformed ACCEPT_CH", alpsFrame(frameAcceptCH, 0, 0, 0, 9), nil, 0},
-		{"ALTSVC", alpsFrame(0xa, 0, 0, 0, 0), nil, 0},
+		{"ALTSVC", alpsFrame(0xa, 0, 0, append([]byte{0, 0}, "clear"...)...), nil, 0},
+		{"ALTSVC without value", alpsFrame(0xa, 0, 0, 0, 0), nil, alpsFramingError},
 
 		{"SETTINGS on a stream", alpsFrame(FrameSettings, 0, 1), nil, alpsFramingError},
 		{"SETTINGS of 5 bytes", alpsFrame(FrameSettings, 0, 0, 0, 3, 0, 0, 0), nil, alpsFramingError},
