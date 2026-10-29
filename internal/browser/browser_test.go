@@ -204,11 +204,25 @@ func TestBase(t *testing.T) {
 			t.Errorf("Base(%q) = %+v, want %+v", dest, got, want)
 		}
 	}
-	if got := (&Headers{}).Base("iframe"); got != (Dest{Mode: "navigate", Accept: "*/*", UpgradeInsecure: true, Navigation: true}) {
-		t.Errorf("Base(iframe) without document = %+v", got)
+	nav := Dest{Mode: "navigate", Accept: "*/*", UpgradeInsecure: true, Navigation: true}
+	for _, dest := range []string{"document", "iframe"} {
+		if got := (&Headers{}).Base(dest); got != nav {
+			t.Errorf("Base(%s) without document = %+v", dest, got)
+		}
+	}
+	// A profile without destinations sends a navigation for a document,
+	// the destination of a request without hints.
+	nodests := &Headers{Secure: []order.Field{{Name: "User-Agent", Value: "ua"}}, NavigationOrder: []string{"user-agent"}, SubresourceOrder: []string{"accept"}}
+	got, err := nodests.Apply(newReq(t, "GET", "https://a.test/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Header.Get("Sec-Fetch-Mode") != "navigate" || got.Header.Get("Upgrade-Insecure-Requests") != "1" ||
+		got.Header.Get("Sec-Fetch-Dest") != "document" || got.Header["Sec-Fetch-User"] != nil || got.Order.Header[0] != "user-agent" {
+		t.Errorf("document without destinations: %v, order %v", got.Header, got.Order.Header)
 	}
 	// A destination the profile lacks gets Base in Apply.
-	got, err := testHeaders.Apply(newReq(t, "GET", "https://a.test/f.woff2", http.Header{"Sec-Fetch-Dest": {"font"}}))
+	got, err = testHeaders.Apply(newReq(t, "GET", "https://a.test/f.woff2", http.Header{"Sec-Fetch-Dest": {"font"}}))
 	if err != nil {
 		t.Fatal(err)
 	}

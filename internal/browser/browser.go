@@ -51,14 +51,17 @@ type Dest struct {
 
 // Base returns the headers of a destination the profile does not hold:
 // Accept */*, no Priority, and the mode the Fetch standard gives it; a
-// navigation (iframe, frame) takes those of "document" in h, without
-// Sec-Fetch-User.
+// document is a navigation, with Upgrade-Insecure-Requests and without
+// Sec-Fetch-User, and a nested one (iframe, frame) takes the headers of
+// "document" in h, without Sec-Fetch-User.
 func (h *Headers) Base(dest string) Dest {
 	switch dest {
+	case "document":
+		return Dest{Mode: "navigate", Accept: "*/*", UpgradeInsecure: true, Navigation: true}
 	case "iframe", "frame", "fencedframe":
 		d, ok := h.Dests["document"]
 		if !ok {
-			d = Dest{Accept: "*/*", UpgradeInsecure: true}
+			d = h.Base("document")
 		}
 		d.Mode, d.User, d.Navigation = "navigate", false, true
 		return d
