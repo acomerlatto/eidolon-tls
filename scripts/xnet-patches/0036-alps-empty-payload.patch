@@ -1,0 +1,33 @@
+diff --git a/internal/http2/eidolon_alps.go b/internal/http2/eidolon_alps.go
+index bed0137..87e771e 100644
+--- a/internal/http2/eidolon_alps.go
++++ b/internal/http2/eidolon_alps.go
+@@ -1,4 +1,4 @@
+-// The ALPS of the server as Chromium reads it (patch 0029).
++// The ALPS of the server as Chromium reads it (patches 0029 and 0036).
+ 
+ package http2
+ 
+@@ -79,7 +79,8 @@ func decodeALPS(data []byte) ([]Setting, int) {
+ 		if framing(err) {
+ 			return nil, alpsFramingError
+ 		}
+-		if errors.Is(err, io.ErrUnexpectedEOF) {
++		// io.EOF: the data ends right after the header.
++		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+ 			boundary = true
+ 			break
+ 		}
+diff --git a/internal/http2/eidolon_alps_test.go b/internal/http2/eidolon_alps_test.go
+index 572246b..bb8f70a 100644
+--- a/internal/http2/eidolon_alps_test.go
++++ b/internal/http2/eidolon_alps_test.go
+@@ -91,6 +91,8 @@ func TestDecodeALPS(t *testing.T) {
+ 
+ 		{"truncated header", ping[:5], nil, alpsNotOnFrameBoundary},
+ 		{"truncated payload", alpsSettings(Setting{1, 1})[:12], nil, alpsNotOnFrameBoundary},
++		{"header without payload", alpsSettings(Setting{1, 1})[:9], nil, alpsNotOnFrameBoundary},
++		{"SETTINGS, then a header without payload", cat(alpsSettings(Setting{1, 1}), alpsSettings(Setting{2, 0})[:9]), nil, alpsNotOnFrameBoundary},
+ 		{"truncated, ACCEPT_CH on a stream", cat(alpsFrame(frameAcceptCH, 0, 1), ping[:5]), nil, alpsNotOnFrameBoundary},
+ 
+ 		{"ACCEPT_CH on a stream", alpsFrame(frameAcceptCH, 0, 1), nil, alpsAcceptChInvalidStream},

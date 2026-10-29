@@ -91,6 +91,8 @@ func TestDecodeALPS(t *testing.T) {
 
 		{"truncated header", ping[:5], nil, alpsNotOnFrameBoundary},
 		{"truncated payload", alpsSettings(Setting{1, 1})[:12], nil, alpsNotOnFrameBoundary},
+		{"header without payload", alpsSettings(Setting{1, 1})[:9], nil, alpsNotOnFrameBoundary},
+		{"SETTINGS, then a header without payload", cat(alpsSettings(Setting{1, 1}), alpsSettings(Setting{2, 0})[:9]), nil, alpsNotOnFrameBoundary},
 		{"truncated, ACCEPT_CH on a stream", cat(alpsFrame(frameAcceptCH, 0, 1), ping[:5]), nil, alpsNotOnFrameBoundary},
 
 		{"ACCEPT_CH on a stream", alpsFrame(frameAcceptCH, 0, 1), nil, alpsAcceptChInvalidStream},

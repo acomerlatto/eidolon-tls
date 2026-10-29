@@ -1,4 +1,4 @@
-// The ALPS of the server as Chromium reads it (patch 0029).
+// The ALPS of the server as Chromium reads it (patches 0029 and 0036).
 
 package http2
 
@@ -79,7 +79,8 @@ func decodeALPS(data []byte) ([]Setting, int) {
 		if framing(err) {
 			return nil, alpsFramingError
 		}
-		if errors.Is(err, io.ErrUnexpectedEOF) {
+		// io.EOF: the data ends right after the header.
+		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 			boundary = true
 			break
 		}
