@@ -578,3 +578,29 @@ func TestChromiumPingAckPayload(t *testing.T) {
 		}
 	})
 }
+
+// As in Chromium, MAX_CONCURRENT_STREAMS opens at most 256 streams at
+// once, and a first SETTINGS without it keeps the initial limit of 100.
+func TestChromiumMaxConcurrentStreams(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		settings []Setting
+		want     uint32
+	}{
+		{"absent", nil, 100},
+		{"10", []Setting{{SettingMaxConcurrentStreams, 10}}, 10},
+		{"256", []Setting{{SettingMaxConcurrentStreams, 256}}, 256},
+		{"1000", []Setting{{SettingMaxConcurrentStreams, 1000}}, 256},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s := newErrorServerStart(t, &Transport{}, func(fr *Framer) { fr.WriteSettings(tt.settings...) })
+				s.cc.mu.Lock()
+				defer s.cc.mu.Unlock()
+				if s.cc.maxConcurrentStreams != tt.want {
+					t.Errorf("max streams %d, want %d", s.cc.maxConcurrentStreams, tt.want)
+				}
+			})
+		})
+	}
+}

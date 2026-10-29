@@ -333,6 +333,11 @@ func chromiumFieldError(hf hpack.HeaderField, regular *bool, size *uint64, max u
 	return nil
 }
 
+// chromiumMaxConcurrentStreams is the most streams Chromium opens at
+// once on a connection, whatever MAX_CONCURRENT_STREAMS says
+// (kMaxConcurrentStreamLimit).
+const chromiumMaxConcurrentStreams = 256
+
 // chromiumSettings is what Chromium keeps of the SETTINGS of the server
 // (SpdySession::HandleSetting).
 type chromiumSettings struct {

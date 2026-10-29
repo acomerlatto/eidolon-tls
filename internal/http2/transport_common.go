@@ -175,6 +175,8 @@ type Transport struct {
 	// with its GOAWAY code and debug data, those it treats as stream
 	// errors reset the stream, and those it ignores are ignored. A lost
 	// connection is closed with GOAWAY PROTOCOL_ERROR "Failed ping.".
+	// MAX_CONCURRENT_STREAMS is taken as Chromium too: at most 256, and a
+	// first SETTINGS without it keeps the initial 100.
 	ChromiumErrors bool
 
 	// [eidolon] ChromiumALPS reads the ALPS of the server, on a connection

@@ -2832,7 +2832,8 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
 
 	cc.chromium.seenSettings = true // [eidolon] at the end of the frame
 	if !cc.seenSettings {
-		if !seenMaxConcurrentStreams {
+		// [eidolon] Chromium keeps its initial limit, 100.
+		if !seenMaxConcurrentStreams && !cc.t.ChromiumErrors {
 			// This was the servers initial SETTINGS frame and it
 			// didn't contain a MAX_CONCURRENT_STREAMS field so
 			// increase the number of concurrent streams this
@@ -2863,6 +2864,9 @@ func (cc *ClientConn) applySetting(s Setting) (seenMax bool, err error) {
 		cc.maxFrameSize = s.Val
 	case SettingMaxConcurrentStreams:
 		cc.maxConcurrentStreams = s.Val
+		if cc.t.ChromiumErrors {
+			cc.maxConcurrentStreams = min(s.Val, chromiumMaxConcurrentStreams) // [eidolon]
+		}
 		seenMax = true
 	case SettingMaxHeaderListSize:
 		cc.peerMaxHeaderListSize = uint64(s.Val)

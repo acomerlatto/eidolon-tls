@@ -1,0 +1,87 @@
+diff --git a/internal/http2/eidolon_chromium_errors.go b/internal/http2/eidolon_chromium_errors.go
+index b54c75f..b77f9d7 100644
+--- a/internal/http2/eidolon_chromium_errors.go
++++ b/internal/http2/eidolon_chromium_errors.go
+@@ -333,6 +333,11 @@ func chromiumFieldError(hf hpack.HeaderField, regular *bool, size *uint64, max u
+ 	return nil
+ }
+ 
++// chromiumMaxConcurrentStreams is the most streams Chromium opens at
++// once on a connection, whatever MAX_CONCURRENT_STREAMS says
++// (kMaxConcurrentStreamLimit).
++const chromiumMaxConcurrentStreams = 256
++
+ // chromiumSettings is what Chromium keeps of the SETTINGS of the server
+ // (SpdySession::HandleSetting).
+ type chromiumSettings struct {
+diff --git a/internal/http2/eidolon_chromium_errors_test.go b/internal/http2/eidolon_chromium_errors_test.go
+index a6d275b..e3a7459 100644
+--- a/internal/http2/eidolon_chromium_errors_test.go
++++ b/internal/http2/eidolon_chromium_errors_test.go
+@@ -578,3 +578,29 @@ func TestChromiumPingAckPayload(t *testing.T) {
+ 		}
+ 	})
+ }
++
++// As in Chromium, MAX_CONCURRENT_STREAMS opens at most 256 streams at
++// once, and a first SETTINGS without it keeps the initial limit of 100.
++func TestChromiumMaxConcurrentStreams(t *testing.T) {
++	for _, tt := range []struct {
++		name     string
++		settings []Setting
++		want     uint32
++	}{
++		{"absent", nil, 100},
++		{"10", []Setting{{SettingMaxConcurrentStreams, 10}}, 10},
++		{"256", []Setting{{SettingMaxConcurrentStreams, 256}}, 256},
++		{"1000", []Setting{{SettingMaxConcurrentStreams, 1000}}, 256},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				s := newErrorServerStart(t, &Transport{}, func(fr *Framer) { fr.WriteSettings(tt.settings...) })
++				s.cc.mu.Lock()
++				defer s.cc.mu.Unlock()
++				if s.cc.maxConcurrentStreams != tt.want {
++					t.Errorf("max streams %d, want %d", s.cc.maxConcurrentStreams, tt.want)
++				}
++			})
++		})
++	}
++}
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index 3e19a38..9db546e 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -2832,7 +2832,8 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
+ 
+ 	cc.chromium.seenSettings = true // [eidolon] at the end of the frame
+ 	if !cc.seenSettings {
+-		if !seenMaxConcurrentStreams {
++		// [eidolon] Chromium keeps its initial limit, 100.
++		if !seenMaxConcurrentStreams && !cc.t.ChromiumErrors {
+ 			// This was the servers initial SETTINGS frame and it
+ 			// didn't contain a MAX_CONCURRENT_STREAMS field so
+ 			// increase the number of concurrent streams this
+@@ -2863,6 +2864,9 @@ func (cc *ClientConn) applySetting(s Setting) (seenMax bool, err error) {
+ 		cc.maxFrameSize = s.Val
+ 	case SettingMaxConcurrentStreams:
+ 		cc.maxConcurrentStreams = s.Val
++		if cc.t.ChromiumErrors {
++			cc.maxConcurrentStreams = min(s.Val, chromiumMaxConcurrentStreams) // [eidolon]
++		}
+ 		seenMax = true
+ 	case SettingMaxHeaderListSize:
+ 		cc.peerMaxHeaderListSize = uint64(s.Val)
+diff --git a/internal/http2/transport_common.go b/internal/http2/transport_common.go
+index a80bd4c..690a7c6 100644
+--- a/internal/http2/transport_common.go
++++ b/internal/http2/transport_common.go
+@@ -175,6 +175,8 @@ type Transport struct {
+ 	// with its GOAWAY code and debug data, those it treats as stream
+ 	// errors reset the stream, and those it ignores are ignored. A lost
+ 	// connection is closed with GOAWAY PROTOCOL_ERROR "Failed ping.".
++	// MAX_CONCURRENT_STREAMS is taken as Chromium too: at most 256, and a
++	// first SETTINGS without it keeps the initial 100.
+ 	ChromiumErrors bool
+ 
+ 	// [eidolon] ChromiumALPS reads the ALPS of the server, on a connection

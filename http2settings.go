@@ -112,7 +112,10 @@ const (
 	// debug data, such as "Framer error: 1 (INVALID_STREAM_ID).", those
 	// it takes as stream errors reset the stream, and those it ignores,
 	// such as an invalid INITIAL_WINDOW_SIZE, are ignored. A connection
-	// lost to PrefacePing is closed with GOAWAY "Failed ping.".
+	// lost to PrefacePing is closed with GOAWAY "Failed ping.". As in
+	// Chromium, at most 256 streams are open at once whatever
+	// MAX_CONCURRENT_STREAMS says, and a first SETTINGS without it keeps
+	// the initial limit of 100, where Go raises it to 1000.
 	HTTP2ErrorsChromium
 )
 
