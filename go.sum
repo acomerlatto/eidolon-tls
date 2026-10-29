@@ -1,5 +1,5 @@
-github.com/acomerlatto/utls v0.0.3 h1:mMjYC6/DUmcRCtC8Q9dvAc2xUr5WYL3SNXEO1UNOzyM=
-github.com/acomerlatto/utls v0.0.3/go.mod h1:AnRkdKrFVepqV0Zpm4qbJE4fDMOFCwsCrkg8v+6PgAY=
+github.com/acomerlatto/utls v0.0.4 h1:KtrHYvwNmOf2b3h7qel29AQyiMcV91C+jK96zgZSYts=
+github.com/acomerlatto/utls v0.0.4/go.mod h1:AnRkdKrFVepqV0Zpm4qbJE4fDMOFCwsCrkg8v+6PgAY=
 github.com/andybalholm/brotli v1.2.7 h1:UgafRPGMam5ySHfRkhthMqOFA6IFoeF3D7mWIDLjG5A=
 github.com/andybalholm/brotli v1.2.7/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/klauspost/compress v1.20.1 h1:T7kKElXUMXrUJ2E9QhQhxFtcK5rPyLdsGZvdbLMPdiQ=
