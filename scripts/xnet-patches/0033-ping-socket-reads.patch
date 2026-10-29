@@ -1,0 +1,163 @@
+diff --git a/internal/http2/eidolon_ping.go b/internal/http2/eidolon_ping.go
+index aa0eb27..47b8e83 100644
+--- a/internal/http2/eidolon_ping.go
++++ b/internal/http2/eidolon_ping.go
+@@ -2,6 +2,7 @@ package http2
+ 
+ import (
+ 	"encoding/binary"
++	"io"
+ 	"time"
+ )
+ 
+@@ -20,6 +21,20 @@ func (cc *ClientConn) readNow() time.Duration {
+ 	return time.Since(cc.born)
+ }
+ 
++// readClock records in cc.lastRead each read of r, as Chromium's
++// DoReadComplete sets last_read_time_ for each read of the socket, a part
++// of a frame included. A read that fails ends the connection.
++type readClock struct {
++	r  io.Reader
++	cc *ClientConn
++}
++
++func (rc readClock) Read(p []byte) (int, error) {
++	n, err := rc.r.Read(p)
++	rc.cc.lastRead.Store(int64(rc.cc.readNow()))
++	return n, err
++}
++
+ // maybePrefacePing sends a PING, as Chromium's MaybeSendPrefacePing, if
+ // Transport.PrefacePing is set, nothing was read on cc for longer than it,
+ // and no PING is in flight or being checked. The payload counts the PINGs
+diff --git a/internal/http2/eidolon_ping_test.go b/internal/http2/eidolon_ping_test.go
+index 7442fb1..91c3be5 100644
+--- a/internal/http2/eidolon_ping_test.go
++++ b/internal/http2/eidolon_ping_test.go
+@@ -3,6 +3,7 @@
+ package http2
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"encoding/binary"
+ 	"fmt"
+@@ -13,6 +14,8 @@ import (
+ 	"testing"
+ 	"testing/synctest"
+ 	"time"
++
++	"github.com/acomerlatto/eidolon-tls/internal/http2/hpack"
+ )
+ 
+ // pingConn returns a connection with PrefacePing of 10 s to a wireServer
+@@ -175,3 +178,78 @@ func TestNoPrefacePing(t *testing.T) {
+ 		}
+ 	})
+ }
++
++// Each read of the socket counts, not each whole frame, as in Chromium's
++// DoReadComplete: a DATA frame that arrives one byte every 2 s keeps the
++// connection of an unanswered PING open until 10 s after its last byte.
++func TestPrefacePingPartialRead(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		client, server := net.Pipe()
++		defer client.Close()
++		go func() {
++			defer server.Close()
++			if _, err := io.ReadFull(server, make([]byte, len(ClientPreface))); err != nil {
++				return
++			}
++			type header struct {
++				typ   FrameType
++				flags Flags
++			}
++			read := make(chan header, 64)
++			go func() {
++				defer close(read)
++				fr := NewFramer(io.Discard, server)
++				for {
++					f, err := fr.ReadFrame()
++					if err != nil {
++						return
++					}
++					read <- header{f.Header().Type, f.Header().Flags}
++				}
++			}()
++			w := NewFramer(server, nil)
++			w.WriteSettings()
++			for h := range read {
++				switch {
++				case h.typ == FrameSettings && h.flags&FlagSettingsAck == 0:
++					w.WriteSettingsAck()
++				case h.typ == FrameHeaders:
++					var block bytes.Buffer
++					hpack.NewEncoder(&block).WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
++					w.WriteHeaders(HeadersFrameParam{StreamID: 1, BlockFragment: block.Bytes(), EndHeaders: true})
++					var data bytes.Buffer
++					NewFramer(&data, nil).WriteData(1, true, []byte("0123456789"))
++					server.Write(data.Next(frameHeaderLen))
++					for _, b := range data.Bytes() {
++						time.Sleep(2 * time.Second)
++						server.Write([]byte{b})
++					}
++				}
++			}
++		}()
++		cc, err := (&Transport{PrefacePing: 10 * time.Second}).newClientConn(client, false, nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		time.Sleep(11 * time.Second)
++		req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
++		resp, err := cc.RoundTrip(req) // t=11: PING, never answered
++		if err != nil {
++			t.Fatal(err)
++		}
++		body, err := io.ReadAll(resp.Body) // the last byte at t=31
++		if err != nil || string(body) != "0123456789" {
++			t.Fatalf("body %q, %v", body, err)
++		}
++		time.Sleep(9900 * time.Millisecond)
++		synctest.Wait()
++		if cc.State().Closed {
++			t.Fatal("closed at 40.9 s")
++		}
++		time.Sleep(200 * time.Millisecond)
++		synctest.Wait()
++		if !cc.State().Closed {
++			t.Fatal("open at 41.1 s")
++		}
++	})
++}
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index df4accf..94d2e2d 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -190,7 +190,7 @@ type ClientConn struct {
+ 	t             *Transport
+ 	chain         [8][]uint32          // [eidolon] open streams by urgency (PriorityChain), under mu
+ 	born          time.Time            // [eidolon] creation, the clock of lastRead
+-	lastRead      atomic.Int64         // [eidolon] time.Duration since born of the last frame read
++	lastRead      atomic.Int64         // [eidolon] time.Duration since born of the last read of the socket
+ 	prefacePing   prefacePing          // [eidolon] Transport.PrefacePing, under mu
+ 	firstStreamID uint32               // [eidolon] Transport.FirstStreamID
+ 	chromium      chromiumSettings     // [eidolon] Transport.ChromiumErrors, under mu
+@@ -576,7 +576,7 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook
+ 		timeout: conf.WriteByteTimeout,
+ 		err:     &cc.werr,
+ 	})
+-	cc.br = bufio.NewReader(c)
++	cc.br = bufio.NewReader(readClock{c, cc}) // [eidolon] PrefacePing
+ 	cc.fr = NewFramer(cc.bw, cc.br)
+ 	maxHeaderTableSize := conf.MaxDecoderHeaderTableSize
+ 	maxReadFrameSize := conf.MaxReadFrameSize
+@@ -2138,7 +2138,6 @@ func (rl *clientConnReadLoop) run() error {
+ 	}
+ 	for {
+ 		f, err := cc.fr.ReadFrame()
+-		cc.lastRead.Store(int64(cc.readNow())) // [eidolon] PrefacePing
+ 		if t != nil {
+ 			t.Reset(readIdleTimeout)
+ 		}

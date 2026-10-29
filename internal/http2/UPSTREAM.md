@@ -50,6 +50,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0030-chromium-stream-limit.patch`
 - `scripts/xnet-patches/0031-headers-priority-size.patch`
 - `scripts/xnet-patches/0032-chromium-header-framing.patch`
+- `scripts/xnet-patches/0033-ping-socket-reads.patch`
 
 ## Excluded files
 

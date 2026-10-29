@@ -190,7 +190,7 @@ type ClientConn struct {
 	t             *Transport
 	chain         [8][]uint32          // [eidolon] open streams by urgency (PriorityChain), under mu
 	born          time.Time            // [eidolon] creation, the clock of lastRead
-	lastRead      atomic.Int64         // [eidolon] time.Duration since born of the last frame read
+	lastRead      atomic.Int64         // [eidolon] time.Duration since born of the last read of the socket
 	prefacePing   prefacePing          // [eidolon] Transport.PrefacePing, under mu
 	firstStreamID uint32               // [eidolon] Transport.FirstStreamID
 	chromium      chromiumSettings     // [eidolon] Transport.ChromiumErrors, under mu
@@ -576,7 +576,7 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 		timeout: conf.WriteByteTimeout,
 		err:     &cc.werr,
 	})
-	cc.br = bufio.NewReader(c)
+	cc.br = bufio.NewReader(readClock{c, cc}) // [eidolon] PrefacePing
 	cc.fr = NewFramer(cc.bw, cc.br)
 	maxHeaderTableSize := conf.MaxDecoderHeaderTableSize
 	maxReadFrameSize := conf.MaxReadFrameSize
@@ -2138,7 +2138,6 @@ func (rl *clientConnReadLoop) run() error {
 	}
 	for {
 		f, err := cc.fr.ReadFrame()
-		cc.lastRead.Store(int64(cc.readNow())) // [eidolon] PrefacePing
 		if t != nil {
 			t.Reset(readIdleTimeout)
 		}

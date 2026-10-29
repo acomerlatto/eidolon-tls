@@ -3,6 +3,7 @@
 package http2
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/acomerlatto/eidolon-tls/internal/http2/hpack"
 )
 
 // pingConn returns a connection with PrefacePing of 10 s to a wireServer
@@ -172,6 +175,81 @@ func TestNoPrefacePing(t *testing.T) {
 			if f.typ == FramePing {
 				t.Error("PING sent")
 			}
+		}
+	})
+}
+
+// Each read of the socket counts, not each whole frame, as in Chromium's
+// DoReadComplete: a DATA frame that arrives one byte every 2 s keeps the
+// connection of an unanswered PING open until 10 s after its last byte.
+func TestPrefacePingPartialRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
+		go func() {
+			defer server.Close()
+			if _, err := io.ReadFull(server, make([]byte, len(ClientPreface))); err != nil {
+				return
+			}
+			type header struct {
+				typ   FrameType
+				flags Flags
+			}
+			read := make(chan header, 64)
+			go func() {
+				defer close(read)
+				fr := NewFramer(io.Discard, server)
+				for {
+					f, err := fr.ReadFrame()
+					if err != nil {
+						return
+					}
+					read <- header{f.Header().Type, f.Header().Flags}
+				}
+			}()
+			w := NewFramer(server, nil)
+			w.WriteSettings()
+			for h := range read {
+				switch {
+				case h.typ == FrameSettings && h.flags&FlagSettingsAck == 0:
+					w.WriteSettingsAck()
+				case h.typ == FrameHeaders:
+					var block bytes.Buffer
+					hpack.NewEncoder(&block).WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
+					w.WriteHeaders(HeadersFrameParam{StreamID: 1, BlockFragment: block.Bytes(), EndHeaders: true})
+					var data bytes.Buffer
+					NewFramer(&data, nil).WriteData(1, true, []byte("0123456789"))
+					server.Write(data.Next(frameHeaderLen))
+					for _, b := range data.Bytes() {
+						time.Sleep(2 * time.Second)
+						server.Write([]byte{b})
+					}
+				}
+			}
+		}()
+		cc, err := (&Transport{PrefacePing: 10 * time.Second}).newClientConn(client, false, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(11 * time.Second)
+		req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+		resp, err := cc.RoundTrip(req) // t=11: PING, never answered
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body) // the last byte at t=31
+		if err != nil || string(body) != "0123456789" {
+			t.Fatalf("body %q, %v", body, err)
+		}
+		time.Sleep(9900 * time.Millisecond)
+		synctest.Wait()
+		if cc.State().Closed {
+			t.Fatal("closed at 40.9 s")
+		}
+		time.Sleep(200 * time.Millisecond)
+		synctest.Wait()
+		if !cc.State().Closed {
+			t.Fatal("open at 41.1 s")
 		}
 	})
 }

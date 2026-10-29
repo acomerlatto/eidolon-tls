@@ -2,6 +2,7 @@ package http2
 
 import (
 	"encoding/binary"
+	"io"
 	"time"
 )
 
@@ -18,6 +19,20 @@ type prefacePing struct {
 // ClientConn.lastRead.
 func (cc *ClientConn) readNow() time.Duration {
 	return time.Since(cc.born)
+}
+
+// readClock records in cc.lastRead each read of r, as Chromium's
+// DoReadComplete sets last_read_time_ for each read of the socket, a part
+// of a frame included. A read that fails ends the connection.
+type readClock struct {
+	r  io.Reader
+	cc *ClientConn
+}
+
+func (rc readClock) Read(p []byte) (int, error) {
+	n, err := rc.r.Read(p)
+	rc.cc.lastRead.Store(int64(rc.cc.readNow()))
+	return n, err
 }
 
 // maybePrefacePing sends a PING, as Chromium's MaybeSendPrefacePing, if
