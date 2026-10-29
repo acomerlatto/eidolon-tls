@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/order"
+	"github.com/acomerlatto/eidolon-tls/internal/proxy"
 )
 
 // DefaultMaxConnsPerHost is the HTTP/1.1 connection limit per key, as in
@@ -301,7 +303,14 @@ func (t *Transport) h1Get(ctx context.Context, key string, fresh bool, dial func
 		t.h1Release(key)
 		return nil, nil
 	}
-	return &h1Conn{Conn: t.newHTTP1(conn), t: t, key: key, state: state}, nil
+	hc := t.newHTTP1(conn)
+	if state == nil && t.forwards() {
+		hc.Forward = &http1.Forward{}
+		if t.Proxy.HasAuth {
+			hc.Forward.Authorization = t.Proxy.Authorization()
+		}
+	}
+	return &h1Conn{Conn: hc, t: t, key: key, state: state}, nil
 }
 
 // sendH1 sends req on c. The connection returns to the pool when the body
@@ -355,6 +364,14 @@ func (t *Transport) sendH1(c *h1Conn, req *http.Request) (resp *http.Response, a
 		stop()
 		c.close()
 		return nil, nil, ctxErr
+	}
+	if c.Forward != nil && resp.StatusCode == http.StatusProxyAuthRequired {
+		// The proxy refused the credentials, or wants some: an error, as
+		// in a CONNECT.
+		resp.Body.Close()
+		stop()
+		c.close()
+		return nil, nil, fmt.Errorf("%w: status 407", proxy.ErrProxyAuth)
 	}
 	resp.TLS = c.state
 	keep := c.KeepAlive(resp) && !req.Close && !closeRequested(req)

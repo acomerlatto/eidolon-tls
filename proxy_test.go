@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -139,6 +141,111 @@ func TestProxyECHRetry(t *testing.T) {
 	want := []string{echSecret + ":443", echSecret + ":443"}
 	if got := p.Destinations(); !slices.Equal(got, want) {
 		t.Errorf("tunnels to %q, want %q", got, want)
+	}
+}
+
+// Through an HTTP proxy, https:// goes over a CONNECT tunnel as Chrome
+// asks for it, with the User-Agent of the profile and the credentials of
+// the URL; the TLS connection is the direct one.
+func TestProxyHTTPConnect(t *testing.T) {
+	cert, err := lab.NewCertificate(time.Hour, "site.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := lab.Start(t, lab.Options{Certificate: &cert})
+	p := lab.StartHTTPProxy(t, srv.Addr, "Basic dXNlcjpwYXNz")
+	resp, err := echGet(proxyClient(t, srv, "http://user:pass@"+p.Addr), "https://site.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := srv.NextConn(t)
+	if resp.Proto != "HTTP/2.0" || conn.State.ServerName != "site.test" {
+		t.Errorf("protocol %s, server name %q", resp.Proto, conn.State.ServerName)
+	}
+	want := "CONNECT site.test:443 HTTP/1.1\r\nHost: site.test:443\r\nProxy-Connection: keep-alive\r\n" +
+		"User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36\r\nProxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\n"
+	if got := p.Heads(); !slices.Equal(got, []string{want}) {
+		t.Errorf("heads %q\nwant %q", got, want)
+	}
+	// Over HTTP/1.1 in the tunnel, the request is the direct one.
+	resp, err = echGet(proxyClient(t, srv, "http://user:pass@"+p.Addr, eidolon.WithForceHTTP1()), "https://site.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(srv.NextConn(t).Bytes())
+	if resp.Proto != "HTTP/1.1" || !strings.HasPrefix(got, "GET / HTTP/1.1\r\nHost: site.test\r\nConnection: keep-alive\r\n") || strings.Contains(got, "Proxy-") {
+		t.Errorf("protocol %s, the server got %q", resp.Proto, got)
+	}
+}
+
+// Through an HTTP proxy, http:// goes to the proxy as it is, as Chrome
+// sends it: the absolute URL in the request line, Proxy-Connection in
+// place of Connection and Proxy-Authorization after it.
+func TestProxyHTTPForward(t *testing.T) {
+	cert, err := lab.NewCertificate(time.Hour, "site.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := lab.Start(t, lab.Options{Certificate: &cert, Plain: true})
+	p := lab.StartHTTPProxy(t, plain.Addr, "Basic dXNlcjpwYXNz")
+	c := proxyClient(t, plain, "http://user:pass@"+p.Addr)
+	if _, err := echGet(c, "http://site.test:8080/a?b"); err != nil {
+		t.Fatal(err)
+	}
+	heads := p.Heads()
+	if len(heads) != 1 {
+		t.Fatalf("heads %q, want one", heads)
+	}
+	want := "GET http://site.test:8080/a?b HTTP/1.1\r\nHost: site.test:8080\r\nProxy-Connection: keep-alive\r\n" +
+		"Proxy-Authorization: Basic dXNlcjpwYXNz\r\nUpgrade-Insecure-Requests: 1\r\n"
+	if !strings.HasPrefix(heads[0], want) || strings.Contains(heads[0], "\nConnection:") {
+		t.Errorf("head %q\nwant it to start with %q, without Connection", heads[0], want)
+	}
+	if got := string(plain.NextConn(t).Bytes()); !strings.HasPrefix(got, heads[0]) {
+		t.Errorf("the server got %q, want the request as the proxy got it", got)
+	}
+}
+
+// An HTTP proxy that refuses the credentials fails the request with
+// ErrProxyAuth, in a CONNECT and for a request it forwards.
+func TestProxyHTTPAuth(t *testing.T) {
+	cert, err := lab.NewCertificate(time.Hour, "site.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := lab.Start(t, lab.Options{Certificate: &cert})
+	plain := lab.Start(t, lab.Options{Certificate: &cert, Plain: true})
+	for _, tt := range []struct {
+		srv *lab.Server
+		url string
+	}{{srv, "https://site.test/"}, {plain, "http://site.test/"}} {
+		p := lab.StartHTTPProxy(t, tt.srv.Addr, "Basic dXNlcjpwYXNz")
+		for _, rawURL := range []string{"http://user:wrong@" + p.Addr, "http://" + p.Addr} {
+			_, err := echGet(proxyClient(t, tt.srv, rawURL), tt.url)
+			if !errors.Is(err, eidolon.ErrProxyAuth) {
+				t.Errorf("%s through %s: %v, want ErrProxyAuth", tt.url, rawURL, err)
+			}
+		}
+		if n := tt.srv.Accepted(); n != 0 {
+			t.Errorf("%s: %d connections reached the server, want 0", tt.url, n)
+		}
+	}
+}
+
+// A 407 of the server, not of a proxy that forwards the request, is a
+// response.
+func TestProxyServer407(t *testing.T) {
+	cert, err := lab.NewCertificate(time.Hour, "site.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := lab.Start(t, lab.Options{Certificate: &cert, Plain: true, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusProxyAuthRequired)
+	})})
+	p := lab.StartSOCKS(t, plain.Addr, "", "")
+	resp, err := echGet(proxyClient(t, plain, "socks5://"+p.Addr), "http://site.test/")
+	if err != nil || resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("status %v, %v; want the 407", resp, err)
 	}
 }
 

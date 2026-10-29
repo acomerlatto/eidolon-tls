@@ -52,7 +52,8 @@ type Transport struct {
 	// to the address of the rejected connection (retryECH).
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Proxy, when set, carries every connection: a tunnel to the
-	// destination, whose name the proxy resolves.
+	// destination, whose name the proxy resolves. An HTTP proxy gets the
+	// http:// requests as they are, as Chrome, without a tunnel.
 	Proxy *proxy.Proxy
 	// Spelling is the HTTP/1.1 name spelling table.
 	Spelling http1.Spelling
@@ -271,6 +272,10 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			return nil, fmt.Errorf("%w: http:// needs HTTP/1.1", ErrProtocolPolicy)
 		}
 		dial := func(ctx context.Context) (net.Conn, *tls.ConnectionState, error) {
+			if t.forwards() {
+				conn, err := t.proxyDial(ctx, "tcp", "")
+				return conn, nil, err
+			}
 			conn, err := t.dial(ctx, tgt.Addr())
 			return conn, nil, err
 		}
@@ -681,26 +686,44 @@ var systemDial = (&net.Dialer{}).DialContext
 // trackedDial opens a TCP connection and registers it until it is closed,
 // so Close can reach it. A dial that ends after Close closes its connection.
 func (t *Transport) trackedDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if t.Proxy != nil {
+		return t.proxyDial(ctx, network, addr)
+	}
 	dial := t.DialContext
 	if dial == nil {
 		dial = systemDial
 	}
-	if t.Proxy == nil {
-		conn, err := dial(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		return t.track(conn)
+	conn, err := dial(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return t.track(conn)
+}
+
+// proxyDial opens a tracked connection to the proxy, with a tunnel to
+// addr unless addr is "".
+func (t *Transport) proxyDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	dial := t.DialContext
+	if dial == nil {
+		dial = systemDial
 	}
 	conn, err := dial(ctx, network, t.Proxy.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", proxy.ErrProxy, err)
 	}
-	if err := t.Proxy.Tunnel(ctx, conn, addr); err != nil {
-		conn.Close()
-		return nil, err
+	if addr != "" {
+		if err := t.Proxy.Tunnel(ctx, conn, addr); err != nil {
+			conn.Close()
+			return nil, err
+		}
 	}
 	return t.track(conn)
+}
+
+// forwards reports whether http:// requests go to the proxy as they are:
+// an HTTP proxy, as Chrome (UsingHttpProxyWithoutTunnel).
+func (t *Transport) forwards() bool {
+	return t.Proxy != nil && t.Proxy.Scheme == "http"
 }
 
 // track registers conn until it is closed, or closes it after Close.

@@ -123,19 +123,29 @@ func WithDialContext(dial func(ctx context.Context, network, addr string) (net.C
 }
 
 // WithProxy sends every connection through the proxy of rawURL, one per
-// client: socks5:// (or socks5h://) and socks4:// (or socks4a://), with
-// an optional user:password@ and port, 1080 by default. The proxy
-// resolves the destination: socks5:// sends the name, as Chrome, and
-// socks4:// is taken as SOCKS4a, where Chrome resolves the name itself.
-// Without credentials, the SOCKS5 greeting is Chrome's; with them, it also
-// offers user/password (RFC 1929), which Chrome does not support. SOCKS4
-// sends the user as its user ID and has no password. With
-// WithDialContext, that function opens the connection to the proxy.
+// client: http://, socks5:// (or socks5h://) and socks4:// (or
+// socks4a://), with an optional user:password@ and port, 80 for http://
+// and 1080 for SOCKS by default. The proxy resolves the destination.
+//
+// An HTTP proxy gets https:// requests over a CONNECT tunnel, with the
+// User-Agent of the profile as Chrome sends it, and http:// requests as
+// they are, as Chrome sends them: the absolute URL in the request line and
+// Proxy-Connection in place of Connection. Credentials go in
+// Proxy-Authorization: Basic from the first request, where Chrome waits
+// for a 407; in exact header mode, an http:// request carries the
+// Proxy-Authorization of its own fields only.
+//
+// socks5:// sends the name, as Chrome, and socks4:// is taken as SOCKS4a,
+// where Chrome resolves the name itself. Without credentials, the SOCKS5
+// greeting is Chrome's; with them, it also offers user/password (RFC
+// 1929), which Chrome does not support. SOCKS4 sends the user as its user
+// ID and has no password. With WithDialContext, that function opens the
+// connection to the proxy.
 //
 // The proxy chooses its exit when a connection opens: connections are
 // reused as Chrome reuses them, every request of an origin over HTTP/2
 // going through one. Errors of the proxy wrap ErrProxy, or ErrProxyAuth
-// for credentials.
+// for credentials, a 407 included.
 func WithProxy(rawURL string) Option {
 	return func(c *config) error {
 		if c.proxy != nil {
@@ -148,6 +158,23 @@ func WithProxy(rawURL string) Option {
 		c.proxy = p
 		return nil
 	}
+}
+
+// proxyWithUserAgent returns the proxy with the User-Agent of the profile
+// for its CONNECT requests, as Chrome sends its own; nil without a proxy.
+func (c *config) proxyWithUserAgent() *proxy.Proxy {
+	if c.proxy == nil {
+		return nil
+	}
+	p := *c.proxy
+	if c.headers != nil {
+		for _, f := range c.headers.Secure {
+			if strings.EqualFold(f.Name, "user-agent") {
+				p.UserAgent = f.Value
+			}
+		}
+	}
+	return &p
 }
 
 // WithMaxConnsPerHost bounds the HTTP/1.1 connections per origin; requests

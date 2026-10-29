@@ -190,7 +190,9 @@ func TestSOCKS4(t *testing.T) {
 
 func TestParse(t *testing.T) {
 	for raw, want := range map[string]Proxy{
-		"socks5://p.test":           {Scheme: "socks5", Addr: "p.test:1080"},
+		"socks5://p.test": {Scheme: "socks5", Addr: "p.test:1080"},
+		"http://p.test":   {Scheme: "http", Addr: "p.test:80"},
+		"http://" + string(bytes.Repeat([]byte("u"), 256)) + "@p.test:3128": {Scheme: "http", Addr: "p.test:3128", User: string(bytes.Repeat([]byte("u"), 256)), HasAuth: true},
 		"SOCKS5H://p.test:1":        {Scheme: "socks5", Addr: "p.test:1"},
 		"socks4a://[::1]:2/":        {Scheme: "socks4", Addr: "[::1]:2"},
 		"socks5://u:@p.test":        {Scheme: "socks5", Addr: "p.test:1080", User: "u", HasAuth: true},

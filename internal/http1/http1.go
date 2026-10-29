@@ -37,6 +37,18 @@ type Spelling map[string]string
 // then alphabetical, never the map iteration order.
 var defaultOrder = &order.Order{Header: []string{"host"}}
 
+// Forward makes a Conn send its requests to an HTTP proxy that forwards
+// them, as Chrome without a tunnel (UsingHttpProxyWithoutTunnel): the
+// request line carries the absolute URL, Connection goes as
+// Proxy-Connection in its place, and Proxy-Authorization follows the
+// fields Chrome sets before it (BuildRequestHeaders). Exact mode only
+// takes the absolute URL.
+type Forward struct {
+	// Authorization is the Proxy-Authorization value; "" sends none, as
+	// does a request that has its own.
+	Authorization string
+}
+
 // ErrUpgrade reports a 101 response; Upgrade is outside phase 1.
 var ErrUpgrade = errors.New("http1: unexpected 101 Switching Protocols")
 
@@ -61,18 +73,18 @@ const max1xx = 5
 // order.FromContext(req.Context()); spelling from spell. Nothing is written
 // if the request is invalid.
 func WriteRequest(w io.Writer, req *http.Request, spell Spelling) error {
-	_, err := writeRequest(w, req, spell)
+	_, err := writeRequest(w, req, spell, nil)
 	return err
 }
 
 // writeRequest is WriteRequest that also returns the length of the head,
 // once it is known.
-func writeRequest(w io.Writer, req *http.Request, spell Spelling) (int64, error) {
+func writeRequest(w io.Writer, req *http.Request, spell Spelling, fwd *Forward) (int64, error) {
 	req, err := probeBody(req)
 	if err != nil {
 		return 0, err
 	}
-	head, err := encodeHead(req, spell)
+	head, err := encodeHead(req, spell, fwd)
 	if err != nil {
 		return 0, err
 	}
@@ -166,6 +178,9 @@ type Conn struct {
 	// headers of a response, 1xx included, are read. Zero means
 	// DefaultMaxHeaderBytes.
 	MaxHeaderBytes int64
+	// Forward, when set, sends the requests to a proxy that forwards
+	// them.
+	Forward *Forward
 }
 
 // NewConn returns a Conn over c.
@@ -198,7 +213,7 @@ func (c *Conn) Sent() int64 { return c.sent }
 // connection ends with the response.
 func (c *Conn) RoundTrip(req *http.Request, spell Spelling) (*http.Response, error) {
 	c.sent, c.werr = 0, nil
-	headLen, uploadErr := writeRequest(writeCounter{c}, req, spell)
+	headLen, uploadErr := writeRequest(writeCounter{c}, req, spell, c.Forward)
 	if uploadErr != nil && (!errors.Is(uploadErr, c.werr) || !reset(uploadErr) || c.sent < headLen) {
 		return nil, uploadErr
 	}
@@ -458,8 +473,9 @@ func (w writeCounter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// encodeHead returns the request line and the header block.
-func encodeHead(req *http.Request, spell Spelling) (string, error) {
+// encodeHead returns the request line and the header block, for a proxy
+// that forwards the request when fwd is set.
+func encodeHead(req *http.Request, spell Spelling, fwd *Forward) (string, error) {
 	if req.URL == nil {
 		return "", errors.New("http1: Request.URL is nil")
 	}
@@ -481,6 +497,18 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 	target := req.URL.RequestURI()
 	if !validTarget(target) {
 		return "", fmt.Errorf("http1: invalid request target %q", target)
+	}
+	if fwd != nil {
+		// Absolute-form (RFC 9112 section 3.2.2), the URL without its
+		// credentials and fragment, as Chrome's SpecForRequest.
+		authority, err := httpguts.PunycodeHostPort(req.URL.Host)
+		if err != nil {
+			return "", err
+		}
+		if authority == "" || !httpguts.ValidHostHeader(authority) {
+			return "", fmt.Errorf("http1: invalid URL host %q", authority)
+		}
+		target = "http://" + authority + target
 	}
 	if exact := order.ExactFromContext(req.Context()); exact != nil {
 		return encodeExact(method, target, exact, req)
@@ -562,9 +590,13 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 	if o == nil || o.Header == nil {
 		o = defaultOrder
 	}
+	sorted := o.Sort(fields)
+	if fwd != nil {
+		sorted = forwardFields(sorted, fwd)
+	}
 	var b strings.Builder
 	b.WriteString(method + " " + target + " HTTP/1.1\r\n")
-	for _, f := range o.Sort(fields) {
+	for _, f := range sorted {
 		name, err := spelled(f.Name, spell)
 		if err != nil {
 			return "", err
@@ -576,6 +608,39 @@ func encodeHead(req *http.Request, spell Spelling) (string, error) {
 	}
 	b.WriteString("\r\n")
 	return b.String(), nil
+}
+
+// forwardFields returns the sorted fields of a request to a proxy that
+// forwards it: Connection renamed Proxy-Connection in its place, and
+// Proxy-Authorization after the leading fields Chrome sets before it, the
+// framing and the cache fields of its load flags, unless the request has
+// its own.
+func forwardFields(sorted []order.Field, fwd *Forward) []order.Field {
+	out := make([]order.Field, 0, len(sorted)+1)
+	at := -1
+	add := fwd.Authorization != ""
+	for _, f := range sorted {
+		switch strings.ToLower(f.Name) {
+		case "connection":
+			f.Name = "Proxy-Connection"
+		case "host", "content-length", "transfer-encoding", "pragma", "cache-control":
+		case "proxy-authorization":
+			add = false
+			fallthrough
+		default:
+			if at < 0 {
+				at = len(out)
+			}
+		}
+		out = append(out, f)
+	}
+	if !add {
+		return out
+	}
+	if at < 0 {
+		at = len(out)
+	}
+	return slices.Insert(out, at, order.Field{Name: "Proxy-Authorization", Value: fwd.Authorization})
 }
 
 // encodeExact returns the head of a request in exact mode: the fields as

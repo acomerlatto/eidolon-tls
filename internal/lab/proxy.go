@@ -1,9 +1,12 @@
 package lab
 
 import (
+	"bufio"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -179,4 +182,104 @@ func readCString(c net.Conn) (string, bool) {
 		b = append(b, one[0])
 	}
 	return "", false
+}
+
+// HTTPProxy is an HTTP proxy for tests: a CONNECT opens a tunnel, and any
+// other request is forwarded. Either way the connection then goes to
+// Upstream as it is, whatever the destination, and the head of the first
+// request of each connection is recorded.
+type HTTPProxy struct {
+	// Addr is the listening address, on 127.0.0.1.
+	Addr string
+	// Upstream is the address every connection goes to.
+	Upstream string
+	// Authorization, when set, is the Proxy-Authorization value required;
+	// without it the proxy answers 407.
+	Authorization string
+
+	ln    net.Listener
+	mu    sync.Mutex
+	heads []string
+	wg    sync.WaitGroup
+}
+
+// StartHTTPProxy starts an HTTP proxy to upstream, closed when the test
+// ends.
+func StartHTTPProxy(tb testing.TB, upstream, authorization string) *HTTPProxy {
+	tb.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	p := &HTTPProxy{Addr: ln.Addr().String(), Upstream: upstream, Authorization: authorization, ln: ln}
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			p.wg.Add(1)
+			go func() {
+				defer p.wg.Done()
+				p.serve(c)
+			}()
+		}
+	}()
+	tb.Cleanup(func() {
+		ln.Close()
+		p.wg.Wait()
+	})
+	return p
+}
+
+// Heads returns the head of the first request of each connection, request
+// line included, in order.
+func (p *HTTPProxy) Heads() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.heads...)
+}
+
+func (p *HTTPProxy) serve(c net.Conn) {
+	defer c.Close()
+	br := bufio.NewReader(c)
+	var head strings.Builder
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			return
+		}
+		head.WriteString(line)
+		if line == "\r\n" {
+			break
+		}
+	}
+	p.mu.Lock()
+	p.heads = append(p.heads, head.String())
+	p.mu.Unlock()
+	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(head.String())))
+	if err != nil {
+		return
+	}
+	if p.Authorization != "" && req.Header.Get("Proxy-Authorization") != p.Authorization {
+		io.WriteString(c, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"lab\"\r\nContent-Length: 0\r\n\r\n")
+		return
+	}
+	up, err := net.Dial("tcp", p.Upstream)
+	if err != nil {
+		return
+	}
+	defer up.Close()
+	if req.Method == http.MethodConnect {
+		io.WriteString(c, "HTTP/1.1 200 Connection established\r\n\r\n")
+	} else {
+		io.WriteString(up, head.String())
+	}
+	go func() {
+		io.Copy(up, br)
+		up.Close()
+	}()
+	io.Copy(c, up)
 }

@@ -35,18 +35,21 @@ type Proxy struct {
 	UserAgent string
 }
 
-// Parse parses a proxy URL: socks4://, socks4a:// and socks5:// or
-// socks5h://, with an optional user:password@ and port, 1080 by default as
-// in Chrome (GetDefaultPortForSchemeTyped). socks4:// is taken as SOCKS4a,
-// and socks5:// sends the name, as Chrome's: the proxy resolves the
-// destination. SOCKS4 has no password.
+// Parse parses a proxy URL: http://, socks4://, socks4a:// and socks5://
+// or socks5h://, with an optional user:password@ and port, 80 for http://
+// and 1080 for SOCKS by default as in Chrome (GetDefaultPortForSchemeTyped).
+// socks4:// is taken as SOCKS4a, and socks5:// sends the name, as Chrome's:
+// the proxy resolves the destination. SOCKS4 has no password.
 func Parse(raw string) (*Proxy, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, err
 	}
 	p := &Proxy{}
+	port := "1080"
 	switch u.Scheme {
+	case "http":
+		p.Scheme, port = "http", "80"
 	case "socks4", "socks4a":
 		p.Scheme = "socks4"
 	case "socks5", "socks5h":
@@ -57,18 +60,18 @@ func Parse(raw string) (*Proxy, error) {
 	if u.Hostname() == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("proxy %q: want scheme://[user:password@]host[:port]", u.Redacted())
 	}
-	port := u.Port()
-	if port == "" {
-		port = "1080"
-	} else if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return nil, fmt.Errorf("proxy %q: invalid port %q", u.Redacted(), port)
+	if u.Port() != "" {
+		port = u.Port()
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("proxy %q: invalid port %q", u.Redacted(), port)
+		}
 	}
 	p.Addr = net.JoinHostPort(u.Hostname(), port)
 	if u.User != nil {
 		p.HasAuth = true
 		p.User = u.User.Username()
 		p.Password, _ = u.User.Password()
-		if len(p.User) > 255 || len(p.Password) > 255 {
+		if p.Scheme == "socks5" && (len(p.User) > 255 || len(p.Password) > 255) {
 			return nil, fmt.Errorf("proxy %q: user or password longer than 255 bytes", u.Redacted())
 		}
 		if _, ok := u.User.Password(); ok && p.Scheme == "socks4" {
