@@ -287,6 +287,48 @@ func TestECHRejectedTwice(t *testing.T) {
 	}
 }
 
+// A TLS 1.2 server cannot accept ECH: as BoringSSL, the handshake is a
+// rejection without retry configurations, authenticated for the public
+// name. ECHAuto sends the request over a new connection with the GREASE
+// ECH of the profile; ECHRequired fails.
+func TestECHRejectedByTLS12(t *testing.T) {
+	for _, mode := range []eidolon.ECHMode{eidolon.ECHAuto, eidolon.ECHRequired} {
+		cert, err := lab.NewCertificate(time.Hour, echSecret, echPublic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := lab.Start(t, lab.Options{
+			Certificate: &cert,
+			TLS:         func(c *tls.Config) { c.MaxVersion = tls.VersionTLS12 },
+		})
+		list, _, err := lab.NewECHKey(1, echPublic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()),
+			eidolon.WithECHConfig(echSecret, list), eidolon.WithECHMode(mode))
+		resp, err := echGet(c, "https://"+echSecret+"/")
+		checkRejected(t, srv.NextConn(t))
+		if mode == eidolon.ECHRequired {
+			if !errors.Is(err, eidolon.ErrECHRequired) || !errors.Is(err, eidolon.ErrECHRejected) {
+				t.Fatalf("ECHRequired: %v, want ErrECHRequired and ErrECHRejected", err)
+			}
+			if n := srv.Accepted(); n != 1 {
+				t.Errorf("ECHRequired: %d connections, want 1", n)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn := srv.NextConn(t)
+		if resp.TLS.Version != tls.VersionTLS12 || resp.TLS.ECHAccepted || conn.State.ServerName != echSecret ||
+			!slices.Contains(helloExtensions(t, conn.ClientHello), 0xfe0d) {
+			t.Errorf("retry: version %x, ECH accepted %v, server name %q", resp.TLS.Version, resp.TLS.ECHAccepted, conn.State.ServerName)
+		}
+	}
+}
+
 // A rejection is authenticated for the public name of the configuration:
 // a certificate for the origin's name alone fails the request with
 // ErrCertificate, without a retry.
@@ -345,6 +387,10 @@ func TestECHConfigInvalid(t *testing.T) {
 			return ok
 		})
 	})
+	ipv4, _, err := lab.NewECHKey(1, "127.1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	unsupported := bytes.Clone(good)
 	unsupported[2], unsupported[3] = 0xfe, 0x0c // an older version
 	for _, tt := range []struct {
@@ -357,6 +403,7 @@ func TestECHConfigInvalid(t *testing.T) {
 		{"set twice", []eidolon.Option{eidolon.WithECHConfig(echSecret, good), eidolon.WithECHConfig(echSecret+":443", good)}},
 		{"malformed list", []eidolon.Option{eidolon.WithECHConfig(echSecret, good[:len(good)-1])}},
 		{"no supported configuration", []eidolon.Option{eidolon.WithECHConfig(echSecret, unsupported)}},
+		{"IPv4 public name", []eidolon.Option{eidolon.WithECHConfig(echSecret, ipv4)}},
 		{"profile without ECH", []eidolon.Option{eidolon.WithClientHello(noECH), eidolon.WithECHConfig(echSecret, good)}},
 		{"profile without TLS 1.3", []eidolon.Option{eidolon.WithClientHello(noTLS13), eidolon.WithECHConfig(echSecret, good)}},
 		{"profile without server_name", []eidolon.Option{eidolon.WithClientHello(noSNI), eidolon.WithECHConfig(echSecret, good)}},
