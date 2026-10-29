@@ -65,6 +65,37 @@ func Parse(u *url.URL) (Target, error) {
 	return Target{Scheme: scheme, Host: host, Port: port}, nil
 }
 
+// Port returns the port of u as Parse normalizes it, in decimal without
+// leading zeros, the default one of the scheme when u has none, or
+// u.Port() if it is not valid.
+func Port(u *url.URL) string {
+	p := u.Port()
+	if p == "" {
+		if d, ok := defaultPorts[strings.ToLower(u.Scheme)]; ok {
+			return strconv.Itoa(d)
+		}
+		return ""
+	}
+	if n, err := strconv.Atoi(p); err == nil && n >= 1 && n <= 65535 {
+		return strconv.Itoa(n)
+	}
+	return p
+}
+
+// Authority returns the host of u and its port as an origin serializes
+// them: the host as Host returns it, in brackets if IPv6, and the port as
+// Port returns it unless it is the default one of the scheme.
+func Authority(u *url.URL) string {
+	host := Host(u)
+	if p := Port(u); p != "" && p != strconv.Itoa(defaultPorts[strings.ToLower(u.Scheme)]) {
+		return net.JoinHostPort(host, p)
+	}
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
+}
+
 // Host returns the host of u as Parse normalizes it, for comparing and
 // serializing origins, or u.Hostname() in lowercase if it is not valid.
 func Host(u *url.URL) string {

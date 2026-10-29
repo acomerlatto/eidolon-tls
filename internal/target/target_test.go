@@ -151,6 +151,33 @@ func TestParseRejects(t *testing.T) {
 }
 
 // Host normalizes as Parse, and lowercases a host Parse refuses.
+// Port and Authority normalize the port as Parse does, and Authority
+// leaves out the default one.
+func TestPortAuthority(t *testing.T) {
+	for _, tt := range []struct{ in, port, authority string }{
+		{"https://a.test/", "443", "a.test"},
+		{"https://a.test:0443/", "443", "a.test"},
+		{"HTTP://A.test:00080/", "80", "a.test"},
+		{"https://a.test:08443/", "8443", "a.test:8443"},
+		{"https://[0:0::1]:443/", "443", "[::1]"},
+		{"https://[::1]:8443/", "8443", "[::1]:8443"},
+		{"https://a.test:000/", "000", "a.test:000"},
+		{"https://a.test:099999/", "099999", "a.test:099999"},
+		{"ftp://a.test/", "", "a.test"},
+	} {
+		u, err := url.Parse(tt.in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := Port(u); got != tt.port {
+			t.Errorf("Port(%s) = %q, want %q", tt.in, got, tt.port)
+		}
+		if got := Authority(u); got != tt.authority {
+			t.Errorf("Authority(%s) = %q, want %q", tt.in, got, tt.authority)
+		}
+	}
+}
+
 func TestHost(t *testing.T) {
 	for in, want := range map[string]string{
 		"https://Bücher.example/": "xn--bcher-kva.example",

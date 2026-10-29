@@ -40,6 +40,9 @@ func TestSameOrigin(t *testing.T) {
 		{"https://example.com/", "https://example.org/", false},
 		{"https://example.com/", "http://example.com/", false},
 		{"https://example.com/", "https://example.com:8443/", false},
+		{"https://example.com:0443/", "https://example.com/", true},
+		{"http://example.com:0080/", "http://example.com:80/", true},
+		{"https://example.com:08443/", "https://example.com:8443/", true},
 	} {
 		a, _ := url.Parse(tt.a)
 		b, _ := url.Parse(tt.b)

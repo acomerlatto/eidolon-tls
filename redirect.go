@@ -178,25 +178,12 @@ func drain(resp *http.Response) {
 }
 
 // sameOrigin reports whether a and b have the same scheme, host and port,
-// with the default port filled in and the hosts normalized as
+// with the default port filled in and the host and port normalized as
 // target.Parse does.
 func sameOrigin(a, b *url.URL) bool {
 	return strings.EqualFold(a.Scheme, b.Scheme) &&
 		target.Host(a) == target.Host(b) &&
-		port(a) == port(b)
-}
-
-func port(u *url.URL) string {
-	if p := u.Port(); p != "" {
-		return p
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	}
-	return ""
+		target.Port(a) == target.Port(b)
 }
 
 // urlErrorOp returns the url.Error Op for a method, as http.Client: "Get"

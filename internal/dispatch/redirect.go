@@ -1,7 +1,6 @@
 package dispatch
 
 import (
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -72,12 +71,12 @@ func referer(ref string, u *url.URL) string {
 		return ""
 	}
 	if !sameOrigin(r, u) {
-		return r.Scheme + "://" + originHost(r) + "/"
+		return r.Scheme + "://" + target.Authority(r) + "/"
 	}
 	c := *r
 	c.User = nil
 	c.Fragment, c.RawFragment = "", ""
-	c.Host = originHost(r)
+	c.Host = target.Authority(r)
 	if c.Path == "" {
 		c.Path = "/"
 	}
@@ -85,40 +84,10 @@ func referer(ref string, u *url.URL) string {
 }
 
 // sameOrigin reports whether a and b have the same scheme, host and port,
-// with the default port filled in and the hosts normalized as
+// with the default port filled in and the host and port normalized as
 // target.Parse does.
 func sameOrigin(a, b *url.URL) bool {
 	return strings.EqualFold(a.Scheme, b.Scheme) &&
 		target.Host(a) == target.Host(b) &&
-		port(a) == port(b)
-}
-
-// originHost returns the host of u normalized as target.Parse does, with
-// its port unless it is the default one of the scheme.
-func originHost(u *url.URL) string {
-	host := target.Host(u)
-	if p := u.Port(); p != "" && p != defaultPort(u.Scheme) {
-		return net.JoinHostPort(host, p)
-	}
-	if strings.Contains(host, ":") {
-		return "[" + host + "]"
-	}
-	return host
-}
-
-func port(u *url.URL) string {
-	if p := u.Port(); p != "" {
-		return p
-	}
-	return defaultPort(u.Scheme)
-}
-
-func defaultPort(scheme string) string {
-	switch strings.ToLower(scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	}
-	return ""
+		target.Port(a) == target.Port(b)
 }

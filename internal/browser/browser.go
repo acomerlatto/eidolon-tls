@@ -240,23 +240,11 @@ func originHeader(method, mode string, urls []*url.URL, init *url.URL) (string, 
 // serialize returns the origin of u as Origin sends it: scheme and host,
 // with the port only if it is not the default one.
 func serialize(u *url.URL) string {
-	scheme := strings.ToLower(u.Scheme)
-	host := target.Host(u)
-	if p := u.Port(); p != "" && p != map[string]string{"http": "80", "https": "443"}[scheme] {
-		host = net.JoinHostPort(host, p)
-	} else if strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	return scheme + "://" + host
+	return strings.ToLower(u.Scheme) + "://" + target.Authority(u)
 }
 
 // origin returns the origin of u: scheme, host and port, the default
 // port of the scheme included.
 func origin(u *url.URL) string {
-	scheme := strings.ToLower(u.Scheme)
-	port := u.Port()
-	if port == "" {
-		port = map[string]string{"http": "80", "https": "443"}[scheme]
-	}
-	return scheme + "://" + net.JoinHostPort(target.Host(u), port)
+	return strings.ToLower(u.Scheme) + "://" + net.JoinHostPort(target.Host(u), target.Port(u))
 }
