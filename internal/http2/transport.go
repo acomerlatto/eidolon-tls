@@ -1319,6 +1319,14 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 	// the caller to "mutate or reuse" the Request after closing the Response's Body,
 	// we must take care when referencing the Request from here on.
 	err = cs.encodeAndWriteHeaders(req)
+	if err != nil {
+		// [eidolon] Out of the chain before the next request enters it:
+		// no HEADERS may depend on a stream never sent, and after a failed
+		// write the connection is done.
+		cc.mu.Lock()
+		cc.chainForgetLocked(cs.ID)
+		cc.mu.Unlock()
+	}
 	<-cc.reqHeaderMu
 	if err != nil {
 		return err

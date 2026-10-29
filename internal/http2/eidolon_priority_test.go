@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,5 +247,70 @@ func TestPriorityChainSent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// blockedClose is a request body whose Close reports on entered, then
+// waits for release.
+type blockedClose struct {
+	io.Reader
+	entered, release chan struct{}
+}
+
+func (b blockedClose) Close() error {
+	close(b.entered)
+	<-b.release
+	return nil
+}
+
+// A request whose HEADERS are never written, here refused for an invalid
+// header field, leaves the chain before the next request takes its place:
+// the next one depends on the last stream sent, even while the refused
+// request is still cleaning up, its body closing.
+func TestPriorityChainUnsent(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close() })
+	seen, release := heldServer(server)
+	defer close(release)
+	cc, err := (&Transport{PriorityChain: true}).newClientConn(client, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip := func(value string, body io.ReadCloser) error {
+		req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+		req.Header.Set("Priority", "u=0")
+		req.Header["X-Value"] = []string{value}
+		if body != nil {
+			req.Method, req.Body, req.ContentLength = http.MethodPost, body, 1
+		}
+		resp, err := cc.RoundTrip(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+	first := make(chan error, 1)
+	go func() { first <- roundTrip("ok", nil) }()
+	h := <-seen
+	closing := blockedClose{strings.NewReader("x"), make(chan struct{}), make(chan struct{})}
+	refused := make(chan error, 1)
+	go func() { refused <- roundTrip("a\nb", closing) }()
+	<-closing.entered
+	third := make(chan error, 1)
+	go func() { third <- roundTrip("ok", nil) }()
+	h3 := <-seen
+	if h3.priority.StreamDep != h.stream {
+		t.Errorf("stream %d depends on %d, want %d", h3.stream, h3.priority.StreamDep, h.stream)
+	}
+	close(closing.release)
+	if err := <-refused; err == nil {
+		t.Fatal("invalid header field sent")
+	}
+	release <- h.stream
+	release <- h3.stream
+	for _, done := range []chan error{first, third} {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
 	}
 }
