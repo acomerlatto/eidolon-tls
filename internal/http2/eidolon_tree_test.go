@@ -78,7 +78,8 @@ func TestPriorityTree(t *testing.T) {
 
 // With another first stream, a single-use connection still takes its
 // first request and only it, and a connection closed before any request
-// takes one, which then fails with the error of the connection.
+// takes one, which then fails as a connection not established, so the
+// pool dials again.
 func TestFirstStreamIdle(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, server := net.Pipe()
@@ -116,6 +117,9 @@ func TestFirstStreamIdle(t *testing.T) {
 		}
 		if !cc.idleState().canTakeNewRequest {
 			t.Error("connection closed before any request takes none")
+		}
+		if _, err := cc.RoundTrip(req); err != errClientConnNotEstablished {
+			t.Errorf("RoundTrip on it = %v, want errClientConnNotEstablished", err)
 		}
 	})
 }

@@ -56,6 +56,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0036-alps-empty-payload.patch`
 - `scripts/xnet-patches/0037-chromium-altsvc-value.patch`
 - `scripts/xnet-patches/0038-max-streams-wake.patch`
+- `scripts/xnet-patches/0039-first-stream-not-established.patch`
 
 ## Excluded files
 

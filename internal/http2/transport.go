@@ -1605,7 +1605,7 @@ func (cs *clientStream) cleanupWriteRequest(err error) {
 // Must hold cc.mu.
 func (cc *ClientConn) awaitOpenSlotForStreamLocked(cs *clientStream) error {
 	for {
-		if cc.closed && cc.nextStreamID == 1 && cc.streamsReserved == 0 {
+		if cc.closed && cc.nextStreamID == cc.firstStreamID && cc.streamsReserved == 0 { // [eidolon] was 1
 			// This is the very first request sent to this connection.
 			// Return a fatal error which aborts the retry loop.
 			return errClientConnNotEstablished
