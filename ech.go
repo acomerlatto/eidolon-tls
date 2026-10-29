@@ -74,7 +74,7 @@ func WithECHConfig(authority string, configList []byte) Option {
 	return func(c *config) error {
 		tgt, err := target.Parse(&url.URL{Scheme: "https", Host: authority})
 		if err != nil {
-			return fmt.Errorf("WithECHConfig: invalid authority %q", authority)
+			return fmt.Errorf("WithECHConfig: invalid authority %q: %w", authority, err)
 		}
 		if tgt.IsIP() {
 			return fmt.Errorf("WithECHConfig: %q is an IP address; ECH needs a host name", authority)

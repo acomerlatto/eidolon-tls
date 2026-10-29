@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -368,6 +369,10 @@ func TestECHConfigInvalid(t *testing.T) {
 				t.Errorf("New: %v, want ErrConfig", err)
 			}
 		})
+	}
+	// The error of an invalid authority says why.
+	if _, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithECHConfig(echSecret+":99999", good)); err == nil || !strings.Contains(err.Error(), `invalid port "99999"`) {
+		t.Errorf("New with port 99999: %v, want the invalid port", err)
 	}
 	// Those profiles are valid without ECH.
 	for _, spec := range []func() (*utls.ClientHelloSpec, error){noTLS13, noSNI} {
