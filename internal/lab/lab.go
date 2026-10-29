@@ -27,7 +27,10 @@ import (
 	"testing"
 	"time"
 
+	utls "github.com/acomerlatto/utls"
+
 	"github.com/acomerlatto/eidolon-tls/internal/http2"
+	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
 
 // ServerName is the name in the lab certificate, besides 127.0.0.1 and ::1.
@@ -61,6 +64,12 @@ type Options struct {
 	// Certificate is the server certificate. Nil generates a self-signed
 	// one for ServerName, valid for one hour.
 	Certificate *tls.Certificate
+
+	// ALPS, if set, serves TLS with uTLS, which negotiates ALPS: the ALPS
+	// data of each protocol, sent when the client offers ALPS for the
+	// negotiated one. Conn.ALPS has what the client sent back. TLS does
+	// not apply.
+	ALPS map[string][]byte
 
 	// Memory serves in-memory connections, dialed with Server.Dial,
 	// instead of TCP: a test in a synctest bubble, whose fake clock only
@@ -258,7 +267,19 @@ func (s *Server) serve(raw net.Conn) {
 	}
 
 	hello := &recordingConn{Conn: raw, rec: &c.handshake}
-	tc := tls.Server(hello, s.tlsConf)
+	var tc interface {
+		net.Conn
+		Handshake() error
+	}
+	var state func() tls.ConnectionState
+	var uc *utls.Conn
+	if s.opts.ALPS != nil {
+		uc = utls.Server(hello, s.utlsConf())
+		tc, state = uc, func() tls.ConnectionState { return tlsdial.ConnectionState(uc.ConnectionState()) }
+	} else {
+		sc := tls.Server(hello, s.tlsConf)
+		tc, state = sc, sc.ConnectionState
+	}
 	raw.SetDeadline(time.Now().Add(10 * time.Second))
 	err := tc.Handshake()
 	raw.SetDeadline(time.Time{})
@@ -269,10 +290,13 @@ func (s *Server) serve(raw net.Conn) {
 		s.conns <- c
 		return
 	}
-	c.State = tc.ConnectionState()
+	c.State = state()
+	if uc != nil {
+		c.ALPS = uc.ConnectionState().PeerApplicationSettings
+	}
 	s.conns <- c
 
-	app := &recordingTLSConn{recordingConn: recordingConn{Conn: tc, rec: &c.stream}, tc: tc}
+	app := &recordingTLSConn{recordingConn: recordingConn{Conn: tc, rec: &c.stream}, state: state}
 	if c.State.NegotiatedProtocol == "h2" && s.opts.H2Conn != nil {
 		s.opts.H2Conn(app)
 		return
@@ -311,6 +335,9 @@ type Conn struct {
 	HandshakeErr error
 	// State is the server-side TLS state.
 	State tls.ConnectionState
+	// ALPS is the ALPS data of the client, with Options.ALPS; nil without
+	// ALPS.
+	ALPS []byte
 
 	handshake, stream recorder
 	done              chan struct{}
@@ -364,10 +391,20 @@ func (c *recordingConn) stop() {
 // recordingTLSConn keeps ConnectionState visible to the HTTP/2 server.
 type recordingTLSConn struct {
 	recordingConn
-	tc *tls.Conn
+	state func() tls.ConnectionState
 }
 
-func (c *recordingTLSConn) ConnectionState() tls.ConnectionState { return c.tc.ConnectionState() }
+func (c *recordingTLSConn) ConnectionState() tls.ConnectionState { return c.state() }
+
+// utlsConf returns the uTLS config of Options.ALPS: the certificate and
+// the protocols of tlsConf, with the ALPS data.
+func (s *Server) utlsConf() *utls.Config {
+	var certs []utls.Certificate
+	for _, c := range s.tlsConf.Certificates {
+		certs = append(certs, utls.Certificate{Certificate: c.Certificate, PrivateKey: c.PrivateKey, Leaf: c.Leaf})
+	}
+	return &utls.Config{Certificates: certs, NextProtos: s.tlsConf.NextProtos, ApplicationSettings: s.opts.ALPS}
+}
 
 // firstClientHello extracts the first handshake message from raw TLS
 // records and returns it alone and wrapped in a single record.

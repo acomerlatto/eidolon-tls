@@ -234,3 +234,35 @@ func TestMemory(t *testing.T) {
 		t.Error("Dial without Memory")
 	}
 }
+
+// With Options.ALPS, the server negotiates ALPS with a client that offers
+// it for the negotiated protocol: the client gets the data of that
+// protocol, and Conn.ALPS has what the client sent back, empty from the
+// Chrome spec. Without it, or for another protocol, there is no ALPS.
+func TestALPS(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		alps  map[string][]byte
+		proto string
+		want  []byte
+	}{
+		{"h2", map[string][]byte{"h2": []byte("server")}, "h2", []byte("server")},
+		{"http/1.1", map[string][]byte{"http/1.1": []byte("server")}, "http/1.1", nil},
+		{"none", nil, "h2", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := lab.Start(t, lab.Options{NextProtos: []string{tt.proto}, ALPS: tt.alps})
+			conn := dial(t, srv)
+			if got := conn.ConnectionState().PeerApplicationSettings; !bytes.Equal(got, tt.want) || (got == nil) != (tt.want == nil) {
+				t.Errorf("client got %q, want %q", got, tt.want)
+			}
+			c := srv.NextConn(t)
+			if c.State.NegotiatedProtocol != tt.proto {
+				t.Errorf("lab ALPN %q", c.State.NegotiatedProtocol)
+			}
+			if (c.ALPS != nil) != (tt.want != nil) || len(c.ALPS) != 0 {
+				t.Errorf("lab got %q from the client", c.ALPS)
+			}
+		})
+	}
+}
