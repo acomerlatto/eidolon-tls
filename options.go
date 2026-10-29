@@ -107,7 +107,9 @@ func WithTimeout(d time.Duration) Option {
 }
 
 // WithDialContext sets the function that opens TCP connections. Without it,
-// a zero net.Dialer is used.
+// a zero net.Dialer is used, and the new connection after an ECH rejection
+// goes to the IP address of the rejected one, as Chrome; with it, that
+// connection gets the host name again, resolved as dial does.
 func WithDialContext(dial func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
 	return func(c *config) error {
 		if dial == nil {

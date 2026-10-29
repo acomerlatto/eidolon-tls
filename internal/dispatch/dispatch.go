@@ -46,7 +46,9 @@ type Transport struct {
 	// TLS holds the verification settings; ServerName is set per request.
 	// Nil uses the system roots.
 	TLS *utls.Config
-	// DialContext opens TCP connections. Nil uses a zero net.Dialer.
+	// DialContext opens TCP connections. Nil uses a zero net.Dialer, and
+	// the retry of a rejected ECH goes to the address of the rejected
+	// connection (retryECH).
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Spelling is the HTTP/1.1 name spelling table.
 	Spelling http1.Spelling
@@ -528,16 +530,23 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 	t.mu.Lock()
 	protos := t.offerLocked(key)
 	t.mu.Unlock()
+	var remote net.Addr // of the last TCP connection
 	dc := tlsdial.Config{
-		Spec:        t.spec(protos),
-		TLS:         cfg,
-		DialContext: t.trackedDial,
+		Spec: t.spec(protos),
+		TLS:  cfg,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := t.trackedDial(ctx, network, addr)
+			if err == nil {
+				remote = conn.RemoteAddr()
+			}
+			return conn, err
+		},
 		StrictTLS12: t.StrictTLS12,
 	}
 	conn, err := tlsdial.Dial(ctx, "tcp", tgt.Addr(), dc)
 	var re *utls.ECHRejectionError
 	if errors.As(err, &re) {
-		conn, err = t.retryECH(ctx, tgt, dc, re.RetryConfigList, err)
+		conn, err = t.retryECH(ctx, tgt, dc, remote, re.RetryConfigList, err)
 	}
 	if err != nil {
 		return nil, err
@@ -562,8 +571,13 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 // Chrome's TlsStreamAttempt: with the retry configurations of the
 // authenticated rejection, or, without usable ones, with the GREASE ECH
 // of the profile, except with ECHRequired. A second rejection is an
-// error. It runs within the deadline of the first dial.
-func (t *Transport) retryECH(ctx context.Context, tgt target.Target, dc tlsdial.Config, retry []byte, err error) (*utls.UConn, error) {
+// error. It runs within the deadline of the first dial. Without
+// DialContext, it dials remote, the address of the rejected connection,
+// as Chrome's TlsStreamAttempt retries on its IP endpoint: a new resolution
+// may give a server of another ECH configuration (RFC 9849, Section
+// 6.1.6). DialContext gets the authority again, which it resolves as it
+// does, through a proxy for instance.
+func (t *Transport) retryECH(ctx context.Context, tgt target.Target, dc tlsdial.Config, remote net.Addr, retry []byte, err error) (*utls.UConn, error) {
 	if len(retry) > 0 && tlsdial.Check(tlsdial.Config{Spec: dc.Spec, TLS: &utls.Config{EncryptedClientHelloConfigList: retry}}) != nil {
 		retry = nil
 	}
@@ -572,7 +586,11 @@ func (t *Transport) retryECH(ctx context.Context, tgt target.Target, dc tlsdial.
 	}
 	// dc.TLS is the clone of this dial.
 	dc.TLS.EncryptedClientHelloConfigList = retry
-	return tlsdial.Dial(ctx, "tcp", tgt.Addr(), dc)
+	addr := tgt.Addr()
+	if t.DialContext == nil {
+		addr = remote.String()
+	}
+	return tlsdial.Dial(ctx, "tcp", addr, dc)
 }
 
 // spec returns the spec function of a connection that offers protos, or
@@ -652,13 +670,16 @@ func (t *Transport) dial(ctx context.Context, addr string) (net.Conn, error) {
 	return t.trackedDial(ctx, "tcp", addr)
 }
 
+// systemDial opens the TCP connections of a Transport without
+// DialContext. A variable for the tests.
+var systemDial = (&net.Dialer{}).DialContext
+
 // trackedDial opens a TCP connection and registers it until it is closed,
 // so Close can reach it. A dial that ends after Close closes its connection.
 func (t *Transport) trackedDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	dial := t.DialContext
 	if dial == nil {
-		var d net.Dialer
-		dial = d.DialContext
+		dial = systemDial
 	}
 	conn, err := dial(ctx, network, addr)
 	if err != nil {

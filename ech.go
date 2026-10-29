@@ -23,7 +23,8 @@ const (
 	// profile to the others, as Chrome (kOpportunistic). When the server
 	// rejects ECH, authenticated by a certificate for the public name of
 	// the configuration, the request goes over one new connection, within
-	// the same dial deadline: with the retry configurations the server
+	// the same dial deadline and to the same IP address (see
+	// WithDialContext): with the retry configurations the server
 	// sent, or, without usable ones, with the GREASE ECH of the profile,
 	// as Chrome does (RFC 9849, Section 6.1.6, would disable ECH). The
 	// rejected connection carries no HTTP byte; a second rejection fails
