@@ -103,6 +103,15 @@ func TestCheckHello(t *testing.T) {
 				}
 			}
 		}, "malformed supported_versions"},
+		{"generic ALPN", func(s *utls.ClientHelloSpec) {
+			s.Extensions = append(s.Extensions, &utls.GenericExtension{Id: 16})
+		}, "extension 16 as a GenericExtension"},
+		{"generic old ALPS", func(s *utls.ClientHelloSpec) {
+			s.Extensions = append(s.Extensions, &utls.GenericExtension{Id: 17513})
+		}, "extension 17513 as a GenericExtension"},
+		{"generic ALPS", func(s *utls.ClientHelloSpec) {
+			s.Extensions = append(s.Extensions, &utls.GenericExtension{Id: 17613})
+		}, "extension 17613 as a GenericExtension"},
 		{"TLS 1.3 without signature_algorithms", func(s *utls.ClientHelloSpec) {
 			s.Extensions = slices.DeleteFunc(s.Extensions, func(e utls.TLSExtension) bool {
 				_, ok := e.(*utls.SignatureAlgorithmsExtension)

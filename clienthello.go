@@ -33,10 +33,11 @@ func WithShuffledExtensions() ClientHelloOption {
 // unless WithShuffledExtensions is given.
 //
 // The ClientHello is checked once, as New checks every spec: an extension
-// uTLS does not know, an extension twice, pre_shared_key other than last,
-// a cipher suite, group, signature scheme or certificate compression the
-// stack does not implement, a capability it cannot honor (such as
-// early_data), a key share outside supported_groups, ALPS for a protocol
+// uTLS does not know, an extension twice, a malformed list, pre_shared_key
+// other than last or without psk_key_exchange_modes, a cipher suite, group,
+// signature scheme or certificate compression the stack does not
+// implement, a capability it cannot honor (such as early_data), a key
+// share outside supported_groups or two of one group, ALPS for a protocol
 // ALPN does not offer, or TLS 1.3 without key_share, supported_groups or
 // signature_algorithms return an error that wraps ErrProfile. raw is
 // copied.

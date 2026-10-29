@@ -225,9 +225,13 @@ func prepare(cfg Config) (*utls.UConn, *utls.Config, error) {
 	// uTLS copies a name set in the SNI extension into Config.ServerName,
 	// which is also the name the certificate is verified against: the spec
 	// would choose which certificate is accepted for the URL.
+	// RestrictALPN filters ALPN and ALPS only in their own types.
 	for _, ext := range spec.Extensions {
 		if sni, ok := ext.(*utls.SNIExtension); ok && sni.ServerName != "" {
 			return nil, nil, fmt.Errorf("%w: the spec sets the SNI name %q; it must come from the URL", ErrProfile, sni.ServerName)
+		}
+		if g, ok := ext.(*utls.GenericExtension); ok && (g.Id == extALPN || g.Id == extALPSOld || g.Id == extALPS) {
+			return nil, nil, fmt.Errorf("%w: extension %d as a GenericExtension; use the uTLS type of ALPN or ALPS", ErrProfile, g.Id)
 		}
 	}
 	tc := cfg.TLS.Clone()
