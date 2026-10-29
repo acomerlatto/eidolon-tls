@@ -114,6 +114,9 @@ func New(opts ...Option) (HttpClient, error) {
 	if err := tr.CheckSpec(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
+	if err := cfg.configureECH(tr); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
+	}
 	return &client{
 		// http.Client sends one hop at a time; the client follows the
 		// redirects (redirect.go) and sets the deadline.

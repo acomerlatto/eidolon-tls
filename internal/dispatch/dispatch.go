@@ -76,6 +76,12 @@ type Transport struct {
 	DisableDecompression bool
 	// StrictTLS12 is tlsdial.Config.StrictTLS12.
 	StrictTLS12 bool
+	// ECH holds the ECHConfigList of each origin, by target.Origin; a
+	// connection to that origin offers ECH with it.
+	ECH map[string][]byte
+	// ECHRequired fails, before any dial, a request whose origin has no
+	// ECH configuration, http:// included, with ErrECHRequired.
+	ECHRequired bool
 	// Protocols restricts the protocols offered by ALPN, and accepted
 	// from it, to tlsdial.ProtoHTTP1 and tlsdial.ProtoH2 as listed. Nil
 	// keeps the spec as it is and accepts both.
@@ -113,6 +119,10 @@ var ErrClosed = errors.New("eidolon: transport closed")
 // http.Client filters credentials out of Header on redirects, but the
 // exact fields travel in the context and would escape that filter.
 var ErrExactHeadersRedirect = errors.New("eidolon: redirect of a request with exact headers")
+
+// ErrECHRequired reports a request, in the mode that requires ECH, to an
+// origin without an ECH configuration.
+var ErrECHRequired = errors.New("eidolon: ECH required, but the origin has no ECH configuration")
 
 // ErrProtocolPolicy reports a protocol outside the enabled set: negotiated
 // by the server, required by it, or needed by the URL.
@@ -245,6 +255,10 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 	// The key holds what can differ between requests of one Transport:
 	// the origin and the endpoint dialed.
 	key := tgt.Origin() + " " + tgt.Addr()
+	if t.ECHRequired && t.ECH[tgt.Origin()] == nil {
+		closeBody(req)
+		return nil, fmt.Errorf("%w: %s", ErrECHRequired, tgt.Origin())
+	}
 	if tgt.Scheme == "http" {
 		if !t.allows(tlsdial.ProtoHTTP1) {
 			closeBody(req)
@@ -510,6 +524,7 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 	}
 	cfg = cfg.Clone()
 	cfg.ServerName = tgt.ServerName()
+	cfg.EncryptedClientHelloConfigList = t.ECH[tgt.Origin()]
 	t.mu.Lock()
 	protos := t.offerLocked(key)
 	t.mu.Unlock()

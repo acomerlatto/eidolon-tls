@@ -32,6 +32,11 @@ var ErrALPN = errors.New("tlsdial: unsupported ALPN protocol")
 // the chain.
 var ErrCertificate = errors.New("eidolon: certificate verification failed")
 
+// ErrECHRejected reports a server that rejected ECH. The
+// utls.ECHRejectionError, with the retry configurations of an
+// authenticated rejection, stays in the chain. No HTTP byte is sent.
+var ErrECHRejected = errors.New("eidolon: the server rejected ECH")
+
 // ErrTLS12Policy reports a TLS 1.2 connection that StrictTLS12 refuses:
 // a cipher suite without ECDHE and AEAD, or a server without extended
 // master secret or secure renegotiation. The connection is closed after
@@ -103,8 +108,12 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 		conn.Close()
 		var ve *utls.CertificateVerificationError
 		var he x509.HostnameError
-		if errors.As(err, &ve) || errors.As(err, &he) {
+		var re *utls.ECHRejectionError
+		switch {
+		case errors.As(err, &ve) || errors.As(err, &he):
 			err = fmt.Errorf("%w: %w", ErrCertificate, err)
+		case errors.As(err, &re):
+			err = fmt.Errorf("%w: %w", ErrECHRejected, err)
 		}
 		return nil, err
 	}

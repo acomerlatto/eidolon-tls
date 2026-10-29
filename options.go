@@ -35,6 +35,9 @@ type config struct {
 	disableDecompression bool
 	strictTLS12          bool
 
+	echMode ECHMode
+	ech     map[string][]byte // WithECHConfig, by origin
+
 	maxConnsPerHost int
 	idleConnTimeout time.Duration
 

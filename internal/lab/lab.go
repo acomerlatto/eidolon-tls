@@ -10,6 +10,7 @@ package lab
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -26,6 +27,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/cryptobyte"
 
 	utls "github.com/acomerlatto/utls"
 
@@ -513,4 +516,37 @@ func NewCertificate(ttl time.Duration, names ...string) (tls.Certificate, error)
 		return tls.Certificate{}, err
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, nil
+}
+
+// NewECHKey returns an ECH key for DHKEM(X25519, HKDF-SHA256), HKDF-SHA256
+// and AES-128-GCM with publicName, sent as a retry configuration, and the
+// ECHConfigList (RFC 9849, Section 4) a client uses with it. Options.TLS
+// installs the key in EncryptedClientHelloKeys.
+func NewECHKey(id uint8, publicName string) (list []byte, key tls.EncryptedClientHelloKey, err error) {
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, key, err
+	}
+	var b cryptobyte.Builder
+	b.AddUint16(0xfe0d) // version
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		b.AddUint8(id)
+		b.AddUint16(0x0020) // DHKEM(X25519, HKDF-SHA256)
+		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(priv.PublicKey().Bytes()) })
+		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+			b.AddUint16(0x0001) // HKDF-SHA256
+			b.AddUint16(0x0001) // AES-128-GCM
+		})
+		b.AddUint8(0) // maximum_name_length
+		b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes([]byte(publicName)) })
+		b.AddUint16(0) // extensions
+	})
+	config, err := b.Bytes()
+	if err != nil {
+		return nil, key, err
+	}
+	var l cryptobyte.Builder
+	l.AddUint16LengthPrefixed(func(l *cryptobyte.Builder) { l.AddBytes(config) })
+	list = l.BytesOrPanic()
+	return list, tls.EncryptedClientHelloKey{Config: config, PrivateKey: priv.Bytes(), SendAsRetry: true}, nil
 }

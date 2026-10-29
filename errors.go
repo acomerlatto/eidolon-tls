@@ -37,6 +37,13 @@ var (
 	// in the chain, for errors.As with x509.UnknownAuthorityError,
 	// x509.HostnameError or x509.CertificateInvalidError.
 	ErrCertificate = tlsdial.ErrCertificate
+	// ErrECHRequired reports a request, with ECHRequired, to an origin
+	// without an ECH configuration, or to an http:// URL. No connection
+	// is opened.
+	ErrECHRequired = dispatch.ErrECHRequired
+	// ErrECHRejected reports a server that rejected ECH. The
+	// utls.ECHRejectionError stays in the chain; no HTTP byte is sent.
+	ErrECHRejected = tlsdial.ErrECHRejected
 	// ErrTLS12Policy reports a TLS 1.2 connection refused by
 	// WithStrictTLS12.
 	ErrTLS12Policy = tlsdial.ErrTLS12Policy
