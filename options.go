@@ -19,6 +19,7 @@ import (
 	"github.com/acomerlatto/eidolon-tls/internal/dispatch"
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/order"
+	"github.com/acomerlatto/eidolon-tls/internal/proxy"
 )
 
 // Option configures a client in New. Options fill a private configuration
@@ -30,6 +31,7 @@ type config struct {
 	rootCAs     *x509.CertPool
 	timeout     time.Duration
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	proxy       *proxy.Proxy
 	jar         http.CookieJar
 
 	disableDecompression bool
@@ -116,6 +118,34 @@ func WithDialContext(dial func(ctx context.Context, network, addr string) (net.C
 			return errors.New("WithDialContext: nil function")
 		}
 		c.dialContext = dial
+		return nil
+	}
+}
+
+// WithProxy sends every connection through the proxy of rawURL, one per
+// client: socks5:// (or socks5h://) and socks4:// (or socks4a://), with
+// an optional user:password@ and port, 1080 by default. The proxy
+// resolves the destination: socks5:// sends the name, as Chrome, and
+// socks4:// is taken as SOCKS4a, where Chrome resolves the name itself.
+// Without credentials, the SOCKS5 greeting is Chrome's; with them, it also
+// offers user/password (RFC 1929), which Chrome does not support. SOCKS4
+// sends the user as its user ID and has no password. With
+// WithDialContext, that function opens the connection to the proxy.
+//
+// The proxy chooses its exit when a connection opens: connections are
+// reused as Chrome reuses them, every request of an origin over HTTP/2
+// going through one. Errors of the proxy wrap ErrProxy, or ErrProxyAuth
+// for credentials.
+func WithProxy(rawURL string) Option {
+	return func(c *config) error {
+		if c.proxy != nil {
+			return errors.New("WithProxy: set twice")
+		}
+		p, err := proxy.Parse(rawURL)
+		if err != nil {
+			return fmt.Errorf("WithProxy: %w", err)
+		}
+		c.proxy = p
 		return nil
 	}
 }

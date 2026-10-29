@@ -34,6 +34,7 @@ import (
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/http2"
 	"github.com/acomerlatto/eidolon-tls/internal/order"
+	"github.com/acomerlatto/eidolon-tls/internal/proxy"
 	"github.com/acomerlatto/eidolon-tls/internal/target"
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
@@ -46,10 +47,13 @@ type Transport struct {
 	// TLS holds the verification settings; ServerName is set per request.
 	// Nil uses the system roots.
 	TLS *utls.Config
-	// DialContext opens TCP connections. Nil uses a zero net.Dialer, and
-	// the retry of a rejected ECH goes to the address of the rejected
-	// connection (retryECH).
+	// DialContext opens TCP connections, to Proxy when set. Nil uses a
+	// zero net.Dialer, and without Proxy the retry of a rejected ECH goes
+	// to the address of the rejected connection (retryECH).
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	// Proxy, when set, carries every connection: a tunnel to the
+	// destination, whose name the proxy resolves.
+	Proxy *proxy.Proxy
 	// Spelling is the HTTP/1.1 name spelling table.
 	Spelling http1.Spelling
 	// MaxConnsPerHost bounds the HTTP/1.1 connections per origin and
@@ -572,11 +576,11 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 // authenticated rejection, or, without usable ones, with the GREASE ECH
 // of the profile, except with ECHRequired. A second rejection is an
 // error. It runs within the deadline of the first dial. Without
-// DialContext, it dials remote, the address of the rejected connection,
-// as Chrome's TlsStreamAttempt retries on its IP endpoint: a new resolution
-// may give a server of another ECH configuration (RFC 9849, Section
-// 6.1.6). DialContext gets the authority again, which it resolves as it
-// does, through a proxy for instance.
+// DialContext and Proxy, it dials remote, the address of the rejected
+// connection, as Chrome's TlsStreamAttempt retries on its IP endpoint: a
+// new resolution may give a server of another ECH configuration (RFC 9849,
+// Section 6.1.6). DialContext and Proxy get the authority again, which
+// they resolve as they do.
 func (t *Transport) retryECH(ctx context.Context, tgt target.Target, dc tlsdial.Config, remote net.Addr, retry []byte, err error) (*utls.UConn, error) {
 	if len(retry) > 0 && tlsdial.Check(tlsdial.Config{Spec: dc.Spec, TLS: &utls.Config{EncryptedClientHelloConfigList: retry}}) != nil {
 		retry = nil
@@ -587,7 +591,7 @@ func (t *Transport) retryECH(ctx context.Context, tgt target.Target, dc tlsdial.
 	// dc.TLS is the clone of this dial.
 	dc.TLS.EncryptedClientHelloConfigList = retry
 	addr := tgt.Addr()
-	if t.DialContext == nil {
+	if t.DialContext == nil && t.Proxy == nil {
 		addr = remote.String()
 	}
 	return tlsdial.Dial(ctx, "tcp", addr, dc)
@@ -681,10 +685,26 @@ func (t *Transport) trackedDial(ctx context.Context, network, addr string) (net.
 	if dial == nil {
 		dial = systemDial
 	}
-	conn, err := dial(ctx, network, addr)
+	if t.Proxy == nil {
+		conn, err := dial(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return t.track(conn)
+	}
+	conn, err := dial(ctx, network, t.Proxy.Addr)
 	if err != nil {
+		return nil, fmt.Errorf("%w: %w", proxy.ErrProxy, err)
+	}
+	if err := t.Proxy.Tunnel(ctx, conn, addr); err != nil {
+		conn.Close()
 		return nil, err
 	}
+	return t.track(conn)
+}
+
+// track registers conn until it is closed, or closes it after Close.
+func (t *Transport) track(conn net.Conn) (net.Conn, error) {
 	tc := &trackedConn{Conn: conn, t: t}
 	t.mu.Lock()
 	if t.closed {

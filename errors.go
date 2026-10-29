@@ -5,6 +5,7 @@ import (
 
 	"github.com/acomerlatto/eidolon-tls/internal/dispatch"
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
+	"github.com/acomerlatto/eidolon-tls/internal/proxy"
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
 
@@ -46,6 +47,12 @@ var (
 	// without usable retry configurations. The utls.ECHRejectionError
 	// stays in the chain; no HTTP byte is sent.
 	ErrECHRejected = tlsdial.ErrECHRejected
+	// ErrProxy reports a proxy (WithProxy) that could not be reached or
+	// refused the tunnel; no byte of the request reached the destination.
+	ErrProxy = proxy.ErrProxy
+	// ErrProxyAuth reports a proxy that refused the credentials of its URL,
+	// or asked for credentials the URL does not have.
+	ErrProxyAuth = proxy.ErrProxyAuth
 	// ErrTLS12Policy reports a TLS 1.2 connection refused by
 	// WithStrictTLS12.
 	ErrTLS12Policy = tlsdial.ErrTLS12Policy
