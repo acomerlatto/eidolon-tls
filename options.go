@@ -123,9 +123,15 @@ func WithDialContext(dial func(ctx context.Context, network, addr string) (net.C
 }
 
 // WithProxy sends every connection through the proxy of rawURL, one per
-// client: http://, socks5:// (or socks5h://) and socks4:// (or
-// socks4a://), with an optional user:password@ and port, 80 for http://
-// and 1080 for SOCKS by default. The proxy resolves the destination.
+// client: http://, https://, socks5:// (or socks5h://) and socks4:// (or
+// socks4a://), with an optional user:password@ and port, 80 for http://,
+// 443 for https:// and 1080 for SOCKS by default. The proxy resolves the
+// destination.
+//
+// An HTTPS proxy is reached over TLS with the ClientHello of the profile,
+// its certificate verified as a server's, and ALPN offering http/1.1
+// only: Chrome also offers h2 and then tunnels over HTTP/2 streams. It is
+// then used as an HTTP proxy.
 //
 // An HTTP proxy gets https:// requests over a CONNECT tunnel, with the
 // User-Agent of the profile as Chrome sends it, and http:// requests as

@@ -23,7 +23,7 @@ var ErrProxyAuth = errors.New("eidolon: proxy authentication failed")
 
 // Proxy is a parsed proxy URL.
 type Proxy struct {
-	// Scheme is socks4 (SOCKS4a), socks5 or http (CONNECT).
+	// Scheme is socks4 (SOCKS4a), socks5, or http and https (CONNECT).
 	Scheme string
 	// Addr is the host:port of the proxy.
 	Addr string
@@ -35,9 +35,10 @@ type Proxy struct {
 	UserAgent string
 }
 
-// Parse parses a proxy URL: http://, socks4://, socks4a:// and socks5://
-// or socks5h://, with an optional user:password@ and port, 80 for http://
-// and 1080 for SOCKS by default as in Chrome (GetDefaultPortForSchemeTyped).
+// Parse parses a proxy URL: http://, https://, socks4://, socks4a:// and
+// socks5:// or socks5h://, with an optional user:password@ and port, 80
+// for http://, 443 for https:// and 1080 for SOCKS by default as in Chrome
+// (GetDefaultPortForSchemeTyped).
 // socks4:// is taken as SOCKS4a, and socks5:// sends the name, as Chrome's:
 // the proxy resolves the destination. SOCKS4 has no password.
 func Parse(raw string) (*Proxy, error) {
@@ -50,6 +51,8 @@ func Parse(raw string) (*Proxy, error) {
 	switch u.Scheme {
 	case "http":
 		p.Scheme, port = "http", "80"
+	case "https":
+		p.Scheme, port = "https", "443"
 	case "socks4", "socks4a":
 		p.Scheme = "socks4"
 	case "socks5", "socks5h":
@@ -95,7 +98,7 @@ func (p *Proxy) Tunnel(ctx context.Context, conn net.Conn, addr string) error {
 	switch p.Scheme {
 	case "socks4":
 		err = p.socks4(conn, host, port)
-	case "http":
+	case "http", "https":
 		err = p.connect(conn, addr)
 	default:
 		err = p.socks5(conn, host, port)

@@ -2,6 +2,7 @@ package eidolon_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -229,6 +230,77 @@ func TestProxyHTTPAuth(t *testing.T) {
 		if n := tt.srv.Accepted(); n != 0 {
 			t.Errorf("%s: %d connections reached the server, want 0", tt.url, n)
 		}
+	}
+}
+
+// An HTTPS proxy gets the ClientHello of the profile with its name and
+// ALPN http/1.1 only, then a CONNECT for https:// and the request as it is
+// for http://.
+func TestProxyHTTPS(t *testing.T) {
+	cert, err := lab.NewCertificate(time.Hour, "site.test", "proxy.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := lab.Start(t, lab.Options{Certificate: &cert})
+	plain := lab.Start(t, lab.Options{Certificate: &cert, Plain: true})
+	for _, tt := range []struct {
+		srv  *lab.Server
+		url  string
+		head string
+	}{
+		{srv, "https://site.test/", "CONNECT site.test:443 HTTP/1.1\r\n"},
+		{plain, "http://site.test/", "GET http://site.test/ HTTP/1.1\r\n"},
+	} {
+		p := lab.StartHTTPSProxy(t, tt.srv.Addr, "Basic dXNlcjpwYXNz", cert)
+		var dialed []string
+		c := proxyClient(t, tt.srv, "https://user:pass@proxy.test", eidolon.WithDialContext(func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialed = append(dialed, addr)
+			var d net.Dialer
+			return d.DialContext(ctx, network, p.Addr)
+		}))
+		if _, err := echGet(c, tt.url); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(dialed, []string{"proxy.test:443"}) {
+			t.Errorf("%s: dialed %q, want the proxy on 443", tt.url, dialed)
+		}
+		hellos := p.Hellos()
+		if len(hellos) != 1 || hellos[0].ServerName != "proxy.test" || !slices.Equal(hellos[0].SupportedProtos, []string{"http/1.1"}) {
+			t.Fatalf("%s: hellos %+v, want proxy.test with http/1.1", tt.url, hellos)
+		}
+		if heads := p.Heads(); len(heads) != 1 || !strings.HasPrefix(heads[0], tt.head) || !strings.Contains(heads[0], "\r\nProxy-Authorization: Basic dXNlcjpwYXNz\r\n") {
+			t.Errorf("%s: heads %q, want %q with the credentials", tt.url, heads, tt.head)
+		}
+	}
+	// An IP address is verified against the certificate and sent without
+	// SNI, as Chrome.
+	p := lab.StartHTTPSProxy(t, srv.Addr, "", cert)
+	if _, err := echGet(proxyClient(t, srv, "https://"+p.Addr), "https://site.test/"); err != nil {
+		t.Fatal(err)
+	}
+	if hellos := p.Hellos(); len(hellos) != 1 || hellos[0].ServerName != "" {
+		t.Errorf("hellos %+v, want one without SNI", hellos)
+	}
+	// StrictTLS12 applies to the proxy.
+	rsaCert := rsaCertificate(t)
+	srv.RootCAs.AddCert(rsaCert.Leaf)
+	p = lab.StartHTTPSProxy(t, srv.Addr, "", *rsaCert, func(c *tls.Config) {
+		c.MaxVersion = tls.VersionTLS12
+		c.CipherSuites = []uint16{tls.TLS_RSA_WITH_AES_128_GCM_SHA256}
+	})
+	_, err = echGet(proxyClient(t, srv, "https://"+p.Addr, eidolon.WithStrictTLS12()), "https://site.test/")
+	if !errors.Is(err, eidolon.ErrProxy) || !errors.Is(err, eidolon.ErrTLS12Policy) {
+		t.Errorf("weak proxy: %v, want ErrProxy and ErrTLS12Policy", err)
+	}
+	// The certificate of the proxy is verified.
+	other, err := lab.NewCertificate(time.Hour, "proxy.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = lab.StartHTTPSProxy(t, srv.Addr, "", other)
+	_, err = echGet(proxyClient(t, srv, "https://"+p.Addr), "https://site.test/")
+	if !errors.Is(err, eidolon.ErrProxy) || !errors.Is(err, eidolon.ErrCertificate) {
+		t.Errorf("untrusted proxy: %v, want ErrProxy and ErrCertificate", err)
 	}
 }
 

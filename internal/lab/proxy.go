@@ -2,6 +2,7 @@ package lab
 
 import (
 	"bufio"
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -184,10 +185,11 @@ func readCString(c net.Conn) (string, bool) {
 	return "", false
 }
 
-// HTTPProxy is an HTTP proxy for tests: a CONNECT opens a tunnel, and any
-// other request is forwarded. Either way the connection then goes to
-// Upstream as it is, whatever the destination, and the head of the first
-// request of each connection is recorded.
+// HTTPProxy is an HTTP proxy for tests, over TLS when started by
+// StartHTTPSProxy: a CONNECT opens a tunnel, and any other request is
+// forwarded. Either way the connection then goes to Upstream as it is,
+// whatever the destination, and the head of the first request of each
+// connection is recorded.
 type HTTPProxy struct {
 	// Addr is the listening address, on 127.0.0.1.
 	Addr string
@@ -197,21 +199,51 @@ type HTTPProxy struct {
 	// without it the proxy answers 407.
 	Authorization string
 
-	ln    net.Listener
-	mu    sync.Mutex
-	heads []string
-	wg    sync.WaitGroup
+	ln     net.Listener
+	mu     sync.Mutex
+	heads  []string
+	hellos []*tls.ClientHelloInfo
+	wg     sync.WaitGroup
 }
 
 // StartHTTPProxy starts an HTTP proxy to upstream, closed when the test
 // ends.
 func StartHTTPProxy(tb testing.TB, upstream, authorization string) *HTTPProxy {
 	tb.Helper()
+	return startHTTPProxy(tb, upstream, authorization, nil)
+}
+
+// StartHTTPSProxy starts an HTTP proxy over TLS with cert, offering h2
+// and http/1.1, closed when the test ends. adjust, when given, changes
+// the TLS config before use.
+func StartHTTPSProxy(tb testing.TB, upstream, authorization string, cert tls.Certificate, adjust ...func(*tls.Config)) *HTTPProxy {
+	tb.Helper()
+	return startHTTPProxy(tb, upstream, authorization, &cert, adjust...)
+}
+
+func startHTTPProxy(tb testing.TB, upstream, authorization string, cert *tls.Certificate, adjust ...func(*tls.Config)) *HTTPProxy {
+	tb.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		tb.Fatal(err)
 	}
 	p := &HTTPProxy{Addr: ln.Addr().String(), Upstream: upstream, Authorization: authorization, ln: ln}
+	if cert != nil {
+		conf := &tls.Config{
+			Certificates: []tls.Certificate{*cert},
+			NextProtos:   []string{"h2", "http/1.1"},
+			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+				p.mu.Lock()
+				p.hellos = append(p.hellos, hello)
+				p.mu.Unlock()
+				return nil, nil
+			},
+		}
+		for _, f := range adjust {
+			f(conf)
+		}
+		ln = tls.NewListener(ln, conf)
+	}
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
@@ -240,6 +272,13 @@ func (p *HTTPProxy) Heads() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.heads...)
+}
+
+// Hellos returns the ClientHello of each TLS connection, in order.
+func (p *HTTPProxy) Hellos() []*tls.ClientHelloInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]*tls.ClientHelloInfo(nil), p.hellos...)
 }
 
 func (p *HTTPProxy) serve(c net.Conn) {

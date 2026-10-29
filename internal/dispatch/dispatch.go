@@ -524,17 +524,23 @@ func rewindBody(req *http.Request) (*http.Request, bool) {
 // variable for the tests.
 var dialTimeout = 30 * time.Second
 
-// dialTLS opens a TLS connection to tgt and records its protocol for key.
-// It stops at ctx or after dialTimeout.
-func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) (*utls.UConn, error) {
-	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
-	defer cancel()
+// tlsConfig returns a copy of the TLS settings for serverName.
+func (t *Transport) tlsConfig(serverName string) *utls.Config {
 	cfg := t.TLS
 	if cfg == nil {
 		cfg = &utls.Config{}
 	}
 	cfg = cfg.Clone()
-	cfg.ServerName = tgt.ServerName()
+	cfg.ServerName = serverName
+	return cfg
+}
+
+// dialTLS opens a TLS connection to tgt and records its protocol for key.
+// It stops at ctx or after dialTimeout.
+func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) (*utls.UConn, error) {
+	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	cfg := t.tlsConfig(tgt.ServerName())
 	cfg.EncryptedClientHelloConfigList = t.ECH[tgt.Origin()]
 	t.mu.Lock()
 	protos := t.offerLocked(key)
@@ -707,7 +713,13 @@ func (t *Transport) proxyDial(ctx context.Context, network, addr string) (net.Co
 	if dial == nil {
 		dial = systemDial
 	}
-	conn, err := dial(ctx, network, t.Proxy.Addr)
+	var conn net.Conn
+	var err error
+	if t.Proxy.Scheme == "https" {
+		conn, err = t.proxyTLS(ctx, network, dial)
+	} else {
+		conn, err = dial(ctx, network, t.Proxy.Addr)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", proxy.ErrProxy, err)
 	}
@@ -720,10 +732,29 @@ func (t *Transport) proxyDial(ctx context.Context, network, addr string) (net.Co
 	return t.track(conn)
 }
 
+// proxyTLS opens a TLS connection to an HTTPS proxy with the ClientHello
+// of the profile, verified as a server, its name in the SNI. ALPN offers
+// http/1.1 only: Chrome also offers h2 and then tunnels over HTTP/2
+// streams (SpdyProxyClientSocket), which is not done here. StrictTLS12
+// applies to it too.
+func (t *Transport) proxyTLS(ctx context.Context, network string, dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
+	host, _, _ := net.SplitHostPort(t.Proxy.Addr)
+	conn, err := tlsdial.Dial(ctx, network, t.Proxy.Addr, tlsdial.Config{
+		Spec:        t.spec([]string{tlsdial.ProtoHTTP1}),
+		TLS:         t.tlsConfig(host),
+		DialContext: dial,
+		StrictTLS12: t.StrictTLS12,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
 // forwards reports whether http:// requests go to the proxy as they are:
-// an HTTP proxy, as Chrome (UsingHttpProxyWithoutTunnel).
+// an HTTP or HTTPS proxy, as Chrome (UsingHttpProxyWithoutTunnel).
 func (t *Transport) forwards() bool {
-	return t.Proxy != nil && t.Proxy.Scheme == "http"
+	return t.Proxy != nil && (t.Proxy.Scheme == "http" || t.Proxy.Scheme == "https")
 }
 
 // track registers conn until it is closed, or closes it after Close.
