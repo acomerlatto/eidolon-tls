@@ -1630,8 +1630,12 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 	first := true // first frame written (HEADERS is first, then CONTINUATION)
 	for len(hdrs) > 0 && cc.werr == nil {
 		chunk := hdrs
-		if len(chunk) > maxFrameSize {
-			chunk = chunk[:maxFrameSize]
+		size := maxFrameSize
+		if first && !prio.IsZero() {
+			size -= 5 // [eidolon] the priority fields count in the payload
+		}
+		if len(chunk) > size {
+			chunk = chunk[:size]
 		}
 		hdrs = hdrs[len(chunk):]
 		endHeaders := len(hdrs) == 0

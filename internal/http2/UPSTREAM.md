@@ -48,6 +48,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0028-chromium-errors.patch`
 - `scripts/xnet-patches/0029-chromium-alps.patch`
 - `scripts/xnet-patches/0030-chromium-stream-limit.patch`
+- `scripts/xnet-patches/0031-headers-priority-size.patch`
 
 ## Excluded files
 
