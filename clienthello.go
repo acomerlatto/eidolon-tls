@@ -39,11 +39,14 @@ func WithShuffledExtensions() ClientHelloOption {
 // implement, a capability it cannot honor (such as early_data), a key
 // share outside supported_groups or two of one group, ALPS for a protocol
 // ALPN does not offer, or TLS 1.3 without key_share, supported_groups or
-// signature_algorithms return an error that wraps ErrProfile. raw is
-// copied.
+// signature_algorithms return an error that wraps ErrProfile, and a nil
+// option one that wraps ErrConfig. raw is copied.
 func ClientHelloFromRaw(raw []byte, opts ...ClientHelloOption) (func() (*utls.ClientHelloSpec, error), error) {
 	var cfg clientHelloConfig
 	for _, o := range opts {
+		if o == nil {
+			return nil, fmt.Errorf("ClientHelloFromRaw: %w: nil option", ErrConfig)
+		}
 		o(&cfg)
 	}
 	record, err := clientHelloRecord(raw)

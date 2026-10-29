@@ -129,4 +129,7 @@ func TestClientHelloFromRawInvalid(t *testing.T) {
 			t.Errorf("%s: %v, want ErrProfile", name, err)
 		}
 	}
+	if _, err := eidolon.ClientHelloFromRaw(record, nil); !errors.Is(err, eidolon.ErrConfig) {
+		t.Errorf("nil option: %v, want ErrConfig", err)
+	}
 }
