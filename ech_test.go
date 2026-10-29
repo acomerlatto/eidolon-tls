@@ -351,3 +351,128 @@ func TestECHConfigInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// helloExtension returns the body of extension typ of a ClientHello
+// handshake message, and whether it is there.
+func helloExtension(t *testing.T, hello []byte, typ uint16) ([]byte, bool) {
+	t.Helper()
+	b := hello[4+2+32:]
+	b = b[1+int(b[0]):]
+	b = b[2+(int(b[0])<<8|int(b[1])):]
+	b = b[1+int(b[0]):]
+	b = b[2 : 2+(int(b[0])<<8|int(b[1]))]
+	for len(b) >= 4 {
+		n := int(b[2])<<8 | int(b[3])
+		if uint16(b[0])<<8|uint16(b[1]) == typ {
+			return b[4 : 4+n], true
+		}
+		b = b[4+n:]
+	}
+	return nil, false
+}
+
+// The ClientHelloOuter of the Chrome profile has the extensions of its
+// ClientHello without ECH, as BoringSSL aligns them, and carries no ticket
+// or PSK, even after the server sent tickets on an earlier connection:
+// the ECH path keeps no session. Its encrypted_client_hello is of type
+// outer, with the configuration's suite and id, and a payload of a padded
+// ClientHelloInner.
+func TestECHOuter(t *testing.T) {
+	srv, list := echLab(t)
+	c := profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()), eidolon.WithECHConfig(echSecret, list))
+	var hellos [][]byte
+	for _, url := range []string{"https://" + echSecret + "/", "https://" + echSecret + "/", "https://other.test/"} {
+		resp, err := echGet(c, url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hellos = append(hellos, srv.NextConn(t).ClientHello)
+		c.CloseIdleConnections()
+		if resp.TLS.DidResume {
+			t.Errorf("%s: session resumed", url)
+		}
+	}
+	// sorted returns the extension types of hello in order, every GREASE
+	// value as 0x0a0a.
+	sorted := func(hello []byte) []uint16 {
+		types := helloExtensions(t, hello)
+		for i, typ := range types {
+			if typ&0x0f0f == 0x0a0a && typ>>8 == typ&0xff {
+				types[i] = 0x0a0a
+			}
+		}
+		slices.Sort(types)
+		return types
+	}
+	plain := sorted(hellos[2])
+	for i, hello := range hellos[:2] {
+		if got := sorted(hello); !slices.Equal(got, plain) {
+			t.Errorf("connection %d: outer extensions %d, without ECH %d", i, got, plain)
+		}
+		if ticket, _ := helloExtension(t, hello, 35); len(ticket) != 0 {
+			t.Errorf("connection %d: session ticket in the outer", i)
+		}
+		if _, ok := helloExtension(t, hello, 41); ok {
+			t.Errorf("connection %d: pre_shared_key in the outer", i)
+		}
+		ech, _ := helloExtension(t, hello, 0xfe0d)
+		// type, KDF, AEAD, config id, enc (32 bytes), payload
+		if len(ech) < 1+2+2+1+2+32+2 || ech[0] != 0 || !bytes.Equal(ech[1:6], []byte{0, 1, 0, 1, 1}) ||
+			int(ech[6])<<8|int(ech[7]) != 32 {
+			t.Fatalf("connection %d: encrypted_client_hello %x", i, ech[:min(len(ech), 8)])
+		}
+		payload := ech[8+32+2:]
+		if n := int(ech[40])<<8 | int(ech[41]); n != len(payload) || (n-16)%32 != 0 {
+			t.Errorf("connection %d: payload of %d bytes, not a padded ClientHelloInner", i, len(payload))
+		}
+	}
+}
+
+// The ClientHelloInner of the Chrome profile, read by crypto/tls, has the
+// cipher suites, versions and extensions of Chrome: GREASE and TLS 1.3
+// suites, TLS 1.3 alone, and no TLS 1.2 extension.
+func TestECHInnerChrome156(t *testing.T) {
+	list, key, err := lab.NewECHKey(1, echPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := lab.NewCertificate(time.Hour, echSecret, echPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := make(chan *tls.ClientHelloInfo, 1)
+	srv := lab.Start(t, lab.Options{
+		Certificate: &cert,
+		TLS: func(c *tls.Config) {
+			c.EncryptedClientHelloKeys = []tls.EncryptedClientHelloKey{key}
+			c.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+				inner <- chi
+				return nil, nil
+			}
+		},
+	})
+	c := profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()), eidolon.WithECHConfig(echSecret, list))
+	if _, err := echGet(c, "https://"+echSecret+"/"); err != nil {
+		t.Fatal(err)
+	}
+	chi := <-inner
+	if chi.ServerName != echSecret {
+		t.Errorf("inner name %q", chi.ServerName)
+	}
+	if len(chi.CipherSuites) != 4 || !slices.Equal(chi.CipherSuites[1:], []uint16{0x1301, 0x1302, 0x1303}) {
+		t.Errorf("inner cipher suites %x", chi.CipherSuites)
+	}
+	if len(chi.SupportedVersions) != 2 || chi.SupportedVersions[1] != tls.VersionTLS13 {
+		t.Errorf("inner versions %x", chi.SupportedVersions)
+	}
+	for _, typ := range chi.Extensions {
+		switch typ {
+		case 23, 0xff01, 35, 11, 41: // EMS, renegotiation_info, session_ticket, ec_point_formats, PSK
+			t.Errorf("inner has extension %d", typ)
+		}
+	}
+	outer := helloExtensions(t, srv.NextConn(t).ClientHello)
+	if want := len(outer) - 4; len(chi.Extensions) != want {
+		t.Errorf("inner has %d extensions, want %d: %d", len(chi.Extensions), want, chi.Extensions)
+	}
+}
