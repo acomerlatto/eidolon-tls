@@ -296,6 +296,21 @@ func (c *Conn) Reuse() bool {
 	return errors.Is(err, os.ErrDeadlineExceeded)
 }
 
+// Idle reports, without waiting, whether the connection can carry a new
+// request: the server neither sent anything after the last response nor
+// closed it, in what was already read or, on Unix, in the socket. It is
+// for a connection that is not watched. A read with a deadline in the
+// past does not look at the socket.
+func (c *Conn) Idle() bool {
+	c.conn.SetReadDeadline(time.Unix(1, 0)) // in the past: the peek does not wait
+	_, err := c.br.Peek(1)
+	c.conn.SetReadDeadline(time.Time{})
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		return false
+	}
+	return !peekSocket(c.conn)
+}
+
 // readFailed reports whether err comes from reading the connection, as
 // opposed to parsing what was read. ReadResponse reports an early io.EOF
 // as io.ErrUnexpectedEOF; io.ErrClosedPipe comes from in-memory

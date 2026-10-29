@@ -168,6 +168,73 @@ func TestH1PoolWaiterOwnContext(t *testing.T) {
 	}
 }
 
+// A connection is handed to a waiting request only if the server neither
+// sent bytes after the response nor closed it, as for an idle one: the
+// waiter gets a new connection, and neither reads the extra bytes as its
+// response nor sends a body it cannot replay on a dead connection.
+func TestH1PoolWaiterGetsCheckedConnection(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		raw   string
+		close bool
+	}{
+		{"bytes after the response", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokHTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nbad", false},
+		{"closed by the server", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			answered := make(chan struct{})
+			srv, base := h1Lab(t, false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/first" {
+					c, buf, _ := http.NewResponseController(w).Hijack()
+					buf.WriteString(tt.raw)
+					buf.Flush()
+					if tt.close {
+						c.Close()
+					}
+					close(answered)
+					if !tt.close {
+						io.Copy(io.Discard, c)
+						c.Close()
+					}
+					return
+				}
+				body, _ := io.ReadAll(r.Body)
+				io.WriteString(w, "second "+string(body))
+			}))
+			tr := transport(srv)
+			tr.MaxConnsPerHost = 1
+			defer tr.Close()
+
+			req, _ := http.NewRequest(http.MethodGet, base+"/first", nil)
+			resp, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-answered
+			got := make(chan string, 1)
+			go func() {
+				// A body without GetBody cannot be replayed.
+				body, err := send(context.Background(), tr, http.MethodPost, base+"/second", io.NopCloser(strings.NewReader("data")))
+				if err != nil {
+					body = err.Error()
+				}
+				got <- body
+			}()
+			time.Sleep(50 * time.Millisecond) // the second request waits
+			if b, _ := io.ReadAll(resp.Body); string(b) != "ok" {
+				t.Fatalf("first body %q", b)
+			}
+			resp.Body.Close()
+			if b := <-got; b != "second data" {
+				t.Fatalf("second: %q, want %q", b, "second data")
+			}
+			if n := srv.Accepted(); n != 2 {
+				t.Fatalf("%d connections, want 2", n)
+			}
+		})
+	}
+}
+
 // Close wakes the requests waiting for a connection.
 func TestH1PoolCloseWakesWaiters(t *testing.T) {
 	release := make(chan struct{})

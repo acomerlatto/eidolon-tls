@@ -616,3 +616,54 @@ func TestRoundTripLostNotMalformed(t *testing.T) {
 		})
 	}
 }
+
+// Idle sees in the socket what the server did after the last response:
+// a byte, the end of the stream or a reset make the connection unusable;
+// nothing keeps it idle.
+func TestConnIdle(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		server func(c *net.TCPConn)
+		idle   bool
+	}{
+		{"nothing", func(c *net.TCPConn) {}, true},
+		{"byte", func(c *net.TCPConn) { c.Write([]byte("x")) }, false},
+		{"end of the stream", func(c *net.TCPConn) { c.CloseWrite() }, false},
+		{"reset", func(c *net.TCPConn) { c.SetLinger(0); c.Close() }, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			dialed, stop := make(chan struct{}), make(chan struct{})
+			defer close(stop)
+			go func() {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer c.Close()
+				<-dialed // a reset before would fail the dial
+				tt.server(c.(*net.TCPConn))
+				<-stop
+			}()
+			raw, err := net.Dial("tcp", ln.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			close(dialed)
+			c := http1.NewConn(raw)
+			// The server's action reaches the socket a little later.
+			idle := c.Idle()
+			for end := time.Now().Add(time.Second); idle && !tt.idle && time.Now().Before(end); idle = c.Idle() {
+				time.Sleep(time.Millisecond)
+			}
+			if idle != tt.idle {
+				t.Fatalf("Idle = %v, want %v", idle, tt.idle)
+			}
+		})
+	}
+}

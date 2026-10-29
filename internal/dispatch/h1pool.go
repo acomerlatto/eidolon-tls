@@ -191,15 +191,25 @@ func (t *Transport) h1Closed(c *h1Conn) {
 }
 
 // h1Put returns a connection whose response ended to the pool: to the
-// first waiter, or idle, watched until it is reused.
+// first waiter, or idle, watched until it is reused. A waiter gets it only
+// if the server neither sent anything nor closed it, as the idle path
+// checks in Reuse; otherwise it is closed and the waiter gets its slot.
 func (t *Transport) h1Put(c *h1Conn) {
 	t.mu.Lock()
+	h := t.h1HostLocked(c.key)
+	if !t.closed && len(h.waiters) > 0 {
+		t.mu.Unlock()
+		if !c.Idle() {
+			c.close()
+			return
+		}
+		t.mu.Lock()
+	}
 	if t.closed {
 		t.mu.Unlock()
 		c.close()
 		return
 	}
-	h := t.h1HostLocked(c.key)
 	if len(h.waiters) > 0 {
 		t.grantLocked(h, c)
 		t.mu.Unlock()

@@ -649,6 +649,10 @@ type trackedConn struct {
 	once sync.Once
 }
 
+// NetConn returns the connection c wraps, as tls.Conn does, for a peek
+// at its socket (http1.Conn.Idle).
+func (c *trackedConn) NetConn() net.Conn { return c.Conn }
+
 func (c *trackedConn) Close() error {
 	c.once.Do(func() {
 		c.t.mu.Lock()
