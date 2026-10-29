@@ -155,25 +155,151 @@ func TestECHModes(t *testing.T) {
 	}
 }
 
-// A server that cannot decrypt ClientHelloInner rejects ECH: the request
-// fails with ErrECHRejected, which keeps the utls.ECHRejectionError, and
-// no HTTP byte is sent.
-func TestECHRejected(t *testing.T) {
-	srv, _ := echLab(t)
-	other, _, err := lab.NewECHKey(2, echPublic)
+// echRejectingLab starts a lab server with a certificate for names that
+// cannot decrypt the ECH configuration the client gets, the list it
+// returns, and answers with keys as its retry configurations.
+func echRejectingLab(t *testing.T, names []string, keys ...tls.EncryptedClientHelloKey) (*lab.Server, []byte) {
+	t.Helper()
+	stale, _, err := lab.NewECHKey(9, echPublic)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()), eidolon.WithECHConfig(echSecret, other))
-	_, err = echGet(c, "https://"+echSecret+"/")
-	var re *utls.ECHRejectionError
-	if !errors.Is(err, eidolon.ErrECHRejected) || !errors.As(err, &re) || len(re.RetryConfigList) == 0 {
-		t.Fatalf("error %v, want ErrECHRejected with retry configurations", err)
+	cert, err := lab.NewCertificate(time.Hour, names...)
+	if err != nil {
+		t.Fatal(err)
 	}
-	conn := srv.NextConn(t)
+	srv := lab.Start(t, lab.Options{
+		Certificate: &cert,
+		TLS:         func(c *tls.Config) { c.EncryptedClientHelloKeys = keys },
+	})
+	return srv, stale
+}
+
+// echKey returns a new ECH key for echPublic.
+func echKey(t *testing.T) tls.EncryptedClientHelloKey {
+	t.Helper()
+	_, key, err := lab.NewECHKey(1, echPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// checkRejected checks that conn, a connection whose server rejected ECH,
+// carried no HTTP byte. The server completes its handshake before the
+// client's ech_required alert.
+func checkRejected(t *testing.T, conn *lab.Conn) {
+	t.Helper()
 	<-conn.Done()
+	if conn.State.ECHAccepted {
+		t.Error("the rejected connection has ECH accepted")
+	}
 	if n := len(conn.Bytes()); n != 0 {
-		t.Errorf("server read %d bytes after the handshake", n)
+		t.Errorf("server read %d bytes after the rejection", n)
+	}
+}
+
+// A server that cannot decrypt ClientHelloInner rejects ECH and sends its
+// retry configurations, authenticated by a certificate for the public
+// name: the request goes over one new connection that offers ECH with
+// them, in both modes.
+func TestECHRetryConfigs(t *testing.T) {
+	for _, mode := range []eidolon.ECHMode{eidolon.ECHAuto, eidolon.ECHRequired} {
+		key := echKey(t)
+		key.SendAsRetry = true
+		srv, stale := echRejectingLab(t, []string{echSecret, echPublic}, key)
+		c := profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()),
+			eidolon.WithECHConfig(echSecret, stale), eidolon.WithECHMode(mode))
+		resp, err := echGet(c, "https://"+echSecret+"/")
+		if err != nil {
+			t.Fatalf("mode %d: %v", mode, err)
+		}
+		checkRejected(t, srv.NextConn(t))
+		conn := srv.NextConn(t)
+		if !resp.TLS.ECHAccepted || !conn.State.ECHAccepted || conn.State.ServerName != echSecret {
+			t.Errorf("mode %d: retry with ECH accepted %v, server name %q", mode, resp.TLS.ECHAccepted, conn.State.ServerName)
+		}
+	}
+}
+
+// Without usable retry configurations, ECHAuto sends the request over one
+// new connection with the GREASE ECH of the profile, as Chrome, and
+// ECHRequired fails with ErrECHRequired and ErrECHRejected.
+func TestECHRetryWithoutConfigs(t *testing.T) {
+	unsupported := echKey(t)
+	unsupported.SendAsRetry = true
+	unsupported.Config = bytes.Clone(unsupported.Config)
+	unsupported.Config[0], unsupported.Config[1] = 0xfe, 0x0c // an older version
+	for _, tt := range []struct {
+		name string
+		keys []tls.EncryptedClientHelloKey
+	}{
+		{"none sent", nil},
+		{"none supported", []tls.EncryptedClientHelloKey{unsupported}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, stale := echRejectingLab(t, []string{echSecret, echPublic}, tt.keys...)
+			c := profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()), eidolon.WithECHConfig(echSecret, stale))
+			resp, err := echGet(c, "https://"+echSecret+"/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkRejected(t, srv.NextConn(t))
+			conn := srv.NextConn(t)
+			if resp.TLS.ECHAccepted || conn.State.ServerName != echSecret || !slices.Contains(helloExtensions(t, conn.ClientHello), 0xfe0d) {
+				t.Errorf("retry: ECH accepted %v, server name %q, extensions %d", resp.TLS.ECHAccepted, conn.State.ServerName, helloExtensions(t, conn.ClientHello))
+			}
+
+			srv, stale = echRejectingLab(t, []string{echSecret, echPublic}, tt.keys...)
+			c = profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()),
+				eidolon.WithECHConfig(echSecret, stale), eidolon.WithECHMode(eidolon.ECHRequired))
+			_, err = echGet(c, "https://"+echSecret+"/")
+			if !errors.Is(err, eidolon.ErrECHRequired) || !errors.Is(err, eidolon.ErrECHRejected) {
+				t.Fatalf("ECHRequired: %v, want ErrECHRequired and ErrECHRejected", err)
+			}
+			checkRejected(t, srv.NextConn(t))
+			if n := srv.Accepted(); n != 1 {
+				t.Errorf("ECHRequired: %d connections, want 1", n)
+			}
+		})
+	}
+}
+
+// The retry is made once: a server that rejects it too fails the request
+// with ErrECHRejected, which keeps the utls.ECHRejectionError, and no HTTP
+// byte is sent.
+func TestECHRejectedTwice(t *testing.T) {
+	key := echKey(t)
+	key.PrivateKey = echKey(t).PrivateKey // the server cannot decrypt its own configuration
+	key.SendAsRetry = true
+	srv, stale := echRejectingLab(t, []string{echSecret, echPublic}, key)
+	c := profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()), eidolon.WithECHConfig(echSecret, stale))
+	_, err := echGet(c, "https://"+echSecret+"/")
+	var re *utls.ECHRejectionError
+	if !errors.Is(err, eidolon.ErrECHRejected) || !errors.As(err, &re) || !bytes.Contains(re.RetryConfigList, key.Config) {
+		t.Fatalf("error %v, want ErrECHRejected with the retry configurations", err)
+	}
+	checkRejected(t, srv.NextConn(t))
+	checkRejected(t, srv.NextConn(t))
+	if n := srv.Accepted(); n != 2 {
+		t.Errorf("%d connections, want 2", n)
+	}
+}
+
+// A rejection is authenticated for the public name of the configuration:
+// a certificate for the origin's name alone fails the request with
+// ErrCertificate, without a retry.
+func TestECHRejectionCertificate(t *testing.T) {
+	key := echKey(t)
+	key.SendAsRetry = true
+	srv, stale := echRejectingLab(t, []string{echSecret}, key)
+	c := profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()), eidolon.WithECHConfig(echSecret, stale))
+	if _, err := echGet(c, "https://"+echSecret+"/"); !errors.Is(err, eidolon.ErrCertificate) {
+		t.Fatalf("error %v, want ErrCertificate", err)
+	}
+	checkRejected(t, srv.NextConn(t))
+	if n := srv.Accepted(); n != 1 {
+		t.Errorf("%d connections, want 1", n)
 	}
 }
 

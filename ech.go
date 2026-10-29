@@ -20,12 +20,22 @@ type ECHMode int
 const (
 	// ECHAuto, the default, offers ECH to an origin with an ECH
 	// configuration (WithECHConfig) and sends the GREASE ECH of the
-	// profile to the others, as Chrome (kOpportunistic).
+	// profile to the others, as Chrome (kOpportunistic). When the server
+	// rejects ECH, authenticated by a certificate for the public name of
+	// the configuration, the request goes over one new connection, within
+	// the same dial deadline: with the retry configurations the server
+	// sent, or, without usable ones, with the GREASE ECH of the profile,
+	// as Chrome does (RFC 9849, Section 6.1.6, would disable ECH). The
+	// rejected connection carries no HTTP byte; a second rejection fails
+	// with ErrECHRejected. Retry configurations are not kept: the next
+	// connection starts from WithECHConfig again.
 	ECHAuto ECHMode = iota
 	// ECHRequired completes a request only over a connection whose server
 	// accepted ECH, as Chrome's kStrict: a request to an origin without an
 	// ECH configuration, http:// included, fails with ErrECHRequired
-	// before any dial, and GREASE ECH does not count.
+	// before any dial, and GREASE ECH does not count. A rejection is
+	// retried as in ECHAuto with the retry configurations; without usable
+	// ones, the request fails with ErrECHRequired and ErrECHRejected.
 	ECHRequired
 	// ECHDisabled never offers ECH. The profile still sends its GREASE
 	// ECH: unlike Chrome's kDisabled, which leaves the extension out, the

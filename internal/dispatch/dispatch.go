@@ -528,12 +528,17 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 	t.mu.Lock()
 	protos := t.offerLocked(key)
 	t.mu.Unlock()
-	conn, err := tlsdial.Dial(ctx, "tcp", tgt.Addr(), tlsdial.Config{
+	dc := tlsdial.Config{
 		Spec:        t.spec(protos),
 		TLS:         cfg,
 		DialContext: t.trackedDial,
 		StrictTLS12: t.StrictTLS12,
-	})
+	}
+	conn, err := tlsdial.Dial(ctx, "tcp", tgt.Addr(), dc)
+	var re *utls.ECHRejectionError
+	if errors.As(err, &re) {
+		conn, err = t.retryECH(ctx, tgt, dc, re.RetryConfigList, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -551,6 +556,23 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 		return nil, fmt.Errorf("%w: %s", ErrHTTP2InadequateSecurity, utls.CipherSuiteName(st.CipherSuite))
 	}
 	return conn, nil
+}
+
+// retryECH dials tgt once more after the server rejected ECH with err, as
+// Chrome's TlsStreamAttempt: with the retry configurations of the
+// authenticated rejection, or, without usable ones, with the GREASE ECH
+// of the profile, except with ECHRequired. A second rejection is an
+// error. It runs within the deadline of the first dial.
+func (t *Transport) retryECH(ctx context.Context, tgt target.Target, dc tlsdial.Config, retry []byte, err error) (*utls.UConn, error) {
+	if len(retry) > 0 && tlsdial.Check(tlsdial.Config{Spec: dc.Spec, TLS: &utls.Config{EncryptedClientHelloConfigList: retry}}) != nil {
+		retry = nil
+	}
+	if retry == nil && t.ECHRequired {
+		return nil, fmt.Errorf("%w: %w", ErrECHRequired, err)
+	}
+	// dc.TLS is the clone of this dial.
+	dc.TLS.EncryptedClientHelloConfigList = retry
+	return tlsdial.Dial(ctx, "tcp", tgt.Addr(), dc)
 }
 
 // spec returns the spec function of a connection that offers protos, or

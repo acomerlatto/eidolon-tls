@@ -41,8 +41,10 @@ var (
 	// without an ECH configuration, or to an http:// URL. No connection
 	// is opened.
 	ErrECHRequired = dispatch.ErrECHRequired
-	// ErrECHRejected reports a server that rejected ECH. The
-	// utls.ECHRejectionError stays in the chain; no HTTP byte is sent.
+	// ErrECHRejected reports a server that rejected ECH also on the
+	// connection that retried it (see ECHAuto), or, with ECHRequired,
+	// without usable retry configurations. The utls.ECHRejectionError
+	// stays in the chain; no HTTP byte is sent.
 	ErrECHRejected = tlsdial.ErrECHRejected
 	// ErrTLS12Policy reports a TLS 1.2 connection refused by
 	// WithStrictTLS12.
