@@ -16,6 +16,7 @@ const (
 	extCompressCert      = 27
 	extPreSharedKey      = 41
 	extSupportedVersions = 43
+	extPSKModes          = 45
 	extKeyShare          = 51
 	extALPSOld           = 17513
 	extALPS              = 17613
@@ -67,12 +68,13 @@ func implementedSuite(suite uint16) bool {
 	return false
 }
 
-// checkHello checks a marshalled ClientHello handshake message: no
-// extension twice, pre_shared_key last, no capability the stack cannot
-// honor (cipher suites, groups, signature schemes,
-// certificate compression, refusedExtensions), key shares among the
-// supported groups, ALPS only for protocols ALPN offers, and with TLS 1.3
-// the extensions it needs. Every error wraps ErrProfile.
+// checkHello checks a marshalled ClientHello handshake message: the lists
+// it reads well formed, no extension twice, pre_shared_key last and with
+// psk_key_exchange_modes, no capability the stack cannot honor (cipher
+// suites, groups, signature schemes, certificate compression,
+// refusedExtensions), key shares among the supported groups and one per
+// group, ALPS only for protocols ALPN offers, and with TLS 1.3 the
+// extensions it needs. Every error wraps ErrProfile.
 func checkHello(msg []byte) error {
 	s := cryptobyte.String(msg)
 	var suites, compression, exts cryptobyte.String
@@ -83,7 +85,9 @@ func checkHello(msg []byte) error {
 	}
 	for !suites.Empty() {
 		var suite uint16
-		suites.ReadUint16(&suite)
+		if !suites.ReadUint16(&suite) {
+			return fmt.Errorf("%w: malformed cipher suites", ErrProfile)
+		}
 		if !isGREASE(suite) && !implementedSuite(suite) {
 			return fmt.Errorf("%w: cipher suite %#04x is not implemented", ErrProfile, suite)
 		}
@@ -106,6 +110,11 @@ func checkHello(msg []byte) error {
 		}
 		data[typ] = body
 	}
+	if _, ok := data[extPreSharedKey]; ok {
+		if _, ok := data[extPSKModes]; !ok {
+			return fmt.Errorf("%w: pre_shared_key without psk_key_exchange_modes", ErrProfile)
+		}
+	}
 	groups, err := list16(data, extSupportedGroups, 2, "supported_groups", implementedGroups)
 	if err != nil {
 		return err
@@ -118,7 +127,10 @@ func checkHello(msg []byte) error {
 	}
 	if ks, ok := data[extKeyShare]; ok {
 		var shares cryptobyte.String
-		ks.ReadUint16LengthPrefixed(&shares)
+		if !ks.ReadUint16LengthPrefixed(&shares) || !ks.Empty() {
+			return fmt.Errorf("%w: malformed key_share", ErrProfile)
+		}
+		var seen []uint16
 		for !shares.Empty() {
 			var group uint16
 			var key cryptobyte.String
@@ -128,24 +140,37 @@ func checkHello(msg []byte) error {
 			if !slices.Contains(groups, group) {
 				return fmt.Errorf("%w: key share of group %d, not in supported_groups", ErrProfile, group)
 			}
+			if slices.Contains(seen, group) {
+				return fmt.Errorf("%w: two key shares of group %d", ErrProfile, group)
+			}
+			seen = append(seen, group)
 		}
 	}
-	alpn := protocols(data[extALPN])
+	alpn, err := protocols(data, extALPN, "ALPN")
+	if err != nil {
+		return err
+	}
 	for _, typ := range []uint16{extALPSOld, extALPS} {
-		if body, ok := data[typ]; ok {
-			for _, p := range protocols(body) {
-				if !slices.Contains(alpn, p) {
-					return fmt.Errorf("%w: ALPS for %q, which ALPN does not offer", ErrProfile, p)
-				}
+		alps, err := protocols(data, typ, "ALPS")
+		if err != nil {
+			return err
+		}
+		for _, p := range alps {
+			if !slices.Contains(alpn, p) {
+				return fmt.Errorf("%w: ALPS for %q, which ALPN does not offer", ErrProfile, p)
 			}
 		}
 	}
 	if versions, ok := data[extSupportedVersions]; ok {
 		var list cryptobyte.String
-		versions.ReadUint8LengthPrefixed(&list)
+		if !versions.ReadUint8LengthPrefixed(&list) || !versions.Empty() || list.Empty() {
+			return fmt.Errorf("%w: malformed supported_versions", ErrProfile)
+		}
 		for !list.Empty() {
 			var v uint16
-			list.ReadUint16(&v)
+			if !list.ReadUint16(&v) {
+				return fmt.Errorf("%w: malformed supported_versions", ErrProfile)
+			}
 			if v != utls.VersionTLS13 {
 				continue
 			}
@@ -175,7 +200,7 @@ func list16(data map[uint16]cryptobyte.String, typ uint16, lenBytes int, name st
 		return nil, nil
 	}
 	var list cryptobyte.String
-	if lenBytes == 1 && !body.ReadUint8LengthPrefixed(&list) || lenBytes == 2 && !body.ReadUint16LengthPrefixed(&list) {
+	if lenBytes == 1 && !body.ReadUint8LengthPrefixed(&list) || lenBytes == 2 && !body.ReadUint16LengthPrefixed(&list) || !body.Empty() {
 		return nil, fmt.Errorf("%w: malformed %s", ErrProfile, name)
 	}
 	var out []uint16
@@ -192,19 +217,24 @@ func list16(data map[uint16]cryptobyte.String, typ uint16, lenBytes int, name st
 	return out, nil
 }
 
-// protocols reads the protocol list of ALPN or ALPS.
-func protocols(body cryptobyte.String) []string {
+// protocols reads the protocol list of extension typ, ALPN or ALPS, nil
+// without it: a non-empty list of non-empty names (RFC 7301 section 3.1).
+func protocols(data map[uint16]cryptobyte.String, typ uint16, name string) ([]string, error) {
+	body, ok := data[typ]
+	if !ok {
+		return nil, nil
+	}
 	var list cryptobyte.String
-	if !body.ReadUint16LengthPrefixed(&list) {
-		return nil
+	if !body.ReadUint16LengthPrefixed(&list) || !body.Empty() || list.Empty() {
+		return nil, fmt.Errorf("%w: malformed %s", ErrProfile, name)
 	}
 	var out []string
 	for !list.Empty() {
 		var p cryptobyte.String
-		if !list.ReadUint8LengthPrefixed(&p) {
-			return out
+		if !list.ReadUint8LengthPrefixed(&p) || p.Empty() {
+			return nil, fmt.Errorf("%w: malformed %s", ErrProfile, name)
 		}
 		out = append(out, string(p))
 	}
-	return out
+	return out, nil
 }
