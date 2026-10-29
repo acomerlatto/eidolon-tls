@@ -3026,7 +3026,7 @@ func (rl *clientConnReadLoop) processPing(f *PingFrame) error {
 		defer cc.maybeCallStateHook()
 		cc.mu.Lock()
 		defer cc.mu.Unlock()
-		if cc.t.ChromiumErrors && !cc.prefacePing.inFlight && len(cc.pings) == 0 {
+		if cc.t.ChromiumErrors && !cc.prefacePing.inFlight && len(cc.pings) == 0 && cc.pendingResets == 0 { // [eidolon] nor the PING of a reset
 			return chromiumError{ErrCodeProtocol, "Unexpected PING ACK."} // [eidolon]
 		}
 		// If ack, notify listener if any

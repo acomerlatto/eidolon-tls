@@ -29,6 +29,7 @@ type wireOptions struct {
 	settings []Setting
 	noPings  bool   // leave the client's PINGs unanswered
 	silent   bool   // and the requests too
+	mute     bool   // leave the requests unanswered, but not the PINGs
 	body     []byte // of each response, in DATA frames of 16384 bytes
 }
 
@@ -86,7 +87,7 @@ func wireServer(c net.Conn, o wireOptions) <-chan wireFrame {
 				end = f.StreamEnded()
 			}
 			seen <- w
-			if end && !o.silent {
+			if end && !o.silent && !o.mute {
 				respond(writes, fr, h.StreamID, o.body)
 			}
 		}
