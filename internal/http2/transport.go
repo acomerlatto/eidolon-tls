@@ -2881,6 +2881,7 @@ func (cc *ClientConn) applySetting(s Setting) (seenMax bool, err error) {
 		if cc.t.ChromiumErrors {
 			cc.maxConcurrentStreams = min(s.Val, chromiumMaxConcurrentStreams) // [eidolon]
 		}
+		cc.cond.Broadcast() // [eidolon] waiters take new places, as ProcessPendingStreamRequests
 		seenMax = true
 	case SettingMaxHeaderListSize:
 		cc.peerMaxHeaderListSize = uint64(s.Val)

@@ -1,0 +1,45 @@
+diff --git a/internal/http2/eidolon_maxstreams_test.go b/internal/http2/eidolon_maxstreams_test.go
+new file mode 100644
+index 0000000..7ab849f
+--- /dev/null
++++ b/internal/http2/eidolon_maxstreams_test.go
+@@ -0,0 +1,27 @@
++// The places a raised MAX_CONCURRENT_STREAMS opens (patch 0038).
++
++package http2
++
++import (
++	"slices"
++	"testing"
++	"testing/synctest"
++)
++
++// A request waiting for a place in strict mode takes the one a SETTINGS
++// frame raising MAX_CONCURRENT_STREAMS opens, as Chromium's
++// ProcessPendingStreamRequests, without waiting for a stream to end.
++func TestMaxConcurrentStreamsRaised(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		s := newErrorServerStart(t, &Transport{StrictMaxConcurrentStreams: true}, func(fr *Framer) {
++			fr.WriteSettings(Setting{SettingMaxConcurrentStreams, 1})
++		})
++		s.request(false) // stream 1 holds the only place
++		s.request(false) // waits
++		s.fr.WriteSettings(Setting{SettingMaxConcurrentStreams, 2})
++		synctest.Wait()
++		if got, want := s.frames(), []string{"SETTINGS ACK", "HEADERS 3"}; !slices.Equal(got, want) {
++			t.Fatalf("frames %q, want %q", got, want)
++		}
++	})
++}
+diff --git a/internal/http2/transport.go b/internal/http2/transport.go
+index 0e7710a..e70f916 100644
+--- a/internal/http2/transport.go
++++ b/internal/http2/transport.go
+@@ -2881,6 +2881,7 @@ func (cc *ClientConn) applySetting(s Setting) (seenMax bool, err error) {
+ 		if cc.t.ChromiumErrors {
+ 			cc.maxConcurrentStreams = min(s.Val, chromiumMaxConcurrentStreams) // [eidolon]
+ 		}
++		cc.cond.Broadcast() // [eidolon] waiters take new places, as ProcessPendingStreamRequests
+ 		seenMax = true
+ 	case SettingMaxHeaderListSize:
+ 		cc.peerMaxHeaderListSize = uint64(s.Val)
