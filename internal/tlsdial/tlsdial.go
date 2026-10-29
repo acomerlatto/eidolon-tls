@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 
 	utls "github.com/acomerlatto/utls"
 )
@@ -216,7 +217,8 @@ func Check(cfg Config) error {
 }
 
 // prepare builds a new spec, applies it to a client that has no
-// connection yet and builds its ClientHello, checked by checkHello, and
+// connection yet and builds its ClientHello, checked by checkHello and,
+// with ECH, for TLS 1.3 and server_name, and
 // returns the config of the client, which the spec changed. Every error
 // wraps ErrProfile.
 func prepare(cfg Config) (*utls.UConn, *utls.Config, error) {
@@ -234,9 +236,13 @@ func prepare(cfg Config) (*utls.UConn, *utls.Config, error) {
 	// sent as given while uTLS keeps none of its state: a server name
 	// other than the verified one, ALPN and ALPS out of RestrictALPN's
 	// reach, versions or key shares the handshake does not know.
+	var hasSNI bool
 	for _, ext := range spec.Extensions {
-		if sni, ok := ext.(*utls.SNIExtension); ok && sni.ServerName != "" {
-			return nil, nil, fmt.Errorf("%w: the spec sets the SNI name %q; it must come from the URL", ErrProfile, sni.ServerName)
+		if sni, ok := ext.(*utls.SNIExtension); ok {
+			if sni.ServerName != "" {
+				return nil, nil, fmt.Errorf("%w: the spec sets the SNI name %q; it must come from the URL", ErrProfile, sni.ServerName)
+			}
+			hasSNI = true
 		}
 		if g, ok := ext.(*utls.GenericExtension); ok && !isGREASE(g.Id) && utls.ExtensionFromID(g.Id) != nil {
 			return nil, nil, fmt.Errorf("%w: extension %d as a GenericExtension; use its uTLS type", ErrProfile, g.Id)
@@ -252,6 +258,13 @@ func prepare(cfg Config) (*utls.UConn, *utls.Config, error) {
 	}
 	if err := checkHello(uconn.HandshakeState.Hello.Raw); err != nil {
 		return nil, nil, err
+	}
+	// ClientHelloInner takes the versions and server_name of the outer:
+	// without TLS 1.3 no server accepts ECH, and without server_name
+	// ClientHelloInner names no server.
+	if len(tc.EncryptedClientHelloConfigList) > 0 &&
+		(!slices.Contains(uconn.HandshakeState.Hello.SupportedVersions, utls.VersionTLS13) || !hasSNI) {
+		return nil, nil, fmt.Errorf("%w: ECH needs a profile that offers TLS 1.3 and server_name", ErrProfile)
 	}
 	return uconn, tc, nil
 }

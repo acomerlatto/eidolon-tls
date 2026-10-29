@@ -320,6 +320,30 @@ func TestECHConfigInvalid(t *testing.T) {
 		})
 		return spec, nil
 	}
+	// without returns the Chrome profile changed by f.
+	without := func(f func(spec *utls.ClientHelloSpec)) func() (*utls.ClientHelloSpec, error) {
+		return func() (*utls.ClientHelloSpec, error) {
+			spec, err := chromeSpec()
+			if err != nil {
+				return nil, err
+			}
+			f(spec)
+			return spec, nil
+		}
+	}
+	noTLS13 := without(func(spec *utls.ClientHelloSpec) {
+		for _, e := range spec.Extensions {
+			if sv, ok := e.(*utls.SupportedVersionsExtension); ok {
+				sv.Versions = []uint16{utls.GREASE_PLACEHOLDER, utls.VersionTLS12}
+			}
+		}
+	})
+	noSNI := without(func(spec *utls.ClientHelloSpec) {
+		spec.Extensions = slices.DeleteFunc(spec.Extensions, func(e utls.TLSExtension) bool {
+			_, ok := e.(*utls.SNIExtension)
+			return ok
+		})
+	})
 	unsupported := bytes.Clone(good)
 	unsupported[2], unsupported[3] = 0xfe, 0x0c // an older version
 	for _, tt := range []struct {
@@ -333,6 +357,8 @@ func TestECHConfigInvalid(t *testing.T) {
 		{"malformed list", []eidolon.Option{eidolon.WithECHConfig(echSecret, good[:len(good)-1])}},
 		{"no supported configuration", []eidolon.Option{eidolon.WithECHConfig(echSecret, unsupported)}},
 		{"profile without ECH", []eidolon.Option{eidolon.WithClientHello(noECH), eidolon.WithECHConfig(echSecret, good)}},
+		{"profile without TLS 1.3", []eidolon.Option{eidolon.WithClientHello(noTLS13), eidolon.WithECHConfig(echSecret, good)}},
+		{"profile without server_name", []eidolon.Option{eidolon.WithClientHello(noSNI), eidolon.WithECHConfig(echSecret, good)}},
 		{"ECHDisabled", []eidolon.Option{eidolon.WithECHConfig(echSecret, good), eidolon.WithECHMode(eidolon.ECHDisabled)}},
 		{"unknown mode", []eidolon.Option{eidolon.WithECHMode(3)}},
 	} {
@@ -342,6 +368,12 @@ func TestECHConfigInvalid(t *testing.T) {
 				t.Errorf("New: %v, want ErrConfig", err)
 			}
 		})
+	}
+	// Those profiles are valid without ECH.
+	for _, spec := range []func() (*utls.ClientHelloSpec, error){noTLS13, noSNI} {
+		if _, err := eidolon.New(eidolon.WithClientHello(spec)); err != nil {
+			t.Errorf("New without ECH: %v", err)
+		}
 	}
 	// Each origin has its own configuration, and the list is copied.
 	mine := bytes.Clone(good)
