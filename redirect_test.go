@@ -149,10 +149,11 @@ func TestRedirectHeaders(t *testing.T) {
 	}
 }
 
-// Credentials dropped at a hop that changed origin are not sent at a later
-// hop within the new origin, through the client and through an
-// http.Client built on Transport(). http.Client copies them again when
-// the host is the first one or a subdomain of it.
+// Credentials and the caller's cookies dropped at a hop that changed
+// origin are not sent at a later hop within the new origin, through the
+// client and through an http.Client built on Transport(). http.Client
+// copies them again when the host is the first one or a subdomain of it,
+// whatever the scheme.
 func TestRedirectCredentialsStayDropped(t *testing.T) {
 	var h hops
 	cert, err := lab.NewCertificate(time.Hour, "example.com", "sub.example.com")
@@ -178,14 +179,16 @@ func TestRedirectCredentialsStayDropped(t *testing.T) {
 				clear(h.seen)
 				h.mu.Unlock()
 				next := hops[0] + "?to=" + url.QueryEscape(hops[1])
-				get(t, tt.do, "https://example.com/from?to="+url.QueryEscape(next), http.Header{"Authorization": {"Bearer t"}})
+				get(t, tt.do, "https://example.com/from?to="+url.QueryEscape(next), http.Header{"Authorization": {"Bearer t"}, "Cookie": {"s=1"}})
 				for _, p := range []string{"/away", "/back"} {
 					got := h.get(p)
 					if got == nil {
 						t.Fatalf("%s not reached", p)
 					}
-					if v, ok := got["Authorization"]; ok {
-						t.Errorf("%s got Authorization %q", p, v)
+					for _, k := range []string{"Authorization", "Cookie"} {
+						if v, ok := got[k]; ok {
+							t.Errorf("%s got %s %q", p, k, v)
+						}
 					}
 				}
 			})

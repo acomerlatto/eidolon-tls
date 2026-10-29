@@ -61,7 +61,10 @@ type HttpClient interface {
 	// its own timeout. That http.Client follows redirects by its own
 	// rules: at most 10, and PUT, DELETE and PATCH turned into GET at 301
 	// and 302. The transport still sets the Referer and drops the
-	// credentials at each hop as the client does.
+	// credentials at each hop as the client does, cookies included: those
+	// of the first request leave the chain once it changes origin. With a
+	// jar in that http.Client, a cookie of the jar the first request also
+	// sent leaves it too; the client's own redirects keep it.
 	Transport() http.RoundTripper
 }
 

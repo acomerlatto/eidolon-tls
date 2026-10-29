@@ -105,3 +105,41 @@ func TestRedirectHeader(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+// After a hop that changed origin, the cookies the first request sent
+// are dropped by name and value, the others kept in order, and Cookie2
+// is dropped; within one origin both are kept.
+func TestRedirectHeaderCookies(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		urls    []string
+		cookie  []string // Cookie of the hop under test
+		want    []string // nil for none
+		cookie2 bool
+	}{
+		{"same origin", []string{"https://a.test/", "https://a.test/b"},
+			[]string{"s=1; t=2; jar=3"}, []string{"s=1; t=2; jar=3"}, true},
+		{"subdomain", []string{"https://a.test/", "https://sub.a.test/"},
+			[]string{"s=1; t=2; jar=3"}, []string{"jar=3"}, false},
+		{"downgrade", []string{"https://a.test/", "http://a.test/"},
+			[]string{"s=1;t=2"}, nil, false},
+		{"other value", []string{"https://a.test/", "https://sub.a.test/"},
+			[]string{"s=9", "x=1; t=2"}, []string{"s=9", "x=1"}, false},
+		{"empty pairs", []string{"https://a.test/", "https://sub.a.test/"},
+			[]string{"x=1;; t=2;"}, []string{"x=1"}, false},
+		{"back to the origin", []string{"https://a.test/", "https://b.test/", "https://a.test/c"},
+			[]string{"s=1; t=2"}, nil, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := chain(http.Header{"Cookie": {"s=1; t=2"}}, tt.urls...)
+			h := http.Header{"Cookie": tt.cookie, "Cookie2": {"$Version=1"}}
+			got := redirectHeader(req, h)
+			if v, ok := got["Cookie"]; !reflect.DeepEqual(v, tt.want) || ok != (tt.want != nil) {
+				t.Errorf("Cookie = %q (present %v), want %q", v, ok, tt.want)
+			}
+			if _, ok := got["Cookie2"]; ok != tt.cookie2 {
+				t.Errorf("Cookie2 sent = %v, want %v", ok, tt.cookie2)
+			}
+		})
+	}
+}

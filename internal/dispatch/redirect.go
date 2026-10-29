@@ -24,6 +24,12 @@ import (
 //     the chain changed origin, which includes https to http, and stay
 //     dropped. http.Client compares the first request with this one
 //     only, so they come back at A -> B -> A.
+//   - After such a hop, Cookie2 is dropped and so are the cookies of
+//     Cookie the first request sent, by name and value, as client.Do
+//     drops the caller's: http.Client copies them to the same domain and
+//     its subdomains whatever the scheme. With http.Client.Jar, the jar
+//     adds its cookies to the first request too, so the same cookie added
+//     again for this hop is dropped as well.
 //
 // Other requests get h as it is. h is never modified; a copy is returned
 // when something changes.
@@ -48,9 +54,13 @@ func redirectHeader(req *http.Request, h http.Header) http.Header {
 		switch strings.ToLower(k) {
 		case "referer":
 			delete(out, k)
-		case "authorization", "proxy-authorization":
+		case "authorization", "proxy-authorization", "cookie2":
 			if cross {
 				delete(out, k)
+			}
+		case "cookie":
+			if cross {
+				dropCookies(out, k, first.Header)
 			}
 		}
 	}
@@ -58,6 +68,34 @@ func redirectHeader(req *http.Request, h http.Header) http.Header {
 		out.Set("Referer", ref)
 	}
 	return out
+}
+
+// dropCookies removes from the field k of h the cookies, as name=value,
+// of the Cookie fields of from. The others keep their order.
+func dropCookies(h http.Header, k string, from http.Header) {
+	sent := map[string]bool{}
+	for _, v := range from.Values("Cookie") {
+		for _, p := range strings.Split(v, ";") {
+			sent[strings.TrimSpace(p)] = true
+		}
+	}
+	var keep []string
+	for _, v := range h[k] {
+		var pairs []string
+		for _, p := range strings.Split(v, ";") {
+			if p = strings.TrimSpace(p); p != "" && !sent[p] {
+				pairs = append(pairs, p)
+			}
+		}
+		if len(pairs) > 0 {
+			keep = append(keep, strings.Join(pairs, "; "))
+		}
+	}
+	if len(keep) == 0 {
+		delete(h, k)
+	} else {
+		h[k] = keep
+	}
 }
 
 // referer returns the Referer of strict-origin-when-cross-origin for the
