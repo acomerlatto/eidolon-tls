@@ -92,9 +92,11 @@ type Server struct {
 	opts    Options
 	conns   chan *Conn
 
-	mu   sync.Mutex
-	open []net.Conn
-	wg   sync.WaitGroup
+	mu     sync.Mutex
+	open   []net.Conn
+	closed bool
+	done   chan struct{} // closed by Close
+	wg     sync.WaitGroup
 }
 
 // Accepted returns how many connections the server has accepted so far.
@@ -149,6 +151,7 @@ func Listen(addr string, opts Options) (*Server, error) {
 		ln:          ln,
 		opts:        opts,
 		conns:       make(chan *Conn, 64),
+		done:        make(chan struct{}),
 		tlsConf: &tls.Config{
 			Certificates: []tls.Certificate{*cert},
 			NextProtos:   opts.NextProtos,
@@ -227,15 +230,29 @@ func (s *Server) NextConn(tb testing.TB) *Conn {
 	}
 }
 
-// Close stops the server and closes every connection.
+// Close stops the server and closes every connection, including one
+// accepted meanwhile; connections that no longer fit in Conns are
+// dropped.
 func (s *Server) Close() {
-	s.ln.Close()
 	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.done)
+	}
 	for _, c := range s.open {
 		c.Close()
 	}
 	s.mu.Unlock()
+	s.ln.Close()
 	s.wg.Wait()
+}
+
+// deliver hands c to Conns, unless the server is closed.
+func (s *Server) deliver(c *Conn) {
+	select {
+	case s.conns <- c:
+	case <-s.done:
+	}
 }
 
 func (s *Server) accept() {
@@ -246,6 +263,11 @@ func (s *Server) accept() {
 			return
 		}
 		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			raw.Close()
+			return
+		}
 		s.open = append(s.open, raw)
 		s.mu.Unlock()
 		s.wg.Add(1)
@@ -261,7 +283,7 @@ func (s *Server) serve(raw net.Conn) {
 	defer close(c.done)
 	defer raw.Close()
 	if s.opts.Plain {
-		s.conns <- c
+		s.deliver(c)
 		serveHTTP1(&recordingConn{Conn: raw, rec: &c.stream}, s.opts.Handler)
 		return
 	}
@@ -287,14 +309,14 @@ func (s *Server) serve(raw net.Conn) {
 	c.ClientHello, c.ClientHelloRecord = firstClientHello(c.handshake.bytes())
 	if err != nil {
 		c.HandshakeErr = err
-		s.conns <- c
+		s.deliver(c)
 		return
 	}
 	c.State = state()
 	if uc != nil {
 		c.ALPS = uc.ConnectionState().PeerApplicationSettings
 	}
-	s.conns <- c
+	s.deliver(c)
 
 	app := &recordingTLSConn{recordingConn: recordingConn{Conn: tc, rec: &c.stream}, state: state}
 	if c.State.NegotiatedProtocol == "h2" && s.opts.H2Conn != nil {

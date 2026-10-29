@@ -235,6 +235,23 @@ func TestMemory(t *testing.T) {
 	}
 }
 
+// Close returns although no one takes the connections from Conns, more
+// than fit there: the server does not wait to deliver them.
+func TestCloseWithConnsWaiting(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := lab.Start(t, lab.Options{Plain: true, Memory: true})
+		for range 65 {
+			c, err := srv.Dial(context.Background(), "tcp", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+		}
+		synctest.Wait()
+		srv.Close()
+	})
+}
+
 // With Options.ALPS, the server negotiates ALPS with a client that offers
 // it for the negotiated protocol: the client gets the data of that
 // protocol, and Conn.ALPS has what the client sent back, empty from the
