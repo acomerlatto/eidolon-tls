@@ -374,6 +374,15 @@ func TestECHConfigInvalid(t *testing.T) {
 	if _, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithECHConfig(echSecret+":99999", good)); err == nil || !strings.Contains(err.Error(), `invalid port "99999"`) {
 		t.Errorf("New with port 99999: %v, want the invalid port", err)
 	}
+	// With several invalid configurations, the error names the first
+	// origin in order, each time.
+	for range 20 {
+		_, err := eidolon.New(eidolon.WithClientHello(chromeSpec), eidolon.WithECHConfig("b.test", unsupported),
+			eidolon.WithECHConfig("a.test", unsupported), eidolon.WithECHConfig("c.test", unsupported))
+		if err == nil || !strings.Contains(err.Error(), "https://a.test") {
+			t.Fatalf("New: %v, want the origin https://a.test", err)
+		}
+	}
 	// Those profiles are valid without ECH.
 	for _, spec := range []func() (*utls.ClientHelloSpec, error){noTLS13, noSNI} {
 		if _, err := eidolon.New(eidolon.WithClientHello(spec)); err != nil {

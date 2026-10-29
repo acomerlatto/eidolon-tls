@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
+	"slices"
 
 	utls "github.com/acomerlatto/utls"
 
@@ -100,7 +102,9 @@ func (c *config) configureECH(tr *dispatch.Transport) error {
 		return errors.New("WithECHConfig with ECHDisabled")
 	}
 	tr.ECHRequired = c.echMode == ECHRequired
-	for origin, list := range c.ech {
+	// In order, so the same options report the same origin.
+	for _, origin := range slices.Sorted(maps.Keys(c.ech)) {
+		list := c.ech[origin]
 		err := tlsdial.Check(tlsdial.Config{
 			Spec: tr.Spec,
 			TLS:  &utls.Config{EncryptedClientHelloConfigList: list},
