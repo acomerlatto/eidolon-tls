@@ -1,4 +1,5 @@
-// Fragmenting of header blocks into HEADERS and CONTINUATION (patch 0031).
+// Fragmenting of header blocks into HEADERS and CONTINUATION (patches 0031
+// and 0032).
 
 package http2
 
@@ -74,6 +75,33 @@ func TestWriteHeadersFrameSize(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := writtenFragments(t, &Transport{}, tt.max, tt.n, tt.prio)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("frames of %v bytes, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// With ChromiumHeaderFraming, the frames are of at most 16383 bytes with
+// their header, as quiche's kHttp2MaxControlFrameSendSize, whatever the
+// MAX_FRAME_SIZE of the server; the priority fields count in them too.
+func TestChromiumHeaderFraming(t *testing.T) {
+	prio := PriorityParam{StreamDep: 3, Exclusive: true, Weight: 182}
+	for _, tt := range []struct {
+		name string
+		max  int
+		n    int
+		prio PriorityParam
+		want []int
+	}{
+		{"priority", 16384, 40000, prio, []int{16374, 16374, 7257}},
+		{"no priority", 16384, 40000, PriorityParam{}, []int{16374, 16374, 7252}},
+		{"priority, larger frames", 1 << 20, 40000, prio, []int{16374, 16374, 7257}},
+		{"priority, one frame", 16384, 16369, prio, []int{16374}},
+		{"priority, just over", 16384, 16370, prio, []int{16374, 1}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := writtenFragments(t, &Transport{ChromiumHeaderFraming: true}, tt.max, tt.n, tt.prio)
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("frames of %v bytes, want %v", got, tt.want)
 			}

@@ -179,6 +179,12 @@ type Transport struct {
 	// first SETTINGS without it keeps the initial 100.
 	ChromiumErrors bool
 
+	// [eidolon] ChromiumHeaderFraming cuts header blocks as Chromium
+	// (quiche's WritePayloadWithContinuation): HEADERS and CONTINUATION
+	// frames of at most 16383 bytes with their header, whatever the
+	// MAX_FRAME_SIZE of the server. Otherwise they fill MAX_FRAME_SIZE.
+	ChromiumHeaderFraming bool
+
 	// [eidolon] ChromiumALPS reads the ALPS of the server, on a connection
 	// with a PeerApplicationSettings method, as Chromium's
 	// SpdySession::ParseAlps, before the first frame of the server: its

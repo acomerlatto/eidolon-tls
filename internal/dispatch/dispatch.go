@@ -689,6 +689,7 @@ func (t *Transport) h2t() *http2.Transport {
 		t.h2.FirstStreamID = pre.FirstStreamID
 		t.h2.ChromiumErrors = pre.ChromiumErrors
 		t.h2.ChromiumALPS = pre.ChromiumALPS
+		t.h2.ChromiumHeaderFraming = pre.ChromiumHeaderFraming
 	})
 	return t.h2
 }

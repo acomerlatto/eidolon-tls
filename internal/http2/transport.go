@@ -1631,6 +1631,9 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 	for len(hdrs) > 0 && cc.werr == nil {
 		chunk := hdrs
 		size := maxFrameSize
+		if cc.t.ChromiumHeaderFraming {
+			size = chromiumMaxControlFrame - frameHeaderLen // [eidolon]
+		}
 		if first && !prio.IsZero() {
 			size -= 5 // [eidolon] the priority fields count in the payload
 		}

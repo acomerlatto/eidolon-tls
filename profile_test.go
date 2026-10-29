@@ -86,6 +86,7 @@ func TestChrome156Linux(t *testing.T) {
 		CancelWithoutPing:      true,
 		Errors:                 eidolon.HTTP2ErrorsChromium,
 		ALPS:                   eidolon.HTTP2ALPSChromium,
+		HeaderFraming:          eidolon.HTTP2HeaderFramingChromium,
 	}
 	if p.Name != "chrome/156/linux" || !reflect.DeepEqual(p.HTTP2, h2) ||
 		!slices.Equal(p.PseudoOrder, []string{":method", ":authority", ":scheme", ":path"}) ||
