@@ -351,10 +351,13 @@ type chromiumSettings struct {
 
 // chromiumSetting handles s as SpdySession::HandleSetting, with cc.mu
 // held: ignore reports a value Chromium drops, err a connection error.
-// The other values are applied as in Go.
+// The other values are applied as in Go. MAX_HEADER_LIST_SIZE is
+// dropped: Chromium sends a header list whatever the server's limit.
 func (cc *ClientConn) chromiumSetting(s Setting) (ignore bool, err error) {
 	c := &cc.chromium
 	switch s.ID {
+	case SettingMaxHeaderListSize:
+		return true, nil
 	case SettingMaxFrameSize:
 		return s.Val < minMaxFrameSize || s.Val > maxFrameSize, nil
 	case SettingInitialWindowSize:

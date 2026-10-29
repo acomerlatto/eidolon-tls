@@ -1,0 +1,43 @@
+diff --git a/internal/http2/eidolon_chromium_errors.go b/internal/http2/eidolon_chromium_errors.go
+index 093c6b8..db4c7db 100644
+--- a/internal/http2/eidolon_chromium_errors.go
++++ b/internal/http2/eidolon_chromium_errors.go
+@@ -351,10 +351,13 @@ type chromiumSettings struct {
+ 
+ // chromiumSetting handles s as SpdySession::HandleSetting, with cc.mu
+ // held: ignore reports a value Chromium drops, err a connection error.
+-// The other values are applied as in Go.
++// The other values are applied as in Go. MAX_HEADER_LIST_SIZE is
++// dropped: Chromium sends a header list whatever the server's limit.
+ func (cc *ClientConn) chromiumSetting(s Setting) (ignore bool, err error) {
+ 	c := &cc.chromium
+ 	switch s.ID {
++	case SettingMaxHeaderListSize:
++		return true, nil
+ 	case SettingMaxFrameSize:
+ 		return s.Val < minMaxFrameSize || s.Val > maxFrameSize, nil
+ 	case SettingInitialWindowSize:
+diff --git a/internal/http2/eidolon_chromium_errors_test.go b/internal/http2/eidolon_chromium_errors_test.go
+index ae04ced..2683fdb 100644
+--- a/internal/http2/eidolon_chromium_errors_test.go
++++ b/internal/http2/eidolon_chromium_errors_test.go
+@@ -606,3 +606,19 @@ func TestChromiumMaxConcurrentStreams(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// Chromium sends a header list above the MAX_HEADER_LIST_SIZE of the
++// server (SpdySession::HandleSetting drops it); Go refuses the request.
++func TestChromiumHeaderListSizeIgnored(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		s := newErrorServerStart(t, &Transport{}, func(fr *Framer) {
++			fr.WriteSettings(Setting{SettingMaxHeaderListSize, 10})
++		})
++		done := s.request(true)
++		s.raw(FrameHeaders, FlagHeadersEndHeaders|FlagHeadersEndStream, 1, status200...)
++		synctest.Wait()
++		if err := <-done; err != nil {
++			t.Fatalf("request: %v", err)
++		}
++	})
++}

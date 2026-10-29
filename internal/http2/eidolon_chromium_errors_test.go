@@ -606,3 +606,19 @@ func TestChromiumMaxConcurrentStreams(t *testing.T) {
 		})
 	}
 }
+
+// Chromium sends a header list above the MAX_HEADER_LIST_SIZE of the
+// server (SpdySession::HandleSetting drops it); Go refuses the request.
+func TestChromiumHeaderListSizeIgnored(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newErrorServerStart(t, &Transport{}, func(fr *Framer) {
+			fr.WriteSettings(Setting{SettingMaxHeaderListSize, 10})
+		})
+		done := s.request(true)
+		s.raw(FrameHeaders, FlagHeadersEndHeaders|FlagHeadersEndStream, 1, status200...)
+		synctest.Wait()
+		if err := <-done; err != nil {
+			t.Fatalf("request: %v", err)
+		}
+	})
+}
