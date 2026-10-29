@@ -83,7 +83,8 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 		tc.VerifyConnection = exactIP(ip, tc.VerifyConnection)
 		cfg.TLS = tc
 	}
-	// Apply the spec before dialing, so a bad profile opens no connection.
+	// Build the ClientHello before dialing, so a bad profile opens no
+	// connection.
 	uconn, tc, err := prepare(cfg)
 	if err != nil {
 		return nil, err
@@ -201,19 +202,14 @@ func Check(cfg Config) error {
 		tc.ServerName = "eidolon.invalid"
 	}
 	cfg.TLS = tc
-	uconn, _, err := prepare(cfg)
-	if err != nil {
-		return err
-	}
-	if err := uconn.BuildHandshakeState(); err != nil {
-		return fmt.Errorf("%w: %w", ErrProfile, err)
-	}
-	return checkHello(uconn.HandshakeState.Hello.Raw)
+	_, _, err := prepare(cfg)
+	return err
 }
 
-// prepare builds a new spec and applies it to a client that has no
-// connection yet, and returns the config of the client, which the spec
-// changed. Every error wraps ErrProfile.
+// prepare builds a new spec, applies it to a client that has no
+// connection yet and builds its ClientHello, checked by checkHello, and
+// returns the config of the client, which the spec changed. Every error
+// wraps ErrProfile.
 func prepare(cfg Config) (*utls.UConn, *utls.Config, error) {
 	spec, err := cfg.Spec()
 	if err != nil {
@@ -241,6 +237,12 @@ func prepare(cfg Config) (*utls.UConn, *utls.Config, error) {
 	uconn := utls.UClient(nil, tc, utls.HelloCustom)
 	if err := uconn.ApplyPreset(spec); err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrProfile, err)
+	}
+	if err := uconn.BuildHandshakeState(); err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrProfile, err)
+	}
+	if err := checkHello(uconn.HandshakeState.Hello.Raw); err != nil {
+		return nil, nil, err
 	}
 	return uconn, tc, nil
 }

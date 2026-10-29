@@ -386,6 +386,29 @@ func TestDialAppliesSpecBeforeConnecting(t *testing.T) {
 	}
 }
 
+// Dial checks the ClientHello of each spec before dialing, as Check does:
+// a spec uTLS applies but checkHello refuses opens no connection.
+func TestDialChecksHelloBeforeConnecting(t *testing.T) {
+	var cc closeCounter
+	_, err := Dial(context.Background(), "tcp", "127.0.0.1:1", Config{
+		Spec: func() (*utls.ClientHelloSpec, error) {
+			spec, err := chromeSpec()
+			if err == nil {
+				spec.Extensions = append(spec.Extensions, &utls.GenericExtension{Id: 42})
+			}
+			return spec, err
+		},
+		TLS:         &utls.Config{ServerName: "example.com"},
+		DialContext: cc.dial,
+	})
+	if !errors.Is(err, ErrProfile) || !strings.Contains(err.Error(), "early_data") {
+		t.Fatalf("err = %v, want ErrProfile for early_data", err)
+	}
+	if n := cc.dialed.Load(); n != 0 {
+		t.Fatalf("dialed %d connections, want 0", n)
+	}
+}
+
 // An IP host matches an IP address SAN byte for byte, as Chrome does
 // (RFC 9525 section 6.4): the test certificate holds 127.0.0.1 in four
 // bytes, which crypto/x509 also takes for ::ffff:127.0.0.1.
