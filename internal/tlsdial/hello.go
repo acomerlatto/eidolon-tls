@@ -69,7 +69,8 @@ func implementedSuite(suite uint16) bool {
 }
 
 // checkHello checks a marshalled ClientHello handshake message: the lists
-// it reads well formed, no extension twice, pre_shared_key last and with
+// it reads well formed and, where the RFCs say so, not empty, nothing after
+// the extensions, no extension twice, pre_shared_key last and with
 // psk_key_exchange_modes, no capability the stack cannot honor (cipher
 // suites, groups, signature schemes, certificate compression,
 // refusedExtensions), key shares among the supported groups and one per
@@ -80,7 +81,7 @@ func checkHello(msg []byte) error {
 	var suites, compression, exts cryptobyte.String
 	if !s.Skip(4+2+32) || !s.Skip(1+int(peek(s))) ||
 		!s.ReadUint16LengthPrefixed(&suites) || !s.ReadUint8LengthPrefixed(&compression) ||
-		!s.ReadUint16LengthPrefixed(&exts) {
+		!s.ReadUint16LengthPrefixed(&exts) || !s.Empty() || suites.Empty() {
 		return fmt.Errorf("%w: malformed ClientHello", ErrProfile)
 	}
 	for !suites.Empty() {
@@ -110,10 +111,13 @@ func checkHello(msg []byte) error {
 		}
 		data[typ] = body
 	}
-	if _, ok := data[extPreSharedKey]; ok {
-		if _, ok := data[extPSKModes]; !ok {
-			return fmt.Errorf("%w: pre_shared_key without psk_key_exchange_modes", ErrProfile)
+	if modes, ok := data[extPSKModes]; ok {
+		var list cryptobyte.String
+		if !modes.ReadUint8LengthPrefixed(&list) || !modes.Empty() || list.Empty() {
+			return fmt.Errorf("%w: malformed psk_key_exchange_modes", ErrProfile)
 		}
+	} else if _, ok := data[extPreSharedKey]; ok {
+		return fmt.Errorf("%w: pre_shared_key without psk_key_exchange_modes", ErrProfile)
 	}
 	groups, err := list16(data, extSupportedGroups, 2, "supported_groups", implementedGroups)
 	if err != nil {
@@ -134,7 +138,7 @@ func checkHello(msg []byte) error {
 		for !shares.Empty() {
 			var group uint16
 			var key cryptobyte.String
-			if !shares.ReadUint16(&group) || !shares.ReadUint16LengthPrefixed(&key) {
+			if !shares.ReadUint16(&group) || !shares.ReadUint16LengthPrefixed(&key) || key.Empty() {
 				return fmt.Errorf("%w: malformed key_share", ErrProfile)
 			}
 			if !slices.Contains(groups, group) {
@@ -193,14 +197,15 @@ func peek(s cryptobyte.String) byte {
 }
 
 // list16 reads the list of 16-bit values of extension typ, whose length
-// takes lenBytes, and checks that each one but GREASE is in implemented.
+// takes lenBytes, and checks that it is not empty and that each value but
+// GREASE is in implemented.
 func list16(data map[uint16]cryptobyte.String, typ uint16, lenBytes int, name string, implemented []uint16) ([]uint16, error) {
 	body, ok := data[typ]
 	if !ok {
 		return nil, nil
 	}
 	var list cryptobyte.String
-	if lenBytes == 1 && !body.ReadUint8LengthPrefixed(&list) || lenBytes == 2 && !body.ReadUint16LengthPrefixed(&list) || !body.Empty() {
+	if lenBytes == 1 && !body.ReadUint8LengthPrefixed(&list) || lenBytes == 2 && !body.ReadUint16LengthPrefixed(&list) || !body.Empty() || list.Empty() {
 		return nil, fmt.Errorf("%w: malformed %s", ErrProfile, name)
 	}
 	var out []uint16

@@ -198,6 +198,20 @@ func TestCheckHelloMalformed(t *testing.T) {
 		{"truncated supported_versions", hello(suite, typ(extSupportedVersions), []byte{4, 3, 4}), "malformed supported_versions"},
 		{"supported_versions with a trailing byte", hello(suite, typ(extSupportedVersions), []byte{2, 3, 4, 9}), "malformed supported_versions"},
 		{"empty supported_versions", hello(suite, typ(extSupportedVersions), []byte{0}), "malformed supported_versions"},
+		{"empty cipher suites", hello(nil), "malformed ClientHello"},
+		{"bytes after the extensions", func() []byte {
+			m := append(hello(suite), 9)
+			m[3]++
+			return m
+		}(), "malformed ClientHello"},
+		{"empty supported_groups", hello(suite, typ(extSupportedGroups), []byte{0, 0}), "malformed supported_groups"},
+		{"empty signature_algorithms", hello(suite, typ(extSignatureAlgs), []byte{0, 0}), "malformed signature_algorithms"},
+		{"empty compress_certificate", hello(suite, typ(extCompressCert), []byte{0}), "malformed compress_certificate"},
+		{"empty key exchange", hello(suite, typ(extSupportedGroups), []byte{0, 2, 0, 29}, typ(extKeyShare), []byte{0, 4, 0, 29, 0, 0}), "malformed key_share"},
+		{"no key shares", hello(suite, typ(extSupportedGroups), []byte{0, 2, 0, 29}, typ(extKeyShare), []byte{0, 0}), ""},
+		{"empty psk_key_exchange_modes", hello(suite, typ(extPSKModes), []byte{0}), "malformed psk_key_exchange_modes"},
+		{"truncated psk_key_exchange_modes", hello(suite, typ(extPSKModes), []byte{2, 1}), "malformed psk_key_exchange_modes"},
+		{"psk_key_exchange_modes with a trailing byte", hello(suite, typ(extPSKModes), []byte{1, 1, 9}), "malformed psk_key_exchange_modes"},
 		{"pre_shared_key not last", hello(suite, typ(extPSKModes), []byte{1, 1}, typ(extPreSharedKey), []byte{}, typ(extSupportedGroups), []byte{0, 2, 0, 29}), "pre_shared_key is not the last"},
 		{"pre_shared_key without psk_key_exchange_modes", hello(suite, typ(extPreSharedKey), []byte{}), "pre_shared_key without psk_key_exchange_modes"},
 	} {
