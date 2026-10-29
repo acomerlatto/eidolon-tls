@@ -24,6 +24,26 @@ func TestCheckHelloSignalingSuites(t *testing.T) {
 	}
 }
 
+// A GenericExtension of a GREASE value, which uTLS has a type for, and one
+// of a value uTLS does not know are not refused. The GREASE extensions of
+// the spec go, so that none takes the same value at random.
+func TestCheckHelloGenericExtensions(t *testing.T) {
+	err := Check(Config{Spec: func() (*utls.ClientHelloSpec, error) {
+		spec, err := chromeSpec()
+		if err == nil {
+			spec.Extensions = slices.DeleteFunc(spec.Extensions, func(e utls.TLSExtension) bool {
+				_, ok := e.(*utls.UtlsGREASEExtension)
+				return ok
+			})
+			spec.Extensions = append(spec.Extensions, &utls.GenericExtension{Id: 0x1a1a}, &utls.GenericExtension{Id: 0x7777})
+		}
+		return spec, err
+	}})
+	if err != nil {
+		t.Error(err)
+	}
+}
+
 // Check refuses a ClientHello the stack cannot honor or that contradicts
 // itself, each time with ErrProfile; the Chrome spec passes.
 func TestCheckHello(t *testing.T) {
@@ -44,9 +64,6 @@ func TestCheckHello(t *testing.T) {
 		{"early_data", func(s *utls.ClientHelloSpec) {
 			s.Extensions = append(s.Extensions, &utls.GenericExtension{Id: 42})
 		}, "early_data"},
-		{"pre_shared_key not last", func(s *utls.ClientHelloSpec) {
-			s.Extensions = slices.Insert(s.Extensions, 1, utls.TLSExtension(&utls.GenericExtension{Id: 41}))
-		}, "pre_shared_key"},
 		{"group", func(s *utls.ClientHelloSpec) {
 			ext(s, func(e utls.TLSExtension) {
 				if g, ok := e.(*utls.SupportedCurvesExtension); ok {
@@ -89,20 +106,20 @@ func TestCheckHello(t *testing.T) {
 				}
 			})
 		}, "two key shares of group 29"},
-		{"pre_shared_key without psk_key_exchange_modes", func(s *utls.ClientHelloSpec) {
-			s.Extensions = slices.DeleteFunc(s.Extensions, func(e utls.TLSExtension) bool {
-				_, ok := e.(*utls.PSKKeyExchangeModesExtension)
-				return ok
-			})
-			s.Extensions = append(s.Extensions, &utls.GenericExtension{Id: 41})
-		}, "pre_shared_key without psk_key_exchange_modes"},
-		{"odd supported_versions", func(s *utls.ClientHelloSpec) {
+		{"generic SNI", func(s *utls.ClientHelloSpec) {
 			for i, e := range s.Extensions {
-				if _, ok := e.(*utls.SupportedVersionsExtension); ok {
-					s.Extensions[i] = &utls.GenericExtension{Id: 43, Data: []byte{1, 3}}
+				if _, ok := e.(*utls.SNIExtension); ok {
+					s.Extensions[i] = &utls.GenericExtension{Id: 0, Data: []byte{0, 7, 0, 0, 4, 'a', '.', 'i', 'n'}}
 				}
 			}
-		}, "malformed supported_versions"},
+		}, "extension 0 as a GenericExtension"},
+		{"generic supported_versions", func(s *utls.ClientHelloSpec) {
+			for i, e := range s.Extensions {
+				if _, ok := e.(*utls.SupportedVersionsExtension); ok {
+					s.Extensions[i] = &utls.GenericExtension{Id: 43, Data: []byte{2, 3, 4}}
+				}
+			}
+		}, "extension 43 as a GenericExtension"},
 		{"generic ALPN", func(s *utls.ClientHelloSpec) {
 			s.Extensions = append(s.Extensions, &utls.GenericExtension{Id: 16})
 		}, "extension 16 as a GenericExtension"},
@@ -181,6 +198,8 @@ func TestCheckHelloMalformed(t *testing.T) {
 		{"truncated supported_versions", hello(suite, typ(extSupportedVersions), []byte{4, 3, 4}), "malformed supported_versions"},
 		{"supported_versions with a trailing byte", hello(suite, typ(extSupportedVersions), []byte{2, 3, 4, 9}), "malformed supported_versions"},
 		{"empty supported_versions", hello(suite, typ(extSupportedVersions), []byte{0}), "malformed supported_versions"},
+		{"pre_shared_key not last", hello(suite, typ(extPSKModes), []byte{1, 1}, typ(extPreSharedKey), []byte{}, typ(extSupportedGroups), []byte{0, 2, 0, 29}), "pre_shared_key is not the last"},
+		{"pre_shared_key without psk_key_exchange_modes", hello(suite, typ(extPreSharedKey), []byte{}), "pre_shared_key without psk_key_exchange_modes"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := checkHello(tt.msg)

@@ -56,8 +56,10 @@ type config struct {
 // is always the host of the URL, and a spec that sets one fails the request.
 // New builds one spec and refuses, with an error that wraps ErrProfile, a
 // ClientHello the stack cannot honor or that contradicts itself, as listed
-// in ClientHelloFromRaw, and ALPN or ALPS as a utls.GenericExtension, which
-// WithForceHTTP1 could not restrict. The TLS versions are the ones the
+// in ClientHelloFromRaw, and an extension uTLS has a type for, such as SNI,
+// ALPN or supported_versions, written as a utls.GenericExtension: sent
+// as given, it would escape the URL's server name and WithForceHTTP1, and
+// uTLS would keep none of its state. The TLS versions are the ones the
 // spec offers: unlike Chrome, which refuses anything below TLS 1.2, a spec
 // that offers TLS 1.0 or 1.1 negotiates them.
 func WithClientHello(spec func() (*utls.ClientHelloSpec, error)) Option {
