@@ -397,3 +397,53 @@ func TestNewConnectionPerRequestClose(t *testing.T) {
 		t.Errorf("after Close: %v, want ErrClosed", err)
 	}
 }
+
+// Through every kind of proxy, the ClientHello and the HTTP/2 preface of
+// the destination are those of a direct connection.
+func TestProxySameAsDirect(t *testing.T) {
+	cert, err := lab.NewCertificate(time.Hour, "site.test", "proxy.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := lab.Start(t, lab.Options{Certificate: &cert})
+	describe := func(c eidolon.HttpClient) (hello, ja4, akamai string) {
+		t.Helper()
+		if _, err := echGet(c, "https://site.test/"); err != nil {
+			t.Fatal(err)
+		}
+		conn := srv.NextConn(t)
+		frames, err := conn.H2Frames()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var first [][2]string
+		for _, fr := range frames {
+			if fr.Type == "HEADERS" {
+				first = fields(fr)
+				break
+			}
+		}
+		h := parseHello(t, conn.ClientHello)
+		return normalHello(h), h.JA4(), akamaiOf(frames, first)
+	}
+	direct, err := eidolon.New(eidolon.WithProfile(eidolon.Chrome156Linux()), eidolon.WithRootCAs(srv.RootCAs),
+		eidolon.WithDialContext(func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, srv.Addr)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer direct.Close()
+	wantHello, wantJA4, wantAkamai := describe(direct)
+	for _, rawURL := range []string{
+		"socks5://" + lab.StartSOCKS(t, srv.Addr, "", "").Addr,
+		"http://" + lab.StartHTTPProxy(t, srv.Addr, "").Addr,
+		"https://" + lab.StartHTTPSProxy(t, srv.Addr, "", cert).Addr,
+	} {
+		hello, ja4, akamai := describe(proxyClient(t, srv, rawURL))
+		if hello != wantHello || ja4 != wantJA4 || akamai != wantAkamai {
+			t.Errorf("%s: ClientHello\n%s\nJA4 %s, Akamai %s; want\n%s\nJA4 %s, Akamai %s", rawURL, hello, ja4, akamai, wantHello, wantJA4, wantAkamai)
+		}
+	}
+}
