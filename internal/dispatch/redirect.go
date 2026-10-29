@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/acomerlatto/eidolon-tls/internal/target"
 )
 
 // redirectHeader returns the header of a request made from a redirect
@@ -83,17 +85,18 @@ func referer(ref string, u *url.URL) string {
 }
 
 // sameOrigin reports whether a and b have the same scheme, host and port,
-// with the default port filled in.
+// with the default port filled in and the hosts normalized as
+// target.Parse does.
 func sameOrigin(a, b *url.URL) bool {
 	return strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		target.Host(a) == target.Host(b) &&
 		port(a) == port(b)
 }
 
-// originHost returns the host of u in lowercase, with its port unless it is
-// the default one of the scheme.
+// originHost returns the host of u normalized as target.Parse does, with
+// its port unless it is the default one of the scheme.
 func originHost(u *url.URL) string {
-	host := strings.ToLower(u.Hostname())
+	host := target.Host(u)
 	if p := u.Port(); p != "" && p != defaultPort(u.Scheme) {
 		return net.JoinHostPort(host, p)
 	}

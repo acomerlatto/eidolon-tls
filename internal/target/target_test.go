@@ -149,3 +149,21 @@ func TestParseRejects(t *testing.T) {
 		})
 	}
 }
+
+// Host normalizes as Parse, and lowercases a host Parse refuses.
+func TestHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://Bücher.example/": "xn--bcher-kva.example",
+		"https://[0:0::1]:8443/":  "::1",
+		"https://0x7f.1/":         "127.0.0.1",
+		"https://A_B..test/":      "a_b..test",
+	} {
+		u, err := url.Parse(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := Host(u); got != want {
+			t.Errorf("Host(%s) = %q, want %q", in, got, want)
+		}
+	}
+}

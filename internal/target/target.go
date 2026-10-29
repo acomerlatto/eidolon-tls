@@ -65,6 +65,15 @@ func Parse(u *url.URL) (Target, error) {
 	return Target{Scheme: scheme, Host: host, Port: port}, nil
 }
 
+// Host returns the host of u as Parse normalizes it, for comparing and
+// serializing origins, or u.Hostname() in lowercase if it is not valid.
+func Host(u *url.URL) string {
+	if h, err := normalizeHost(u.Hostname()); err == nil {
+		return h
+	}
+	return strings.ToLower(u.Hostname())
+}
+
 func normalizeHost(h string) (string, error) {
 	if h == "" {
 		return "", errors.New("target: empty host")

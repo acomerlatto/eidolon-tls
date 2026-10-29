@@ -251,6 +251,11 @@ func TestFetchSite(t *testing.T) {
 		{"https://127.0.0.1/", []string{"https://127.0.0.2/x"}, "cross-site"},
 		{"https://10.0.0.1/", []string{"https://10.1.0.1/x"}, "cross-site"},
 		{"https://localhost/", []string{"https://localhost:8443/x"}, "same-site"},
+		// Hosts compare as the URL standard serializes them.
+		{"https://bücher.example/", []string{"https://xn--bcher-kva.example/x"}, "same-origin"},
+		{"https://a.bücher.example/", []string{"https://b.xn--bcher-kva.example/x"}, "same-site"},
+		{"https://[0:0::1]/", []string{"https://[::1]/x"}, "same-origin"},
+		{"https://0x7f.1/", []string{"https://127.0.0.1/x"}, "same-origin"},
 		// The furthest URL of the chain counts.
 		{"https://a.test/", []string{"https://a.test/1", "https://www.a.test/2", "https://a.test/3"}, "same-site"},
 		{"https://a.test/", []string{"https://a.test/1", "https://b.test/2", "https://a.test/3"}, "cross-site"},
@@ -308,6 +313,9 @@ func TestOriginHeader(t *testing.T) {
 		{"default port", "PUT", "cors", "http://A.test:80/p", []string{"http://a.test/x"}, "http://a.test"},
 		{"uppercase", "PUT", "cors", "HTTPS://A.TEST:443/p", []string{"https://a.test/x"}, "https://a.test"},
 		{"IPv6", "POST", "cors", "https://[::1]/p", []string{"https://[::1]/x"}, "https://[::1]"},
+		{"IPv6 long", "POST", "cors", "https://[0:0::1]/p", []string{"https://[::1]/x"}, "https://[::1]"},
+		{"IDN", "POST", "cors", "https://Bücher.example/p", []string{"https://xn--bcher-kva.example/x"}, "https://xn--bcher-kva.example"},
+		{"IDN same origin", "GET", "cors", "https://bücher.example/p", []string{"https://xn--bcher-kva.example/x"}, ""},
 		{"no initiator", "POST", "navigate", "", []string{"https://a.test/x"}, ""},
 		{"downgrade", "POST", "navigate", "https://a.test/", []string{"http://a.test/x"}, "null"},
 		{"downgrade cors", "POST", "cors", "https://a.test/", []string{"http://a.test/x"}, "https://a.test"},

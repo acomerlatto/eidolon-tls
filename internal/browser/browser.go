@@ -14,6 +14,7 @@ import (
 
 	"github.com/acomerlatto/eidolon-tls/internal/fetch"
 	"github.com/acomerlatto/eidolon-tls/internal/order"
+	"github.com/acomerlatto/eidolon-tls/internal/target"
 )
 
 // Headers are the headers a profile adds to its requests.
@@ -202,7 +203,7 @@ func sameSite(a, b *url.URL) bool {
 // site returns the registrable domain of u, or its host when there is
 // none, as for an IP address or localhost.
 func site(u *url.URL) string {
-	host := strings.ToLower(u.Hostname())
+	host := target.Host(u)
 	if d, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
 		return d
 	}
@@ -240,7 +241,7 @@ func originHeader(method, mode string, urls []*url.URL, init *url.URL) (string, 
 // with the port only if it is not the default one.
 func serialize(u *url.URL) string {
 	scheme := strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
+	host := target.Host(u)
 	if p := u.Port(); p != "" && p != map[string]string{"http": "80", "https": "443"}[scheme] {
 		host = net.JoinHostPort(host, p)
 	} else if strings.Contains(host, ":") {
@@ -257,5 +258,5 @@ func origin(u *url.URL) string {
 	if port == "" {
 		port = map[string]string{"http": "80", "https": "443"}[scheme]
 	}
-	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
+	return scheme + "://" + net.JoinHostPort(target.Host(u), port)
 }

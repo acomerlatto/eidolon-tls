@@ -2,6 +2,7 @@ package eidolon
 
 import (
 	"net/http"
+	"net/url"
 	"reflect"
 	"testing"
 )
@@ -21,6 +22,29 @@ func TestDropSetCookies(t *testing.T) {
 		dropSetCookies(h, set)
 		if !reflect.DeepEqual(h, tt.want) {
 			t.Errorf("dropSetCookies(%v) = %v, want %v", tt.in, h, tt.want)
+		}
+	}
+}
+
+// Origins compare by their hosts as the URL standard serializes them: IDN
+// in punycode, IP addresses in canonical form.
+func TestSameOrigin(t *testing.T) {
+	for _, tt := range []struct {
+		a, b string
+		want bool
+	}{
+		{"https://example.com/", "https://EXAMPLE.com:443/x", true},
+		{"https://bücher.example/", "https://xn--bcher-kva.example/", true},
+		{"https://[0:0::1]/", "https://[::1]/", true},
+		{"https://0x7f.1/", "https://127.0.0.1/", true},
+		{"https://example.com/", "https://example.org/", false},
+		{"https://example.com/", "http://example.com/", false},
+		{"https://example.com/", "https://example.com:8443/", false},
+	} {
+		a, _ := url.Parse(tt.a)
+		b, _ := url.Parse(tt.b)
+		if got := sameOrigin(a, b); got != tt.want {
+			t.Errorf("sameOrigin(%s, %s) = %v, want %v", tt.a, tt.b, got, tt.want)
 		}
 	}
 }

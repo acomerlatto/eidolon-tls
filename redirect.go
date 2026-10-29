@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/acomerlatto/eidolon-tls/internal/target"
 )
 
 // maxRedirects is the redirect limit of the Fetch standard, as Chrome.
@@ -176,10 +178,11 @@ func drain(resp *http.Response) {
 }
 
 // sameOrigin reports whether a and b have the same scheme, host and port,
-// with the default port filled in.
+// with the default port filled in and the hosts normalized as
+// target.Parse does.
 func sameOrigin(a, b *url.URL) bool {
 	return strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		target.Host(a) == target.Host(b) &&
 		port(a) == port(b)
 }
 
