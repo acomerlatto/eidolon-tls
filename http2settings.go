@@ -219,16 +219,15 @@ type HTTP2Settings struct {
 // the response headers are still limited to 256 KiB. Invalid settings
 // return an error that wraps ErrConfig: a setting repeated, a value RFC
 // 9113 forbids, ENABLE_PUSH left out or other than 0 (server push is
-// refused, and its initial value is 1),
-// INITIAL_WINDOW_SIZE or MAX_HEADER_LIST_SIZE of 0, a connection window
-// above 2^31-1, an unknown Priority, HPACK, WindowUpdate, Errors, ALPS or
-// HeaderFraming, a negative
+// refused, and its initial value is 1), INITIAL_WINDOW_SIZE or
+// MAX_HEADER_LIST_SIZE of 0, a connection window above 2^31-1, an unknown
+// Priority, HPACK, WindowUpdate, Errors, ALPS or HeaderFraming, a negative
 // PrefacePing, a PRIORITY frame on stream 0 or on its own stream, a stream
-// ID above 2^31-1, an even FirstStreamID, a HeaderPriority without
-// HTTP2PriorityFixed or a zero one with it, or PriorityFrames,
-// HTTP2PriorityFixed or
-// HTTP2PriorityChromium with
-// NO_RFC7540_PRIORITIES 1, which says the client sends no such priority.
+// ID above 2^31-1, an even FirstStreamID or one of 2^31-1, which no request
+// could open, a HeaderPriority without HTTP2PriorityFixed, a zero one with
+// it or one depending on a stream the requests open, or PriorityFrames,
+// HTTP2PriorityFixed or HTTP2PriorityChromium with NO_RFC7540_PRIORITIES 1,
+// which says the client sends no such priority.
 // The settings are copied when WithHTTP2Settings is called.
 func WithHTTP2Settings(s HTTP2Settings) Option {
 	// Converted now: the Settings slice is the caller's.

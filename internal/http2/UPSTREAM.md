@@ -59,6 +59,7 @@ Packages (`internal/gate` and `internal/testcert` are used only by tests):
 - `scripts/xnet-patches/0039-first-stream-not-established.patch`
 - `scripts/xnet-patches/0040-chromium-header-list-size.patch`
 - `scripts/xnet-patches/0041-require-enable-push.patch`
+- `scripts/xnet-patches/0042-check-stream-ids.patch`
 
 ## Excluded files
 

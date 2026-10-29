@@ -56,7 +56,10 @@ const maxStreamIDValue = 1<<31 - 1
 // CheckPriorities validates the PRIORITY frames, the HEADERS priority and
 // the first stream of Transport.PriorityFrames, HeaderPriority and
 // FirstStreamID: stream IDs within 2^31-1, a PRIORITY frame neither on
-// stream 0 nor depending on its own stream, and an odd first stream.
+// stream 0 nor depending on its own stream, a HEADERS priority that does
+// not depend on a stream of the requests, which one would on itself, and
+// an odd first stream below 2^31-1, the last ID, which the engine never
+// opens (canTakeNewRequestLocked).
 func CheckPriorities(frames []PriorityFrameParam, header *PriorityParam, first uint32) error {
 	for _, f := range frames {
 		switch {
@@ -71,8 +74,11 @@ func CheckPriorities(frames []PriorityFrameParam, header *PriorityParam, first u
 	if header != nil && header.StreamDep > maxStreamIDValue {
 		return fmt.Errorf("http2: HEADERS priority depending on stream %d", header.StreamDep)
 	}
-	if first != 0 && (first%2 == 0 || first > maxStreamIDValue) {
-		return fmt.Errorf("http2: first stream %d is not an odd stream ID", first)
+	if first != 0 && (first%2 == 0 || first >= maxStreamIDValue) {
+		return fmt.Errorf("http2: first stream %d is not an odd stream ID below %d", first, maxStreamIDValue)
+	}
+	if header != nil && header.StreamDep%2 == 1 && header.StreamDep >= first {
+		return fmt.Errorf("http2: HEADERS priority depending on stream %d, which a request opens", header.StreamDep)
 	}
 	return nil
 }

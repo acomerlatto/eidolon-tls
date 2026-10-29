@@ -141,7 +141,14 @@ func TestCheckPriorities(t *testing.T) {
 		{nil, &PriorityParam{StreamDep: 1 << 31}, 0, false},
 		{nil, nil, 2, false},
 		{nil, nil, 1 << 31, false},
-		{nil, nil, 1<<31 - 1, true},
+		{nil, nil, 1<<31 - 1, false},
+		{nil, nil, 1<<31 - 3, true},
+		{nil, &PriorityParam{StreamDep: 15}, 15, false},
+		{nil, &PriorityParam{StreamDep: 17}, 15, false},
+		{nil, &PriorityParam{StreamDep: 13}, 15, true},
+		{nil, &PriorityParam{StreamDep: 16}, 15, true},
+		{nil, &PriorityParam{StreamDep: 1}, 0, false},
+		{nil, &PriorityParam{StreamDep: 0}, 0, true},
 	} {
 		if err := CheckPriorities(tt.frames, tt.header, tt.first); (err == nil) != tt.ok {
 			t.Errorf("CheckPriorities(%v, %v, %d) = %v, want ok %v", tt.frames, tt.header, tt.first, err, tt.ok)
