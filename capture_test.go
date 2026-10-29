@@ -18,6 +18,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	utls "github.com/acomerlatto/utls"
 	"golang.org/x/crypto/cryptobyte"
 
 	eidolon "github.com/acomerlatto/eidolon-tls"
@@ -215,9 +216,46 @@ func TestChromeCapture(t *testing.T) {
 	}
 }
 
+// The ClientHellos of Chrome156Linux change from one connection to the
+// next as Chrome's do, which normalHello hides: the order of the
+// extensions between the first and the last, and the length of the ECH
+// GREASE payload.
+func TestChrome156LinuxHelloVaries(t *testing.T) {
+	orders, lengths := map[string]bool{}, map[int]bool{}
+	for range 32 {
+		spec, err := eidolon.Chrome156Linux().ClientHello()
+		if err != nil {
+			t.Fatal(err)
+		}
+		uconn := utls.UClient(nil, &utls.Config{ServerName: "example.com"}, utls.HelloCustom)
+		if err := uconn.ApplyPreset(spec); err != nil {
+			t.Fatal(err)
+		}
+		if err := uconn.BuildHandshakeState(); err != nil {
+			t.Fatal(err)
+		}
+		h := parseHello(t, uconn.HandshakeState.Hello.Raw)
+		var order []string
+		for _, e := range h.Extensions[1 : len(h.Extensions)-1] {
+			if !fingerprint.IsGREASE(e.Type) {
+				order = append(order, fmt.Sprint(e.Type))
+			}
+			if e.Type == 0xfe0d {
+				lengths[len(e.Data)] = true
+			}
+		}
+		orders[strings.Join(order, ",")] = true
+	}
+	if len(orders) < 2 || len(lengths) < 2 {
+		t.Errorf("%d orders of the extensions and %d ECH lengths in 32 ClientHellos", len(orders), len(lengths))
+	}
+}
+
 // compareH2 compares the frames of the HTTP/2 connection with those of
-// the capture, but the SETTINGS ACK and the known deviation of the
-// favicon.
+// the capture, DATA lengths included, but the known deviation of the
+// favicon and the place of the SETTINGS ACK, which follows the server's
+// SETTINGS: there must be exactly one. The capture keeps no payload
+// length; a DATA frame has the Content-Length of its request.
 func compareH2(t *testing.T, c capture, frames []lab.H2Frame) {
 	t.Helper()
 	describe := func(frames []lab.H2Frame) []string {
@@ -230,22 +268,37 @@ func compareH2(t *testing.T, c capture, frames []lab.H2Frame) {
 			if f.Priority != nil {
 				s += fmt.Sprintf(" %+v", *f.Priority)
 			}
+			if f.Type == "DATA" {
+				s += fmt.Sprintf(" of %d bytes", f.Length)
+			}
 			out = append(out, s)
 		}
 		return out
 	}
+	if n := len(slices.DeleteFunc(slices.Clone(frames), func(f lab.H2Frame) bool { return f.Type != "SETTINGS" || f.Flags&1 == 0 })); n != 1 {
+		t.Errorf("%d SETTINGS ACK, want 1", n)
+	}
 	want := slices.Clone(c.H2Frames)
+	length := map[uint32]uint32{} // Content-Length by stream
 	i := 0
 	for j, fr := range want {
-		if fr.Type != "HEADERS" {
-			continue
+		switch fr.Type {
+		case "HEADERS":
+			for _, kv := range c.H2[i] {
+				if kv[0] == "content-length" {
+					n, _ := strconv.Atoi(kv[1])
+					length[fr.StreamID] = uint32(n)
+				}
+			}
+			if slices.Contains(c.H2[i], [2]string{":path", "/favicon.ico"}) {
+				p := *fr.Priority
+				p.Weight = 182 // u=2, the known deviation
+				want[j].Priority = &p
+			}
+			i++
+		case "DATA":
+			want[j].Length = length[fr.StreamID]
 		}
-		if slices.Contains(c.H2[i], [2]string{":path", "/favicon.ico"}) {
-			p := *fr.Priority
-			p.Weight = 182 // u=2, the known deviation
-			want[j].Priority = &p
-		}
-		i++
 	}
 	if got, want := describe(frames), describe(want); !slices.Equal(got, want) {
 		t.Errorf("frames:\n got %q\nwant %q", got, want)
