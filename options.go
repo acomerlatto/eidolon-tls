@@ -135,7 +135,8 @@ func WithDialContext(dial func(ctx context.Context, network, addr string) (net.C
 // An HTTPS proxy is reached over TLS with the ClientHello of the profile,
 // its certificate verified as a server's, and ALPN offering http/1.1
 // only: Chrome also offers h2 and then tunnels over HTTP/2 streams. It is
-// then used as an HTTP proxy.
+// then used as an HTTP proxy. Its TLS sessions are resumed as an
+// origin's, under a key of their own.
 //
 // An HTTP proxy gets https:// requests over a CONNECT tunnel, with the
 // User-Agent of the profile as Chrome sends it, and http:// requests as

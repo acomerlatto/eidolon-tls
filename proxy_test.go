@@ -304,6 +304,42 @@ func TestProxyHTTPS(t *testing.T) {
 	}
 }
 
+// As Chrome, the connections after the first to an HTTPS proxy resume
+// the session it gave, under a key of its own: a destination without
+// sessions is not offered it. With WithNewConnectionPerRequest, none is
+// kept.
+func TestProxyHTTPSResumption(t *testing.T) {
+	cert, err := lab.NewCertificate(time.Hour, "site.test", "proxy.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, perRequest := range []bool{false, true} {
+		srv := lab.Start(t, lab.Options{Certificate: &cert, TLS: func(c *tls.Config) { c.SessionTicketsDisabled = true }})
+		p := lab.StartHTTPSProxy(t, srv.Addr, "", cert)
+		var opts []eidolon.Option
+		if perRequest {
+			opts = append(opts, eidolon.WithNewConnectionPerRequest())
+		}
+		c := proxyClient(t, srv, "https://"+p.Addr, opts...)
+		for range 3 {
+			getNew(t, c, "https://site.test/")
+		}
+		want := []bool{false, true, true}
+		if perRequest {
+			want = []bool{false, false, false}
+		}
+		var got []bool
+		for _, hello := range p.Hellos() {
+			got = append(got, slices.Contains(hello.Extensions, extPreSharedKey))
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("per request %v: proxy resumed %v, want %v", perRequest, got, want)
+		}
+		// resumed fails t if a ClientHello offers a session.
+		resumed(t, srv, 3)
+	}
+}
+
 // A 407 of the server, not of a proxy that forwards the request, is a
 // response.
 func TestProxyServer407(t *testing.T) {

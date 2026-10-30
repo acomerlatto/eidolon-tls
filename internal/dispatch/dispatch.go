@@ -961,12 +961,19 @@ func (t *Transport) proxyTLS(ctx context.Context, network string, dial func(cont
 		TLS:         t.tlsConfig(host),
 		DialContext: dial,
 		StrictTLS12: t.StrictTLS12,
+		// Chrome resumes with the proxy too, under a key of its own
+		// (SSLClientSessionCache::Key::session_usage).
+		Sessions: t.sessionsOf(proxySessionKey + t.Proxy.Addr),
 	})
 	if err != nil {
 		return nil, err
 	}
 	return conn, nil
 }
+
+// proxySessionKey prefixes the address of the proxy in the session cache,
+// where the origins have a scheme.
+const proxySessionKey = "proxy "
 
 // forwards reports whether http:// requests go to the proxy as they are:
 // an HTTP or HTTPS proxy, as Chrome (UsingHttpProxyWithoutTunnel).

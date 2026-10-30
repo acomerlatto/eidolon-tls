@@ -106,9 +106,9 @@ func (c *sessionCache) insert(key string, s *session) {
 	p.push(s)
 }
 
-// sessionsOf returns the session caches of the connections to origin, as
-// tlsdial.Config.Sessions, or nil with noSessions.
-func (t *Transport) sessionsOf(origin string) func() tlsdial.Sessions {
+// sessionsOf returns the session caches of the connections to key, an
+// origin or the proxy, as tlsdial.Config.Sessions, or nil with noSessions.
+func (t *Transport) sessionsOf(key string) func() tlsdial.Sessions {
 	if t.noSessions {
 		return nil
 	}
@@ -118,7 +118,7 @@ func (t *Transport) sessionsOf(origin string) func() tlsdial.Sessions {
 	}
 	c := t.sessions
 	t.mu.Unlock()
-	return func() tlsdial.Sessions { return c.conn(origin) }
+	return func() tlsdial.Sessions { return c.conn(key) }
 }
 
 // conn returns the session cache of a new connection to key.
