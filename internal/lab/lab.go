@@ -250,11 +250,13 @@ func (s *Server) Close() {
 	s.wg.Wait()
 }
 
-// deliver hands c to Conns, unless the server is closed.
+// deliver hands c to NextConn, unless 64 connections wait there already:
+// a test that opens more without reading them goes on, and those are not
+// delivered.
 func (s *Server) deliver(c *Conn) {
 	select {
 	case s.conns <- c:
-	case <-s.done:
+	default:
 	}
 }
 
