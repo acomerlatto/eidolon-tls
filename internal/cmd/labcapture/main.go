@@ -9,6 +9,13 @@
 // nothing changes on the system; the URLs use the default ports, as in a
 // real visit. Stop it with Ctrl-C: open connections are closed and
 // written.
+//
+// With -doh, a fourth server is the DNS over HTTPS server of the browser,
+// in secure mode, and its queries are recorded too: it offers h2 and
+// http/1.1, or http/1.1 only with -doh http/1.1. It answers A queries of
+// the lab names with 127.0.0.1, HTTPS queries with a record for h2, and
+// the other names with NXDOMAIN; the page of DoHSiteHost, on the port of
+// the first server, is found through it.
 package main
 
 import (
@@ -17,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"log"
@@ -35,17 +43,27 @@ const (
 	hostBoth  = lab.SiteHost
 	hostH1    = lab.SiteH1Host
 	hostPlain = lab.SitePlainHost
+	// hostDoH is the DoH server, and hostDoHSite a name of the first
+	// server that only the DoH server resolves.
+	hostDoH     = "doh.lab.test"
+	hostDoHSite = "dns.lab.test"
 )
 
 func main() {
 	out := flag.String("out", "lab-captures", "directory for the captures")
-	port := flag.Int("port", 8443, "first of three consecutive ports")
+	port := flag.Int("port", 8443, "first of three consecutive ports, four with -doh")
+	doh := flag.String("doh", "", `serve the DoH server of the browser: "h2" (h2 and http/1.1) or "http/1.1"`)
 	flag.Parse()
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		log.Fatal(err)
 	}
-	cert, err := lab.NewCertificate(24*time.Hour, hostBoth, hostH1)
+	cert, err := lab.NewCertificate(24*time.Hour, hostBoth, hostH1, hostDoH, hostDoHSite)
 	if err != nil {
+		log.Fatal(err)
+	}
+	// cert.pem lets a client of the lab, such as Eidolon, trust it.
+	pemCert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Leaf.Raw})
+	if err := os.WriteFile(filepath.Join(*out, "cert.pem"), pemCert, 0o644); err != nil {
 		log.Fatal(err)
 	}
 
@@ -57,6 +75,20 @@ func main() {
 		{hostH1, lab.Options{Certificate: &cert, NextProtos: []string{"http/1.1"}}},
 		{hostPlain, lab.Options{Plain: true}},
 	}
+	switch *doh {
+	case "":
+	case "h2", "http/1.1":
+		opts := lab.Options{Certificate: &cert, Handler: dohHandler(*port)}
+		if *doh == "http/1.1" {
+			opts.NextProtos = []string{"http/1.1"}
+		}
+		servers = append(servers, struct {
+			host string
+			opts lab.Options
+		}{hostDoH, opts})
+	default:
+		log.Fatalf("-doh %q: want h2 or http/1.1", *doh)
+	}
 	var (
 		seq     atomic.Int32
 		quit    = make(chan struct{})
@@ -65,7 +97,9 @@ func main() {
 		rules   string
 	)
 	for i, s := range servers {
-		s.opts.Handler = lab.Site()
+		if s.opts.Handler == nil {
+			s.opts.Handler = lab.Site()
+		}
 		addr := fmt.Sprintf("127.0.0.1:%d", *port+i)
 		srv, err := lab.Listen(addr, s.opts)
 		if err != nil {
@@ -119,6 +153,15 @@ before so its field trials are loaded, and visit https://%s/:
 
 Record chrome://version with each capture. Ctrl-C ends.
 `, *out, hostBoth, rules, base64.StdEncoding.EncodeToString(spki[:]), hostBoth)
+	if *doh != "" {
+		fmt.Printf(`
+For DoH, set in the Local State file of the profile, browser closed:
+
+  "dns_over_https": {"mode": "secure", "templates": "https://%s/dns-query{?dns}"}
+
+and visit https://%s:%d/ instead, which only the DoH server resolves.
+`, hostDoH, hostDoHSite, *port)
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
