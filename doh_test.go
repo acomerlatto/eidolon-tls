@@ -285,6 +285,20 @@ func TestDoHRequestFieldsHTTP1(t *testing.T) {
 	}
 }
 
+// The queries follow the protocols of the client: with WithForceHTTP1,
+// they go over HTTP/1.1 to a server that offers HTTP/2.
+func TestDoHProtocols(t *testing.T) {
+	z := &zone{}
+	srv, _ := dohLab(t, z)
+	c := dohClient(t, srv, eidolon.WithForceHTTP1())
+	if _, err := echGet(c, "https://"+echSecret+"/"); err != nil {
+		t.Fatal(err)
+	}
+	if doh := srv.NextConn(t); doh.State.ServerName != dohHost || doh.State.NegotiatedProtocol != "http/1.1" {
+		t.Errorf("DoH connection to %q over %q, want HTTP/1.1", doh.State.ServerName, doh.State.NegotiatedProtocol)
+	}
+}
+
 // A template without the dns variable sends the queries by POST.
 func TestDoHPost(t *testing.T) {
 	z := &zone{}

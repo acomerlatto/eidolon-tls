@@ -110,6 +110,7 @@ func (c *config) configureDoH(tr *dispatch.Transport) (*dispatch.Transport, erro
 		Priority:        "u=4, i",
 		H1Connection:    "keep-alive",
 		Order:           &order.Order{Pseudo: pseudo},
+		Protocols:       tr.Protocols,
 		H2:              tr.H2,
 		StrictTLS12:     tr.StrictTLS12,
 		MaxConnsPerHost: tr.MaxConnsPerHost,

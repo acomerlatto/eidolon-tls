@@ -173,7 +173,8 @@ func WithProxy(rawURL string) Option {
 // reused, so a rotating proxy chooses a new exit for each request, a
 // redirect hop included. Without it, connections are reused as Chrome
 // reuses them. What the client learns from a connection, such as a server that
-// requires HTTP/1.1, goes with it.
+// requires HTTP/1.1, goes with it. The queries of WithDoH still reuse
+// their connections, as Chrome keeps one to its DoH server.
 func WithNewConnectionPerRequest() Option {
 	return func(c *config) error {
 		c.newConnPerRequest = true

@@ -39,7 +39,7 @@ func (p Protocol) String() string {
 // the enabled protocols, and ALPS only those ALPN still offers. The
 // fingerprint is then no longer the one of the spec. It cannot be combined
 // with WithForceHTTP1 or WithForceHTTP2. The list is copied when
-// WithProtocols is called.
+// WithProtocols is called. The queries of WithDoH follow it too.
 func WithProtocols(ps ...Protocol) Option {
 	// Copied now: ps may be the caller's slice.
 	ps = slices.Clone(ps)
