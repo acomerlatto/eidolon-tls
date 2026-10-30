@@ -35,6 +35,11 @@ capturas do tráfego dele); o comportamento descrito aqui é o dessa versão.
   - uma navegação sem iniciador não envia `Origin`, nem num POST;
   - o `sec-fetch-storage-access` não é modelado, e o frame ACCEPT_CH do
     ALPS não alimenta client hints.
+- A extensão `trust_anchors` (`0xca34`) leva os 28 IDs de âncoras de
+  confiança do Chrome Root Store 39, na ordem do Chrome. O Chrome atualiza
+  o repositório de raízes fora do ciclo de versões: um Chrome 156 recém-
+  instalado, ainda no repositório 36, envia mais quatro, e um repositório
+  posterior muda a lista. O perfil mantém a lista com que foi capturado.
 - O HTTP/2 segue o enquadramento, as prioridades, o controle de fluxo e o
   tratamento de erros do Chrome (`HTTP2Settings`), com alguns caminhos de
   erro que diferem em detalhe: um SETTINGS de tamanho inválido manda GOAWAY

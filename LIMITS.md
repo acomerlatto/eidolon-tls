@@ -36,6 +36,11 @@ of its traffic); the behavior described here is the one of this version.
   - a navigation without an initiator sends no `Origin`, not even a POST;
   - `sec-fetch-storage-access` is not modeled, and the ACCEPT_CH frame of
     ALPS does not feed client hints.
+- The `trust_anchors` extension (`0xca34`) carries the 28 trust anchor IDs
+  of Chrome Root Store 39, in Chrome's order. Chrome updates its root store
+  outside its release cycle: a freshly installed Chrome 156 still on store
+  36 sends four more, and a later store changes the list. The profile keeps
+  the list it was captured with.
 - HTTP/2 follows Chrome's framing, priorities, flow control and error
   handling (`HTTP2Settings`), with a few error paths that differ in detail:
   a SETTINGS frame of bad length sends GOAWAY without applying the settings
