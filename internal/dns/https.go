@@ -106,18 +106,9 @@ func supportedKey(k uint16) bool {
 // DnsResponse::InitParse does: the ID, the QR flag, one question, the
 // same bytes as the question of query.
 func Parse(query, resp []byte, host string, port uint16) HTTPS {
-	qname, n, ok := readName(query, 12)
-	if !ok || len(query) < 12+n+4 {
-		return failed(errors.New("dns: invalid query"))
-	}
-	question := query[12 : 12+n+4]
-	switch {
-	case len(resp) < 12+len(question):
-		return failed(errMismatch)
-	case !bytes.Equal(resp[:2], query[:2]) || resp[2]&0x80 == 0 || binary.BigEndian.Uint16(resp[4:]) != 1:
-		return failed(errMismatch)
-	case !bytes.Equal(resp[12:12+len(question)], question):
-		return failed(errMismatch)
+	qname, question, err := match(query, resp)
+	if err != nil {
+		return failed(err)
 	}
 	switch rcode := dnsmessage.RCode(resp[3] & 0xf); rcode {
 	case dnsmessage.RCodeSuccess, dnsmessage.RCodeNameError:
@@ -129,6 +120,26 @@ func Parse(query, resp []byte, host string, port uint16) HTTPS {
 	m := &message{b: resp, off: 12 + len(question)}
 	answers, authority := int(binary.BigEndian.Uint16(resp[6:])), int(binary.BigEndian.Uint16(resp[8:]))
 	return extract(m, answers, authority, strings.ToLower(qname), host, port)
+}
+
+// match checks that resp answers query, as Chrome's DnsResponse::InitParse:
+// the ID, the QR flag, one question, the same bytes as the question of
+// query. It returns the name and the question of query.
+func match(query, resp []byte) (string, []byte, error) {
+	qname, n, ok := readName(query, 12)
+	if !ok || len(query) < 12+n+4 {
+		return "", nil, errors.New("dns: invalid query")
+	}
+	question := query[12 : 12+n+4]
+	switch {
+	case len(resp) < 12+len(question):
+		return "", nil, errMismatch
+	case !bytes.Equal(resp[:2], query[:2]) || resp[2]&0x80 == 0 || binary.BigEndian.Uint16(resp[4:]) != 1:
+		return "", nil, errMismatch
+	case !bytes.Equal(resp[12:12+len(question)], question):
+		return "", nil, errMismatch
+	}
+	return qname, question, nil
 }
 
 func failed(err error) HTTPS  { return HTTPS{Status: Failed, Err: err} }

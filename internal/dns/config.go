@@ -52,6 +52,20 @@ type Config struct {
 	Hosts map[HostsKey]netip.Addr
 }
 
+// Local reports a host Chrome resolves without DNS, so without an HTTPS
+// query: a name of the hosts file, in either family, or localhost and its
+// subdomains (HostResolverManager::ServeFromHosts, IsLocalHostname). host
+// is canonical, as target.Parse returns it.
+func (c Config) Local(host string) bool {
+	name := strings.TrimSuffix(host, ".")
+	if name == "localhost" || strings.HasSuffix(name, ".localhost") {
+		return true
+	}
+	_, v4 := c.Hosts[HostsKey{host, false}]
+	_, v6 := c.Hosts[HostsKey{host, true}]
+	return v4 || v6
+}
+
 // HostsKey is a name of the hosts file and its address family.
 type HostsKey struct {
 	Name string

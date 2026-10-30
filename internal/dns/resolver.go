@@ -35,6 +35,9 @@ type Resolver struct {
 	Timeout time.Duration
 	// MaxEntries bounds the cache; zero means DefaultMaxEntries.
 	MaxEntries int
+	// Local, when set, reports the hosts resolved without DNS, whose
+	// answer is NoData without a query.
+	Local func(host string) bool
 
 	mu    sync.Mutex
 	cache map[string]entry
@@ -68,6 +71,9 @@ func QueryName(host string, port uint16) string {
 // cache or from a query. It returns at the end of ctx with a Failed answer
 // whose Err is ctx's.
 func (r *Resolver) HTTPS(ctx context.Context, host string, port uint16) HTTPS {
+	if r.Local != nil && r.Local(host) {
+		return HTTPS{Status: NoData}
+	}
 	name := QueryName(host, port)
 	r.mu.Lock()
 	if e, ok := r.cache[name]; ok && time.Now().Before(e.expires) {
