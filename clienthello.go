@@ -30,7 +30,10 @@ func WithShuffledExtensions() ClientHelloOption {
 // its TLS record header. Each connection has new GREASE values, random,
 // session ID and key shares; uTLS leaves the captured server name out of
 // SNI, and the one sent is the host of the URL. The extensions keep the captured order
-// unless WithShuffledExtensions is given.
+// unless WithShuffledExtensions is given. A captured pre_shared_key is
+// left out, or carries a session of the client when it resumes one;
+// without it, pre_shared_key is added at the end when the ClientHello
+// offers psk_key_exchange_modes, as Chrome does.
 //
 // The ClientHello is checked once, as New checks every spec: an extension
 // uTLS does not know, an extension twice, a malformed list, pre_shared_key
@@ -54,7 +57,9 @@ func ClientHelloFromRaw(raw []byte, opts ...ClientHelloOption) (func() (*utls.Cl
 		return nil, fmt.Errorf("ClientHelloFromRaw: %w: %w", ErrProfile, err)
 	}
 	spec := func() (*utls.ClientHelloSpec, error) {
-		spec, err := (&utls.Fingerprinter{}).FingerprintClientHello(record)
+		// pre_shared_key resumes a session of the client, not the
+		// captured one.
+		spec, err := (&utls.Fingerprinter{RealPSKResumption: true}).FingerprintClientHello(record)
 		if err != nil {
 			return nil, err
 		}

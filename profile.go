@@ -92,7 +92,8 @@ type DestHeaders struct {
 
 // Chrome156Linux returns the profile of Chrome 156.0.8078.73 on Linux, as
 // captured on 28/10/2026: the ClientHello of the uTLS fork's
-// HelloChrome_155, whose extensions are shuffled on each connection, the
+// HelloChrome_155, whose extensions are shuffled on each connection, with
+// pre_shared_key at the end when it resumes a session, the
 // HTTP/2 SETTINGS, WINDOW_UPDATE and priority of Chrome, the pseudo-header
 // order :method, :authority, :scheme, :path, the headers of a navigation,
 // a fetch() and a stylesheet, image or script, over https:// and http://,

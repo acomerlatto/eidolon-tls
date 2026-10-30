@@ -68,6 +68,25 @@ type Config struct {
 	// or secure renegotiation (RFC 9325), with ErrTLS12Policy. Chrome
 	// accepts all of them; the ClientHello does not change.
 	StrictTLS12 bool
+
+	// Sessions, when set, returns the session cache of each new
+	// connection without ECH: the connection resumes a session from it
+	// and keeps there the ones the server sends. With ECH, the connection
+	// neither resumes nor keeps any.
+	Sessions func() Sessions
+}
+
+// Sessions is the session cache of one connection. Get and Put are
+// called during the handshake and, in TLS 1.3, Put after it.
+type Sessions interface {
+	utls.ClientSessionCache
+	// Unused gives back the session Get returned to a connection whose
+	// TCP dial failed: it was never sent.
+	Unused()
+	// Handshake reports the end of the handshake, and whether it resumed
+	// the session Get returned. It comes before the Put calls after the
+	// handshake.
+	Handshake(resumed bool)
 }
 
 // Dial opens a TCP connection to addr, performs the TLS handshake with a new
@@ -89,9 +108,13 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 		tc.VerifyConnection = exactIP(ip, tc.VerifyConnection)
 		cfg.TLS = tc
 	}
+	var sessions Sessions
+	if cfg.Sessions != nil && len(cfg.TLS.EncryptedClientHelloConfigList) == 0 {
+		sessions = cfg.Sessions()
+	}
 	// Build the ClientHello before dialing, so a bad profile opens no
 	// connection.
-	uconn, tc, err := prepare(cfg)
+	uconn, tc, err := prepare(cfg, sessions)
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +125,9 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 	}
 	conn, err := dial(ctx, network, addr)
 	if err != nil {
+		if sessions != nil {
+			sessions.Unused()
+		}
 		return nil, err
 	}
 	uconn.SetUnderlyingConn(conn)
@@ -119,6 +145,9 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 		return nil, err
 	}
 	st := uconn.ConnectionState()
+	if sessions != nil {
+		sessions.Handshake(st.DidResume)
+	}
 	switch st.NegotiatedProtocol {
 	case ProtoH2, ProtoHTTP1, "":
 	default:
@@ -212,16 +241,19 @@ func Check(cfg Config) error {
 		tc.ServerName = "eidolon.invalid"
 	}
 	cfg.TLS = tc
-	_, _, err := prepare(cfg)
+	_, _, err := prepare(cfg, nil)
 	return err
 }
 
 // prepare builds a new spec, applies it to a client that has no
 // connection yet and builds its ClientHello, checked by checkHello and,
 // with ECH, for TLS 1.3 and server_name, and
-// returns the config of the client, which the spec changed. Every error
-// wraps ErrProfile.
-func prepare(cfg Config) (*utls.UConn, *utls.Config, error) {
+// returns the config of the client, which the spec changed. With
+// sessions, the ClientHello resumes a session from it: a spec that offers
+// psk_key_exchange_modes without pre_shared_key gets one, last, as
+// Chrome adds it to a ClientHello that resumes. Every error wraps
+// ErrProfile.
+func prepare(cfg Config, sessions Sessions) (*utls.UConn, *utls.Config, error) {
 	spec, err := cfg.Spec()
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrProfile, err)
@@ -249,6 +281,15 @@ func prepare(cfg Config) (*utls.UConn, *utls.Config, error) {
 		}
 	}
 	tc := cfg.TLS.Clone()
+	// Without a session, pre_shared_key is left out, as Chrome does. A
+	// spec without pre_shared_key, or without session_ticket, does not
+	// resume the sessions it would carry (TLS 1.3, TLS 1.2).
+	tc.OmitEmptyPsk = true
+	tc.PreferSkipResumptionOnNilExtension = true
+	if sessions != nil {
+		tc.ClientSessionCache = sessions
+		addPSK(spec)
+	}
 	uconn := utls.UClient(nil, tc, utls.HelloCustom)
 	if err := uconn.ApplyPreset(spec); err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrProfile, err)
@@ -267,4 +308,21 @@ func prepare(cfg Config) (*utls.UConn, *utls.Config, error) {
 		return nil, nil, fmt.Errorf("%w: ECH needs a profile that offers TLS 1.3 and server_name", ErrProfile)
 	}
 	return uconn, tc, nil
+}
+
+// addPSK adds pre_shared_key, last, to a spec that offers
+// psk_key_exchange_modes without it.
+func addPSK(spec *utls.ClientHelloSpec) {
+	modes := false
+	for _, ext := range spec.Extensions {
+		switch ext.(type) {
+		case utls.PreSharedKeyExtension:
+			return
+		case *utls.PSKKeyExchangeModesExtension:
+			modes = true
+		}
+	}
+	if modes {
+		spec.Extensions = append(spec.Extensions, &utls.UtlsPreSharedKeyExtension{})
+	}
 }

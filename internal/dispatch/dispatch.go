@@ -121,7 +121,8 @@ type Transport struct {
 	H2 *H2Preface
 	// NewConnPerRequest gives each request connections of its own, closed
 	// when its response ends: none is reused, and a proxy opens a tunnel
-	// per request. The learned protocols go with them.
+	// per request. The learned protocols go with them, and no TLS session
+	// is resumed.
 	NewConnPerRequest bool
 	// MaxConns, when positive, bounds the connections of the transport
 	// and of the transports of NewConnPerRequest, in use, idle or being
@@ -138,6 +139,10 @@ type Transport struct {
 	closed bool
 	conns  map[*trackedConn]struct{}
 	limit  *connLimit // MaxConns, shared with the children
+	// sessions holds the TLS sessions to resume, per origin; the children
+	// have none (noSessions).
+	sessions   *sessionCache
+	noSessions bool
 	// protos holds the protocol learned per key, for the maxServerInfo
 	// keys used last; dialing, the shared dial in progress per key.
 	protos  *lru[string]
@@ -373,6 +378,7 @@ func (t *Transport) child() *Transport {
 		H2:                     t.H2,
 		MaxConns:               t.MaxConns,
 		limit:                  t.limiter(),
+		noSessions:             true,
 	}
 }
 
@@ -722,6 +728,7 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 			return conn, err
 		},
 		StrictTLS12: t.StrictTLS12,
+		Sessions:    t.sessionsOf(tgt.Origin()),
 	}
 	conn, err := t.dialAddrs(ctx, tgt, dc)
 	var re *utls.ECHRejectionError

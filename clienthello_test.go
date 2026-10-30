@@ -89,6 +89,46 @@ func TestClientHelloFromRaw(t *testing.T) {
 	}
 }
 
+// A captured ClientHello that resumes a session leaves pre_shared_key
+// out of the first connection and sends a real one, last, on the next
+// ones, which resume in the captured shape; one captured without it, but
+// with psk_key_exchange_modes, gets it at the end, as Chrome adds it.
+func TestClientHelloFromRawResumption(t *testing.T) {
+	resumedCapture, err := os.ReadFile("testdata/chrome156-linux-clienthello-resumed.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, resumedExts := helloShape(t, resumedCapture[5:])
+	_, firstExts := helloShape(t, chromeCapture(t)[5:])
+	for _, tt := range []struct {
+		name        string
+		raw         []byte
+		first, next []string
+	}{
+		{"resumed", resumedCapture, slices.DeleteFunc(slices.Clone(resumedExts), func(e string) bool { return e == "41" }), resumedExts},
+		{"first", chromeCapture(t), firstExts, append(slices.Clone(firstExts), "41")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			spec, err := eidolon.ClientHelloFromRaw(tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
+			c := newClient(t, srv, eidolon.WithClientHello(spec))
+			for i, want := range [][]string{tt.first, tt.next} {
+				getNew(t, c, "https://example.com/")
+				conn := srv.NextConn(t)
+				if _, exts := helloShape(t, conn.ClientHello); !slices.Equal(exts, want) {
+					t.Errorf("connection %d: extensions %v, want %v", i, exts, want)
+				}
+				if conn.State.DidResume != (i == 1) {
+					t.Errorf("connection %d: resumed %v", i, conn.State.DidResume)
+				}
+			}
+		})
+	}
+}
+
 // WithShuffledExtensions shuffles the extensions on each connection, as
 // Chrome, with GREASE in its places.
 func TestClientHelloFromRawShuffled(t *testing.T) {

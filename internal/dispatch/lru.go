@@ -57,3 +57,10 @@ func (l *lru[V]) put(key string, val V) {
 	}
 	l.items[key] = l.order.PushFront(&lruEntry[V]{key, val})
 }
+
+func (l *lru[V]) remove(key string) {
+	if e, ok := l.items[key]; ok {
+		delete(l.items, key)
+		l.order.Remove(e)
+	}
+}

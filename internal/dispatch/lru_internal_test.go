@@ -9,7 +9,8 @@ import (
 )
 
 // An lru keeps its max most recently used keys: get and put make a key the
-// most recent, and put drops the least recent one when full.
+// most recent, put drops the least recent one when full, and remove frees
+// the place of its key.
 func TestLRU(t *testing.T) {
 	var none *lru[int]
 	if _, ok := none.get("a"); ok {
@@ -29,6 +30,15 @@ func TestLRU(t *testing.T) {
 	}
 	if v, ok := l.get("c"); !ok || v != 3 || len(l.items) != 2 || l.order.Len() != 2 {
 		t.Errorf("c = %d, %v with %d items; want 3 of 2", v, ok, len(l.items))
+	}
+	l.remove("c")
+	l.remove("c")
+	l.put("d", 5) // in the place of c
+	if _, ok := l.get("c"); ok {
+		t.Error("c kept after its removal")
+	}
+	if _, ok := l.get("a"); !ok {
+		t.Error("a dropped, want the place of c taken")
 	}
 }
 
