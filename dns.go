@@ -37,5 +37,5 @@ func (c *config) configureSystemDNS(tr *dispatch.Transport) {
 	if tlsdial.Check(tlsdial.Config{Spec: tr.Spec, TLS: &utls.Config{EncryptedClientHelloConfigList: probe}}) != nil {
 		return
 	}
-	tr.Resolver = &dns.Resolver{Exchanger: &dns.Classic{Config: conf}, Local: conf.Local}
+	tr.Resolver = &dns.Resolver{Exchanger: &dns.Classic{Config: conf}, Local: conf.Local, MaxQueries: c.maxDNSQueries}
 }

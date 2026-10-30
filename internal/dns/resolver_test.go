@@ -3,6 +3,8 @@ package dns
 import (
 	"context"
 	"errors"
+	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -203,6 +205,88 @@ func TestResolverShared(t *testing.T) {
 		if got := r.HTTPS(done, "example.com", 443); got.Status != Failed {
 			t.Errorf("canceled before the call: %+v", got)
 		}
+	})
+}
+
+// Beyond MaxQueries in progress, the queries wait in line, and their
+// Timeout starts when they leave it; a query whose callers left while it
+// waits is never sent.
+func TestResolverQueue(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ex, _ := answering(t, dnsmessage.RCodeSuccess, https("", 60, svc(1, "")))
+		var mu sync.Mutex
+		var started []string
+		deadlines := map[string]time.Duration{}
+		release := map[string]chan struct{}{"a.example": make(chan struct{}), "b.example": make(chan struct{}), "c.example": make(chan struct{})}
+		r := &Resolver{MaxQueries: 2, Timeout: time.Second, Exchanger: exchangeFunc(func(ctx context.Context, n string, qt dnsmessage.Type) ([]byte, []byte, error) {
+			d, _ := ctx.Deadline()
+			mu.Lock()
+			started = append(started, n)
+			deadlines[n] = time.Until(d)
+			mu.Unlock()
+			select {
+			case <-release[n]:
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+			return ex.Exchange(ctx, n, qt)
+		})}
+		results := make(chan HTTPS, 4)
+		for _, n := range []string{"a.example", "b.example", "c.example"} {
+			go func() { results <- r.HTTPS(context.Background(), n, 443) }()
+			synctest.Wait()
+		}
+		ctxD, cancelD := context.WithCancel(context.Background())
+		go func() { results <- r.HTTPS(ctxD, "d.example", 443) }()
+		synctest.Wait()
+		if !slices.Equal(started, []string{"a.example", "b.example"}) {
+			t.Fatalf("started %q, want a and b", started)
+		}
+		time.Sleep(900 * time.Millisecond)
+		cancelD()
+		if got := <-results; got.Status != Failed {
+			t.Errorf("d.example, left in line: %+v", got)
+		}
+		close(release["a.example"])
+		synctest.Wait()
+		close(release["b.example"])
+		close(release["c.example"])
+		for range 3 {
+			if got := <-results; got.Status != Found {
+				t.Errorf("answer %+v", got)
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if !slices.Equal(started, []string{"a.example", "b.example", "c.example"}) {
+			t.Errorf("started %q, want a, b, then c", started)
+		}
+		if deadlines["c.example"] != time.Second {
+			t.Errorf("c.example has %v, want its whole Timeout after its wait", deadlines["c.example"])
+		}
+	})
+}
+
+// By default, 64 queries are in progress at once, as Chrome's jobs.
+func TestResolverDefaultMaxQueries(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var started atomic.Int32
+		r := &Resolver{Exchanger: exchangeFunc(func(ctx context.Context, n string, qt dnsmessage.Type) ([]byte, []byte, error) {
+			started.Add(1)
+			<-ctx.Done()
+			return nil, nil, ctx.Err()
+		})}
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+		for i := range DefaultMaxQueries + 1 {
+			wg.Go(func() { r.HTTPS(ctx, strconv.Itoa(i)+".example", 443) })
+		}
+		synctest.Wait()
+		if n := started.Load(); n != DefaultMaxQueries {
+			t.Errorf("%d queries in progress, want %d", n, DefaultMaxQueries)
+		}
+		cancel()
+		wg.Wait()
 	})
 }
 

@@ -126,7 +126,7 @@ func (c *config) configureDoH(tr *dispatch.Transport) (*dispatch.Transport, erro
 	if c.proxy == nil {
 		hosts, _ = systemDNS()
 	}
-	tr.Resolver = &dns.Resolver{Exchanger: &dns.DoH{URL: c.doh.template, Transport: doh}, Local: hosts.Local}
+	tr.Resolver = &dns.Resolver{Exchanger: &dns.DoH{URL: c.doh.template, Transport: doh}, Local: hosts.Local, MaxQueries: c.maxDNSQueries}
 	return doh, nil
 }
 

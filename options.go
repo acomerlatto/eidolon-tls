@@ -42,6 +42,7 @@ type config struct {
 	doh     *dohConfig
 
 	maxConnsPerHost   int
+	maxDNSQueries     int
 	idleConnTimeout   time.Duration
 	newConnPerRequest bool
 
@@ -208,6 +209,21 @@ func WithMaxConnsPerHost(n int) Option {
 			return fmt.Errorf("WithMaxConnsPerHost: %d is not positive", n)
 		}
 		c.maxConnsPerHost = n
+		return nil
+	}
+}
+
+// WithMaxDNSQueries bounds the lookups of HTTPS records in progress at
+// once, to the server of WithDoH or the name servers of the system; the
+// others wait in line, each until its own context ends, and their 12
+// seconds start when they leave it. The default is 64, as Chrome's
+// resolver jobs. Lookups of one origin share one query.
+func WithMaxDNSQueries(n int) Option {
+	return func(c *config) error {
+		if n <= 0 {
+			return fmt.Errorf("WithMaxDNSQueries: %d is not positive", n)
+		}
+		c.maxDNSQueries = n
 		return nil
 	}
 }

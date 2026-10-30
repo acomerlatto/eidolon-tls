@@ -225,3 +225,22 @@ func TestCloseResolver(t *testing.T) {
 		t.Errorf("lookup after Close: %+v", got)
 	}
 }
+
+// WithMaxDNSQueries bounds the queries of the resolver of the system and
+// of WithDoH.
+func TestMaxDNSQueries(t *testing.T) {
+	useSystemDNS(t, dns.Config{Servers: []netip.AddrPort{netip.MustParseAddrPort("127.0.0.1:53")}, Attempts: 1}, true)
+	for _, opts := range [][]Option{
+		{WithProfile(Chrome156Linux()), WithMaxDNSQueries(3)},
+		{WithProfile(Chrome156Linux()), WithMaxDNSQueries(3), WithDoH("https://doh.example/dns-query{?dns}", "127.0.0.1")},
+	} {
+		c, err := New(opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := c.(*client).tr.Resolver.MaxQueries; n != 3 {
+			t.Errorf("MaxQueries %d, want 3", n)
+		}
+		c.Close()
+	}
+}

@@ -24,19 +24,27 @@ const (
 	// DefaultMaxEntries bounds the cache, as Chrome's HostCache
 	// (kDefaultMaxEntries).
 	DefaultMaxEntries = 1000
+	// DefaultMaxQueries bounds the queries in progress, as Chrome's
+	// resolver jobs (kDefaultMaxSystemTasks).
+	DefaultMaxQueries = 64
 )
 
 // Resolver looks up the HTTPS records of origins over an Exchanger, with
 // a cache of its own: Found and NoData answers are kept for their TTL, the
 // others are not. An expired entry stays until a new answer replaces it or
 // a full cache drops it. Concurrent lookups of one name share one query, which
-// ends when every caller has left or after Timeout.
+// ends when every caller has left or after Timeout. Beyond MaxQueries in
+// progress, the queries wait in line.
 type Resolver struct {
 	Exchanger Exchanger
-	// Timeout bounds a query; zero means DefaultTimeout.
+	// Timeout bounds a query from its start, after its wait in line; zero
+	// means DefaultTimeout.
 	Timeout time.Duration
 	// MaxEntries bounds the cache; zero means DefaultMaxEntries.
 	MaxEntries int
+	// MaxQueries bounds the queries in progress; zero means
+	// DefaultMaxQueries.
+	MaxQueries int
 	// Local, when set, reports the hosts resolved without DNS, whose
 	// answer is NoData without a query.
 	Local func(host string) bool
@@ -44,6 +52,7 @@ type Resolver struct {
 	mu     sync.Mutex
 	cache  map[string]entry
 	calls  map[string]*call
+	slots  chan struct{} // one per query in progress
 	closed bool
 }
 
@@ -108,14 +117,15 @@ func (r *Resolver) HTTPS(ctx context.Context, host string, port uint16) HTTPS {
 			r.mu.Unlock()
 			return failed(ErrClosed)
 		}
-		timeout := r.Timeout
-		if timeout == 0 {
-			timeout = DefaultTimeout
-		}
-		qctx, cancel := context.WithTimeout(context.Background(), timeout)
+		qctx, cancel := context.WithCancel(context.Background())
 		c = &call{done: make(chan struct{}), cancel: cancel}
 		if r.calls == nil {
 			r.calls = make(map[string]*call)
+			n := r.MaxQueries
+			if n == 0 {
+				n = DefaultMaxQueries
+			}
+			r.slots = make(chan struct{}, n)
 		}
 		r.calls[name] = c
 		go r.lookup(qctx, c, name, host, port)
@@ -140,11 +150,7 @@ func (r *Resolver) HTTPS(ctx context.Context, host string, port uint16) HTTPS {
 // lookup runs the query of c and keeps its answer.
 func (r *Resolver) lookup(ctx context.Context, c *call, name, host string, port uint16) {
 	defer c.cancel()
-	q, resp, err := r.Exchanger.Exchange(ctx, name, TypeHTTPS)
-	h := failed(err)
-	if err == nil {
-		h = Parse(q, resp, host, port)
-	}
+	h := r.query(ctx, name, host, port)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.calls[name] == c {
@@ -157,6 +163,28 @@ func (r *Resolver) lookup(ctx context.Context, c *call, name, host string, port 
 	}
 	c.https = h
 	close(c.done)
+}
+
+// query waits in line for a slot, then sends the query of name within
+// Timeout and reads its answer.
+func (r *Resolver) query(ctx context.Context, name, host string, port uint16) HTTPS {
+	select {
+	case r.slots <- struct{}{}:
+	case <-ctx.Done():
+		return failed(ctx.Err())
+	}
+	defer func() { <-r.slots }()
+	timeout := r.Timeout
+	if timeout == 0 {
+		timeout = DefaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	q, resp, err := r.Exchanger.Exchange(ctx, name, TypeHTTPS)
+	if err != nil {
+		return failed(err)
+	}
+	return Parse(q, resp, host, port)
 }
 
 // store adds e to the cache. A full cache first drops the entry that
