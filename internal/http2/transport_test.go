@@ -204,6 +204,7 @@ func TestTransportH2c(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer res.Body.Close()
 	if res.ProtoMajor != 2 {
 		t.Fatal("proto not h2c")
 	}
