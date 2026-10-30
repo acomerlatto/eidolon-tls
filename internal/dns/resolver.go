@@ -84,8 +84,10 @@ func (r *Resolver) HTTPS(ctx context.Context, host string, port uint16) HTTPS {
 		r.mu.Unlock()
 		return e.https
 	}
+	// A query whose callers all left ends: a later caller starts another,
+	// as Chrome a new job.
 	c := r.calls[name]
-	if c == nil {
+	if c == nil || c.waiters == 0 {
 		timeout := r.Timeout
 		if timeout == 0 {
 			timeout = DefaultTimeout
@@ -125,7 +127,9 @@ func (r *Resolver) lookup(ctx context.Context, c *call, name, host string, port 
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.calls, name)
+	if r.calls[name] == c {
+		delete(r.calls, name)
+	}
 	// Only Found and NoData have a TTL. Kept before the callers get the
 	// answer, which is then in the cache for them.
 	if h.TTL > 0 {

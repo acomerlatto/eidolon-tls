@@ -206,6 +206,48 @@ func TestResolverShared(t *testing.T) {
 	})
 }
 
+// A caller that comes after the last one left starts another query, even
+// while the canceled one has not returned, and the canceled one does not
+// take the place of the other when it returns.
+func TestResolverAfterCancel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ex, _ := answering(t, dnsmessage.RCodeSuccess, https("", 60, svc(1, "")))
+		late, answer := make(chan struct{}), make(chan struct{})
+		var started atomic.Int32
+		r := &Resolver{Exchanger: exchangeFunc(func(ctx context.Context, n string, qt dnsmessage.Type) ([]byte, []byte, error) {
+			if started.Add(1) == 1 {
+				<-ctx.Done()
+				<-late
+				return nil, nil, ctx.Err()
+			}
+			<-answer
+			return ex.Exchange(ctx, n, qt)
+		})}
+		ctx, cancel := context.WithCancel(context.Background())
+		results := make(chan HTTPS, 3)
+		go func() { results <- r.HTTPS(ctx, "example.com", 443) }()
+		synctest.Wait()
+		cancel()
+		<-results
+		synctest.Wait()
+		go func() { results <- r.HTTPS(context.Background(), "example.com", 443) }()
+		synctest.Wait()
+		close(late)
+		synctest.Wait()
+		go func() { results <- r.HTTPS(context.Background(), "example.com", 443) }()
+		synctest.Wait()
+		close(answer)
+		for range 2 {
+			if got := <-results; got.Status != Found {
+				t.Errorf("caller after the cancel: %+v", got)
+			}
+		}
+		if started.Load() != 2 {
+			t.Errorf("%d queries, want 2", started.Load())
+		}
+	})
+}
+
 // A query that gets no answer ends after Timeout, 12 s by default.
 func TestResolverTimeout(t *testing.T) {
 	for _, tt := range []struct {
