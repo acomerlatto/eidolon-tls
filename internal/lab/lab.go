@@ -122,7 +122,8 @@ func Start(tb testing.TB, opts Options) *Server {
 }
 
 // Listen starts a lab server on addr. The caller closes it, and receives
-// its connections from Conns: only 64 wait there, then the server blocks.
+// its connections from Conns: only 64 wait there, and those that come
+// after are served but not delivered.
 func Listen(addr string, opts Options) (*Server, error) {
 	if opts.NextProtos == nil {
 		opts.NextProtos = []string{"h2", "http/1.1"}
