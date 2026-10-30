@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"maps"
 	"net/netip"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -573,7 +574,21 @@ func TestLoadEnv(t *testing.T) {
 	}
 }
 
+// Only the configuration of Linux is read.
+func TestSystemOtherOS(t *testing.T) {
+	old := goos
+	t.Cleanup(func() { goos = old })
+	for _, goos = range []string{"windows", "darwin", "freebsd"} {
+		if c, ok := System(); ok {
+			t.Errorf("System on %s = %+v, want none", goos, c)
+		}
+	}
+}
+
 func TestSystem(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the configuration is read only on Linux")
+	}
 	t.Setenv("LOCALDOMAIN", "eidolon.test")
 	t.Setenv("RES_OPTIONS", "ndots:7")
 	c, ok := System()

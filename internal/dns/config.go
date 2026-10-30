@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -81,10 +82,17 @@ const (
 	maxHosts     = 1 << 25 // DnsHostsFileParser kMaxHostsSize
 )
 
+// goos is the system System reads the configuration of.
+var goos = runtime.GOOS
+
 // System returns the configuration of the system as Chrome reads it on
 // Linux (DnsConfigServiceLinux), or false when Chrome would have none and
-// leave the resolution to the system.
+// leave the resolution to the system. It is false on other systems, whose
+// configuration Chrome reads elsewhere.
 func System() (Config, bool) {
+	if goos != "linux" {
+		return Config{}, false
+	}
 	hostname, _ := os.Hostname()
 	return load(os.ReadFile, os.LookupEnv, hostname)
 }
