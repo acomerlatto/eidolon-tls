@@ -48,8 +48,9 @@ type dohConfig struct {
 // HTTP/1.1 Connection: keep-alive.
 //
 // Only the HTTPS records are asked: the addresses of the origins come
-// from the proxy, or else from WithDialContext or the system resolver. A
-// lookup that fails or gets no answer within 12 seconds leaves the origin
+// from the proxy, or else from WithDialContext or the system resolver. As
+// Chrome, localhost and its subdomains are not asked, nor, without a
+// proxy, the names of the hosts file of the system. A lookup that fails or gets no answer within 12 seconds leaves the origin
 // without ECH, unless ECHRequired. Answers are kept for their TTL, up to
 // 1000 origins per client.
 //
@@ -113,7 +114,12 @@ func (c *config) configureDoH(tr *dispatch.Transport) (*dispatch.Transport, erro
 		MaxConnsPerHost: tr.MaxConnsPerHost,
 		IdleConnTimeout: tr.IdleConnTimeout,
 	}
-	tr.Resolver = &dns.Resolver{Exchanger: &dns.DoH{URL: c.doh.template, Transport: doh}}
+	// Through a proxy, the hosts file does not resolve the origins.
+	var hosts dns.Config
+	if c.proxy == nil {
+		hosts, _ = systemDNS()
+	}
+	tr.Resolver = &dns.Resolver{Exchanger: &dns.DoH{URL: c.doh.template, Transport: doh}, Local: hosts.Local}
 	return doh, nil
 }
 

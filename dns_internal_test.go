@@ -178,3 +178,37 @@ func TestSystemDNSUnused(t *testing.T) {
 		t.Errorf("Resolver %+v, want DoH", c.(*client).tr.Resolver)
 	}
 }
+
+// WithDoH does not ask for localhost, nor, without a proxy, for the names
+// of the hosts file.
+func TestDoHLocal(t *testing.T) {
+	conf := dns.Config{Hosts: map[dns.HostsKey]netip.Addr{{Name: "hosts.example", IPv6: true}: netip.MustParseAddr("2001:db8::1")}}
+	doh := WithDoH("https://doh.example/dns-query{?dns}", "127.0.0.1")
+	for _, tt := range []struct {
+		name  string
+		ok    bool
+		opts  []Option
+		hosts bool
+	}{
+		{"direct", true, nil, true},
+		{"no configuration", false, nil, false},
+		{"proxy", true, []Option{WithProxy("http://127.0.0.1:1")}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.ok {
+				useSystemDNS(t, conf, true)
+			} else {
+				useSystemDNS(t, dns.Config{}, false)
+			}
+			c, err := New(append([]Option{WithProfile(Chrome156Linux()), doh}, tt.opts...)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			r := c.(*client).tr.Resolver
+			if r.Local == nil || !r.Local("x.localhost") || r.Local("a.example") || r.Local("hosts.example") != tt.hosts {
+				t.Errorf("Local of localhost, a.example, hosts.example wrong, want the hosts file: %v", tt.hosts)
+			}
+		})
+	}
+}
