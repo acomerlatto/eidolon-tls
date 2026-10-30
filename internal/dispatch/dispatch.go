@@ -653,8 +653,9 @@ func rewindBody(req *http.Request) (*http.Request, bool) {
 
 // dialTimeout bounds a TLS dial, TCP and handshake, as Chrome bounds the
 // handshake (kSSLHandshakeTimeout, 30 s): a server that accepts and never
-// answers does not hold a request without deadline, nor its slot. A
-// variable for the tests.
+// answers does not hold a request without deadline, nor its slot. The
+// lookup of the HTTPS record comes before, with its own timeout
+// (dns.Resolver). A variable for the tests.
 var dialTimeout = 30 * time.Second
 
 // tlsConfig returns a copy of the TLS settings for serverName.
@@ -669,14 +670,15 @@ func (t *Transport) tlsConfig(serverName string) *utls.Config {
 }
 
 // dialTLS opens a TLS connection to tgt and records its protocol for key.
-// It stops at ctx or after dialTimeout.
+// It stops at ctx, and the connection after dialTimeout, which starts
+// after the lookup of the ECH configuration.
 func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) (*utls.UConn, error) {
-	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
-	defer cancel()
 	list, err := t.echConfig(ctx, tgt)
 	if err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
 	cfg := t.tlsConfig(tgt.ServerName())
 	cfg.EncryptedClientHelloConfigList = list
 	t.mu.Lock()

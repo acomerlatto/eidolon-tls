@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -11,7 +12,9 @@ import (
 	"time"
 
 	utls "github.com/acomerlatto/utls"
+	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/acomerlatto/eidolon-tls/internal/dns"
 	"github.com/acomerlatto/eidolon-tls/internal/lab"
 )
 
@@ -129,4 +132,53 @@ func TestECHRetryDialContext(t *testing.T) {
 	if want := []string{"secret.test:443", "secret.test:443"}; !slices.Equal(dialed, want) {
 		t.Errorf("dialed %q, want %q", dialed, want)
 	}
+}
+
+// exchangeFunc is a dns.Exchanger.
+type exchangeFunc func(ctx context.Context, name string, qtype dnsmessage.Type) ([]byte, []byte, error)
+
+func (f exchangeFunc) Exchange(ctx context.Context, name string, qtype dnsmessage.Type) ([]byte, []byte, error) {
+	return f(ctx, name, qtype)
+}
+
+// The lookup of the HTTPS record does not count in dialTimeout, as Chrome
+// counts kSSLHandshakeTimeout from the connection: a slow lookup leaves the
+// connection its whole time.
+func TestDialTimeoutAfterLookup(t *testing.T) {
+	defer func(d time.Duration) { dialTimeout = d }(dialTimeout)
+	dialTimeout = 300 * time.Millisecond
+	cert, err := lab.NewCertificate(time.Hour, "secret.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := lab.Start(t, lab.Options{Certificate: &cert})
+	tr := &Transport{
+		Spec: func() (*utls.ClientHelloSpec, error) {
+			spec, err := utls.UTLSIdToSpec(utls.HelloChrome_155)
+			return &spec, err
+		},
+		TLS: &utls.Config{RootCAs: srv.RootCAs},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, srv.Addr)
+		},
+		Resolver: &dns.Resolver{Exchanger: exchangeFunc(func(ctx context.Context, _ string, _ dnsmessage.Type) ([]byte, []byte, error) {
+			select {
+			case <-time.After(400 * time.Millisecond):
+				return nil, nil, errors.New("no answer")
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+		})},
+	}
+	defer tr.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://secret.test/", nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 }
