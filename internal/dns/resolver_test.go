@@ -206,6 +206,43 @@ func TestResolverShared(t *testing.T) {
 	})
 }
 
+// Close ends the queries in progress, and a lookup that needs a new query
+// then fails without one; the cached answers stay.
+func TestResolverClose(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ex, _ := answering(t, dnsmessage.RCodeSuccess, https("", 60, svc(1, "")))
+		var started atomic.Int32
+		r := &Resolver{Exchanger: exchangeFunc(func(ctx context.Context, n string, qt dnsmessage.Type) ([]byte, []byte, error) {
+			started.Add(1)
+			if n == "cached.example" {
+				return ex.Exchange(ctx, n, qt)
+			}
+			<-ctx.Done()
+			return nil, nil, ctx.Err()
+		})}
+		if got := r.HTTPS(context.Background(), "cached.example", 443); got.Status != Found {
+			t.Fatalf("cached.example: %+v", got)
+		}
+		result := make(chan HTTPS, 1)
+		go func() { result <- r.HTTPS(context.Background(), "example.com", 443) }()
+		synctest.Wait()
+		start := time.Now()
+		r.Close()
+		if got := <-result; got.Status != Failed || time.Since(start) != 0 {
+			t.Errorf("query in progress: %+v after %v, want it ended by Close", got, time.Since(start))
+		}
+		if got := r.HTTPS(context.Background(), "other.example", 443); got.Status != Failed || !errors.Is(got.Err, ErrClosed) {
+			t.Errorf("after Close: %+v", got)
+		}
+		if got := r.HTTPS(context.Background(), "cached.example", 443); got.Status != Found {
+			t.Errorf("cached after Close: %+v", got)
+		}
+		if n := started.Load(); n != 2 {
+			t.Errorf("%d queries, want 2", n)
+		}
+	})
+}
+
 // A caller that comes after the last one left starts another query, even
 // while the canceled one has not returned, and the canceled one does not
 // take the place of the other when it returns.

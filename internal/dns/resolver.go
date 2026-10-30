@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,9 +41,24 @@ type Resolver struct {
 	// answer is NoData without a query.
 	Local func(host string) bool
 
-	mu    sync.Mutex
-	cache map[string]entry
-	calls map[string]*call
+	mu     sync.Mutex
+	cache  map[string]entry
+	calls  map[string]*call
+	closed bool
+}
+
+// ErrClosed reports a lookup after Close.
+var ErrClosed = errors.New("dns: resolver closed")
+
+// Close ends the queries in progress, whose callers get a Failed answer,
+// and makes the lookups that would need a new query fail with ErrClosed.
+func (r *Resolver) Close() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = true
+	for _, c := range r.calls {
+		c.cancel()
+	}
 }
 
 type entry struct {
@@ -88,6 +104,10 @@ func (r *Resolver) HTTPS(ctx context.Context, host string, port uint16) HTTPS {
 	// as Chrome a new job.
 	c := r.calls[name]
 	if c == nil || c.waiters == 0 {
+		if r.closed {
+			r.mu.Unlock()
+			return failed(ErrClosed)
+		}
 		timeout := r.Timeout
 		if timeout == 0 {
 			timeout = DefaultTimeout

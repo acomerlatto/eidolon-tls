@@ -52,7 +52,8 @@ type HttpClient interface {
 	// never interrupts a response in progress.
 	CloseIdleConnections()
 	// Close stops the client: new requests fail with ErrClosed and every
-	// connection is closed, including responses still being read.
+	// connection is closed, including responses still being read. The
+	// lookups of HTTPS records in progress end, and none starts after.
 	Close() error
 
 	// Transport returns the RoundTripper used by the client, for code that
@@ -196,6 +197,9 @@ func (c *client) CloseIdleConnections() {
 }
 
 func (c *client) Close() error {
+	if c.tr.Resolver != nil {
+		c.tr.Resolver.Close()
+	}
 	if c.doh != nil {
 		c.doh.Close()
 	}

@@ -212,3 +212,16 @@ func TestDoHLocal(t *testing.T) {
 		})
 	}
 }
+
+// Close closes the resolver of the client: no lookup follows.
+func TestCloseResolver(t *testing.T) {
+	useSystemDNS(t, dns.Config{Servers: []netip.AddrPort{netip.MustParseAddrPort("127.0.0.1:53")}, Attempts: 1}, true)
+	c, err := New(WithProfile(Chrome156Linux()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if got := c.(*client).tr.Resolver.HTTPS(context.Background(), "a.example", 443); !errors.Is(got.Err, dns.ErrClosed) {
+		t.Errorf("lookup after Close: %+v", got)
+	}
+}
