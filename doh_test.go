@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -311,6 +312,38 @@ func TestDoHPost(t *testing.T) {
 	}
 	if !resp.TLS.ECHAccepted || !slices.Equal(z.methods, []string{http.MethodPost}) {
 		t.Errorf("ECH %v, methods %q", resp.TLS.ECHAccepted, z.methods)
+	}
+}
+
+// A POST query is sent again, as Chrome's, when the reused connection is
+// lost before its answer.
+func TestDoHPostReplay(t *testing.T) {
+	z := &zone{}
+	cert, err := lab.NewCertificate(time.Hour, echSecret, dohHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queries atomic.Int32
+	srv := lab.Start(t, lab.Options{Certificate: &cert, NextProtos: []string{"http/1.1"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/dns-query" && queries.Add(1) == 2 {
+			c, _, err := http.NewResponseController(w).Hijack()
+			if err == nil {
+				c.Close() // lost without an answer
+			}
+			return
+		}
+		z.ServeHTTP(w, r)
+	})})
+	c := profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()), eidolon.WithECHMode(eidolon.ECHRequired),
+		eidolon.WithDoH("https://"+dohHost+"/dns-query", "127.0.0.1"))
+	// Without records, ECHRequired fails each request after its answer.
+	for _, u := range []string{"https://" + echSecret + "/", "https://" + echSecret + ":8443/"} {
+		if _, err := c.Get(u); !errors.Is(err, eidolon.ErrECHRequired) {
+			t.Fatalf("Get(%s) error %v, want ErrECHRequired", u, err)
+		}
+	}
+	if n := queries.Load(); n != 3 || srv.Accepted() != 2 {
+		t.Errorf("%d queries over %d connections, want 3 over 2", n, srv.Accepted())
 	}
 }
 

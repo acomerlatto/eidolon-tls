@@ -78,6 +78,10 @@ type Transport struct {
 	// H1Connection in the Connection field of those over HTTP/1.1, as
 	// Chrome adds them to its own requests, such as DoH. "" sends none.
 	Priority, H1Connection string
+	// Idempotent makes every request one that may be sent again when a
+	// reused connection is lost, whatever its method, as Chrome marks its
+	// DoH requests (DnsHTTPAttempt).
+	Idempotent bool
 	// MaxResponseHeaderBytes bounds the headers of a response: over
 	// HTTP/1.1 the bytes read with them, 1xx included; over HTTP/2 the
 	// header list, as announced in SETTINGS_MAX_HEADER_LIST_SIZE. Zero
@@ -338,6 +342,7 @@ func (t *Transport) child() *Transport {
 		Headers:                t.Headers,
 		Priority:               t.Priority,
 		H1Connection:           t.H1Connection,
+		Idempotent:             t.Idempotent,
 		MaxResponseHeaderBytes: t.MaxResponseHeaderBytes,
 		DisableDecompression:   t.DisableDecompression,
 		StrictTLS12:            t.StrictTLS12,
@@ -493,7 +498,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 			if !got.WasIdle || !connLost(err) || body.failed() || ctx.Err() != nil || t.isClosed() {
 				return nil, err
 			}
-			r, ok := rewind(req)
+			r, ok := t.rewind(req)
 			if !ok {
 				return nil, err
 			}
@@ -590,13 +595,13 @@ func watchBody(req *http.Request) (*http.Request, *watchedBody) {
 }
 
 // rewind returns req ready to be sent again, as net/http decides: a safe
-// method or an idempotency key, and a body that is absent or can be
-// obtained again with GetBody.
-func rewind(req *http.Request) (*http.Request, bool) {
+// method or an idempotency key, or else Idempotent, and a body that is
+// absent or can be obtained again with GetBody.
+func (t *Transport) rewind(req *http.Request) (*http.Request, bool) {
 	switch req.Method {
 	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
 	default:
-		if !hasIdempotencyKey(req) {
+		if !t.Idempotent && !hasIdempotencyKey(req) {
 			return nil, false
 		}
 	}

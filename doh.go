@@ -107,8 +107,11 @@ func (c *config) configureDoH(tr *dispatch.Transport) (*dispatch.Transport, erro
 		Proxy:       tr.Proxy,
 		// As the captures of Chrome 156: its DoH lookups go at IDLE
 		// priority over HTTP/2, and with keep-alive over HTTP/1.1.
-		Priority:        "u=4, i",
-		H1Connection:    "keep-alive",
+		Priority:     "u=4, i",
+		H1Connection: "keep-alive",
+		// Chrome sends a query again, POST included, when its reused
+		// connection is lost.
+		Idempotent:      true,
 		Order:           &order.Order{Pseudo: pseudo},
 		Protocols:       tr.Protocols,
 		H2:              tr.H2,

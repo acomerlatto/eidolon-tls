@@ -450,10 +450,12 @@ func TestH1PoolReplayAfterLostIdleConnection(t *testing.T) {
 		method string
 		key    bool          // Idempotency-Key in req.Header
 		exact  []order.Field // exact mode
+		idem   bool          // Transport.Idempotent
 		replay bool
 	}{
 		{name: "GET", method: http.MethodGet, replay: true},
 		{name: "POST", method: http.MethodPost},
+		{name: "POST of an idempotent transport", method: http.MethodPost, idem: true, replay: true},
 		{name: "POST with key", method: http.MethodPost, key: true, replay: true},
 		{name: "exact POST with key in Header", method: http.MethodPost, key: true, exact: []order.Field{host}},
 		{name: "exact POST with key sent", method: http.MethodPost, exact: []order.Field{host, key}, replay: true},
@@ -469,6 +471,7 @@ func TestH1PoolReplayAfterLostIdleConnection(t *testing.T) {
 				io.WriteString(w, "ok")
 			}))
 			tr := transport(srv)
+			tr.Idempotent = tt.idem
 			defer tr.Close()
 			fetch(t, tr, base+"/warm")
 			ctx := context.Background()

@@ -349,7 +349,7 @@ func (t *Transport) sendH1(c *h1Conn, req *http.Request) (resp *http.Response, a
 		case c.Sent() == 0:
 			again, ok = rewindBody(req)
 		case c.served > 0:
-			again, ok = rewind(req)
+			again, ok = t.rewind(req)
 		}
 		if !ok {
 			return nil, nil, err

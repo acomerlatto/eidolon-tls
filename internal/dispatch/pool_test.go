@@ -222,6 +222,7 @@ func TestPoolH2ReplayAfterLostIdleConnection(t *testing.T) {
 		key    bool          // Idempotency-Key in req.Header
 		exact  []order.Field // exact mode
 		fresh  bool          // the lost connection is new, not reused
+		idem   bool          // Transport.Idempotent
 		replay bool
 	}{
 		{name: "GET", method: http.MethodGet, replay: true},
@@ -229,6 +230,8 @@ func TestPoolH2ReplayAfterLostIdleConnection(t *testing.T) {
 		{name: "POST without GetBody", method: http.MethodPost, body: true, key: true},
 		{name: "POST without idempotency key", method: http.MethodPost, body: true, getter: true},
 		{name: "POST with key and GetBody", method: http.MethodPost, body: true, getter: true, key: true, replay: true},
+		{name: "POST of an idempotent transport", method: http.MethodPost, body: true, getter: true, idem: true, replay: true},
+		{name: "POST of an idempotent transport without GetBody", method: http.MethodPost, body: true, idem: true},
 		{name: "exact POST with key in Header", method: http.MethodPost, body: true, getter: true, key: true, exact: exact},
 		{name: "exact POST with key sent", method: http.MethodPost, body: true, getter: true,
 			exact: append(slices.Clone(exact), order.Field{Name: "idempotency-key", Value: "k1"}), replay: true},
@@ -256,6 +259,7 @@ func TestPoolH2ReplayAfterLostIdleConnection(t *testing.T) {
 					}
 					return &dropConn{Conn: c, armed: &armed}, nil
 				},
+				Idempotent: tt.idem,
 			}
 			defer tr.Close()
 			if !tt.fresh {

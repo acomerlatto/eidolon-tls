@@ -35,6 +35,7 @@ func TestChild(t *testing.T) {
 		Headers:                &browser.Headers{},
 		Priority:               "u=4, i",
 		H1Connection:           "keep-alive",
+		Idempotent:             true,
 		MaxResponseHeaderBytes: 1,
 		DisableDecompression:   true,
 		StrictTLS12:            true,
