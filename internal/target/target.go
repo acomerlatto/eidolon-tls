@@ -125,7 +125,7 @@ func normalizeHost(h string) (string, error) {
 	}
 	ascii = strings.ToLower(ascii)
 	if endsInNumber(ascii) {
-		addr, err := parseIPv4(ascii)
+		addr, err := ParseIPv4(ascii)
 		if err != nil {
 			return "", fmt.Errorf("target: invalid IPv4 address %q: %w", h, err)
 		}
@@ -158,10 +158,10 @@ func endsInNumber(host string) bool {
 	return err == nil
 }
 
-// parseIPv4 is the URL standard's IPv4 parser: one to four parts in
+// ParseIPv4 is the URL standard's IPv4 parser: one to four parts in
 // decimal, octal (leading 0) or hex (leading 0x), the last one filling the
 // remaining bytes.
-func parseIPv4(host string) (netip.Addr, error) {
+func ParseIPv4(host string) (netip.Addr, error) {
 	parts := strings.Split(host, ".")
 	if parts[len(parts)-1] == "" && len(parts) > 1 {
 		parts = parts[:len(parts)-1]
