@@ -39,14 +39,26 @@ var (
 	// x509.HostnameError or x509.CertificateInvalidError.
 	ErrCertificate = tlsdial.ErrCertificate
 	// ErrECHRequired reports a request, with ECHRequired, to an origin
-	// without an ECH configuration, or to an http:// URL. No connection
-	// is opened.
+	// without an ECH configuration, from WithECHConfig or its HTTPS record
+	// (WithDoH), or with none the client can use, or to an http:// URL.
+	// No connection to the origin is opened.
 	ErrECHRequired = dispatch.ErrECHRequired
 	// ErrECHRejected reports a server that rejected ECH also on the
 	// connection that retried it (see ECHAuto), or, with ECHRequired,
 	// without usable retry configurations. The utls.ECHRejectionError
 	// stays in the chain; no HTTP byte is sent.
 	ErrECHRejected = tlsdial.ErrECHRejected
+	// ErrDNS reports, with ECHRequired, an HTTPS record that could not be
+	// looked up (WithDoH): the DoH server could not be reached, answered
+	// with an error other than a refusal, or not in time. In any mode, it
+	// also reports an HTTPS record whose services all have ECH and none an
+	// enabled protocol, which Chrome does not connect without. No
+	// connection to the origin is opened.
+	ErrDNS = dispatch.ErrDNS
+	// ErrInvalidECHConfig reports an HTTPS record whose ECHConfigList
+	// cannot be read, which fails the request as in Chrome. No connection
+	// to the origin is opened.
+	ErrInvalidECHConfig = dispatch.ErrInvalidECHConfig
 	// ErrProxy reports a proxy (WithProxy) that could not be reached or
 	// refused the tunnel; no byte of the request reached the destination.
 	ErrProxy = proxy.ErrProxy

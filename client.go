@@ -119,6 +119,10 @@ func New(opts ...Option) (HttpClient, error) {
 	if err := cfg.configureECH(tr); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
+	doh, err := cfg.configureDoH(tr)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
+	}
 	return &client{
 		// http.Client sends one hop at a time; the client follows the
 		// redirects (redirect.go) and sets the deadline.
@@ -128,6 +132,7 @@ func New(opts ...Option) (HttpClient, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		tr:      tr,
+		doh:     doh,
 		timeout: cfg.timeout,
 	}, nil
 }
@@ -135,6 +140,7 @@ func New(opts ...Option) (HttpClient, error) {
 type client struct {
 	hc      *http.Client
 	tr      *dispatch.Transport
+	doh     *dispatch.Transport // of WithDoH; nil without it
 	timeout time.Duration
 }
 
@@ -181,6 +187,18 @@ func (c *client) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	}
 }
 
-func (c *client) CloseIdleConnections()        { c.hc.CloseIdleConnections() }
-func (c *client) Close() error                 { return c.tr.Close() }
+func (c *client) CloseIdleConnections() {
+	c.hc.CloseIdleConnections()
+	if c.doh != nil {
+		c.doh.CloseIdleConnections()
+	}
+}
+
+func (c *client) Close() error {
+	if c.doh != nil {
+		c.doh.Close()
+	}
+	return c.tr.Close()
+}
+
 func (c *client) Transport() http.RoundTripper { return c.tr }

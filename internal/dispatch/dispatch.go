@@ -31,6 +31,7 @@ import (
 	utls "github.com/acomerlatto/utls"
 
 	"github.com/acomerlatto/eidolon-tls/internal/browser"
+	"github.com/acomerlatto/eidolon-tls/internal/dns"
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/http2"
 	"github.com/acomerlatto/eidolon-tls/internal/order"
@@ -87,8 +88,12 @@ type Transport struct {
 	// connection to that origin offers ECH with it.
 	ECH map[string][]byte
 	// ECHRequired fails, before any dial, a request whose origin has no
-	// ECH configuration, http:// included, with ErrECHRequired.
+	// ECH configuration, in ECH or from Resolver, http:// included, with
+	// ErrECHRequired (echConfig).
 	ECHRequired bool
+	// Resolver, when set, looks up the HTTPS record of an https:// origin
+	// not in ECH before each of its connections (echConfig).
+	Resolver *dns.Resolver
 	// Protocols restricts the protocols offered by ALPN, and accepted
 	// from it, to tlsdial.ProtoHTTP1 and tlsdial.ProtoH2 as listed. Nil
 	// keeps the spec as it is and accepts both.
@@ -316,6 +321,7 @@ func (t *Transport) child() *Transport {
 		StrictTLS12:            t.StrictTLS12,
 		ECH:                    t.ECH,
 		ECHRequired:            t.ECHRequired,
+		Resolver:               t.Resolver,
 		Protocols:              t.Protocols,
 		H2:                     t.H2,
 	}
@@ -355,7 +361,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 	// The key holds what can differ between requests of one Transport:
 	// the origin and the endpoint dialed.
 	key := tgt.Origin() + " " + tgt.Addr()
-	if t.ECHRequired && t.ECH[tgt.Origin()] == nil {
+	if t.ECHRequired && (tgt.Scheme == "http" || t.ECH[tgt.Origin()] == nil && t.Resolver == nil) {
 		closeBody(req)
 		return nil, fmt.Errorf("%w: %s", ErrECHRequired, tgt.Origin())
 	}
@@ -633,8 +639,12 @@ func (t *Transport) tlsConfig(serverName string) *utls.Config {
 func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) (*utls.UConn, error) {
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
+	list, err := t.echConfig(ctx, tgt)
+	if err != nil {
+		return nil, err
+	}
 	cfg := t.tlsConfig(tgt.ServerName())
-	cfg.EncryptedClientHelloConfigList = t.ECH[tgt.Origin()]
+	cfg.EncryptedClientHelloConfigList = list
 	t.mu.Lock()
 	protos := t.offerLocked(key)
 	t.mu.Unlock()

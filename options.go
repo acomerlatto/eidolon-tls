@@ -39,6 +39,7 @@ type config struct {
 
 	echMode ECHMode
 	ech     map[string][]byte // WithECHConfig, by origin
+	doh     *dohConfig
 
 	maxConnsPerHost   int
 	idleConnTimeout   time.Duration

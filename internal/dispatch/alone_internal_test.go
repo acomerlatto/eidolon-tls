@@ -13,6 +13,7 @@ import (
 	utls "github.com/acomerlatto/utls"
 
 	"github.com/acomerlatto/eidolon-tls/internal/browser"
+	"github.com/acomerlatto/eidolon-tls/internal/dns"
 	"github.com/acomerlatto/eidolon-tls/internal/http1"
 	"github.com/acomerlatto/eidolon-tls/internal/lab"
 	"github.com/acomerlatto/eidolon-tls/internal/order"
@@ -37,6 +38,7 @@ func TestChild(t *testing.T) {
 		StrictTLS12:            true,
 		ECH:                    map[string][]byte{"a": nil},
 		ECHRequired:            true,
+		Resolver:               &dns.Resolver{},
 		Protocols:              []string{"h2"},
 		H2:                     &H2Preface{},
 		NewConnPerRequest:      true,
