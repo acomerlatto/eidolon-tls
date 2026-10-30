@@ -134,6 +134,80 @@ func TestMaxConnsClosesH2AfterLastStream(t *testing.T) {
 	}
 }
 
+// Once nothing waits for a slot, an HTTP/2 connection whose last stream
+// ends stays open.
+func TestMaxConnsKeepsH2AfterWait(t *testing.T) {
+	srv, tr, arrived, release := limitLabProtos(t, 1, false, []string{"h2"})
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := send(context.Background(), tr, http.MethodGet, "https://a.test/block", nil)
+		blocked <- err
+	}()
+	<-arrived
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := send(ctx, tr, http.MethodGet, "https://b.test/", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("over the limit: %v, want the deadline", err)
+	}
+	close(release)
+	if err := <-blocked; err != nil {
+		t.Fatal(err)
+	}
+	if isClosed(srv.NextConn(t)) {
+		t.Error("the connection of a.test closed with nothing waiting")
+	}
+}
+
+// A dial waiting for a slot stops when its request leaves, as Chrome
+// cancels a request stalled in its socket pool: the freed slot opens no
+// connection nobody waits for. So does a shared dial, when its last
+// request leaves.
+func TestMaxConnsAbandonedDial(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		learned bool // b.test learned as http/1.1, which dials in its pool
+	}{
+		{"shared", false},
+		{"pool", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, tr, arrived, release := limitLab(t, 1)
+			if tt.learned {
+				if _, err := send(context.Background(), tr, http.MethodGet, "https://b.test/", nil); err != nil {
+					t.Fatal(err)
+				}
+				srv.NextConn(t) // closed for a.test
+			}
+			blocked := make(chan error, 1)
+			go func() {
+				_, err := send(context.Background(), tr, http.MethodGet, "https://a.test/block", nil)
+				blocked <- err
+			}()
+			<-arrived
+			a := srv.NextConn(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if _, err := send(ctx, tr, http.MethodGet, "https://b.test/", nil); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("over the limit: %v, want the deadline", err)
+			}
+			n := srv.Accepted()
+			close(release)
+			if err := <-blocked; err != nil {
+				t.Fatal(err)
+			}
+			if isClosed(a) {
+				t.Error("the connection of a.test closed with nothing waiting")
+			}
+			if m := srv.Accepted(); m != n {
+				t.Errorf("%d connections after the wait, want %d", m, n)
+			}
+			if _, err := send(context.Background(), tr, http.MethodGet, "https://b.test/", nil); err != nil {
+				t.Fatalf("b.test after the wait: %v", err)
+			}
+		})
+	}
+}
+
 // Without an idle connection to close, a new connection waits until its
 // request ends, or a connection goes idle, which it then closes.
 func TestMaxConnsWaits(t *testing.T) {

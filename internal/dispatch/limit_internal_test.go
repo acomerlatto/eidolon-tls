@@ -96,3 +96,84 @@ func TestMaxConnsWaitOutsideDialTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// waitFor fails t if cond, called under no lock, is not true within five
+// seconds.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !cond(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A request that joins a shared dial after its last waiter left, while
+// the dial ends its wait for a slot, starts another dial instead of failing
+// with the cancellation of that wait.
+func TestMaxConnsJoinAbandonedDial(t *testing.T) {
+	srv := lab.Start(t, lab.Options{NextProtos: []string{"http/1.1"}})
+	tr := &Transport{
+		Spec: func() (*utls.ClientHelloSpec, error) {
+			spec, err := utls.UTLSIdToSpec(utls.HelloChrome_155)
+			return &spec, err
+		},
+		TLS: &utls.Config{RootCAs: srv.RootCAs},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, srv.Addr)
+		},
+		MaxConns: 1,
+	}
+	defer tr.Close()
+	l := tr.limiter()
+	held, err := l.acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(ctx context.Context) error {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			return err
+		}
+		io.Copy(io.Discard, resp.Body)
+		return resp.Body.Close()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() { first <- get(ctx) }()
+	waitFor(t, "the shared dial to wait for a slot", l.stalled)
+
+	// The dial cannot end its wait while l.mu is held.
+	l.mu.Lock()
+	cancel()
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		l.mu.Unlock()
+		t.Fatalf("first request: %v, want its cancellation", err)
+	}
+	second := make(chan error, 1)
+	go func() { second <- get(context.Background()) }()
+	joined := func() bool {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		for _, call := range tr.dialing {
+			return call.waiters == 1
+		}
+		return false
+	}
+	for deadline := time.Now().Add(5 * time.Second); !joined(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			l.mu.Unlock()
+			t.Fatal("the second request did not join the shared dial")
+		}
+	}
+	l.mu.Unlock()
+
+	waitFor(t, "the second request to wait for a slot", l.stalled)
+	held.release()
+	if err := <-second; err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+}

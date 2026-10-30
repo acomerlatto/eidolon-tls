@@ -75,35 +75,41 @@ func TestDispatchNormalizesQueryAndHost(t *testing.T) {
 	}
 }
 
-// After Close, an error keeps its cause as well as ErrClosed.
+// After Close, an error keeps its cause as well as ErrClosed, whether the
+// request is canceled too or not.
 func TestDispatchClosedKeepsCause(t *testing.T) {
-	dialing := make(chan struct{})
-	tr := &dispatch.Transport{
-		Spec: chromeSpec,
-		TLS:  &utls.Config{},
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			close(dialing)
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
-	errc := make(chan error, 1)
-	go func() {
-		_, err := tr.RoundTrip(req)
-		errc <- err
-	}()
-	<-dialing
-	tr.Close()
-	cancel()
-	select {
-	case err := <-errc:
-		if !errors.Is(err, dispatch.ErrClosed) || !errors.Is(err, context.Canceled) {
-			t.Fatalf("err = %v, want ErrClosed wrapping context.Canceled", err)
+	for _, alsoCancel := range []bool{false, true} {
+		dialing := make(chan struct{})
+		tr := &dispatch.Transport{
+			Spec: chromeSpec,
+			TLS:  &utls.Config{},
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				close(dialing)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("RoundTrip did not return")
+		ctx, cancel := context.WithCancel(context.Background())
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
+		errc := make(chan error, 1)
+		go func() {
+			_, err := tr.RoundTrip(req)
+			errc <- err
+		}()
+		<-dialing
+		tr.Close()
+		if alsoCancel {
+			cancel()
+		}
+		select {
+		case err := <-errc:
+			if !errors.Is(err, dispatch.ErrClosed) || !errors.Is(err, context.Canceled) {
+				t.Fatalf("request canceled %v: err = %v, want ErrClosed wrapping context.Canceled", alsoCancel, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("RoundTrip did not return")
+		}
+		cancel()
 	}
 }
 

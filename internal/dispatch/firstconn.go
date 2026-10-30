@@ -22,10 +22,18 @@ type dialCall struct {
 	conn *utls.UConn
 	err  error
 
+	// stopWait ends the wait of the dial for a slot, when no waiter is
+	// left; once the dial has its slot, it does nothing.
+	stopWait context.CancelFunc
+
 	// Guarded by Transport.mu.
 	waiters int
 	taken   bool
 }
+
+// errDialAbandoned is the result of a shared dial whose waiters all left
+// while it waited for a slot: a waiter that came meanwhile starts another.
+var errDialAbandoned = errors.New("eidolon: shared dial abandoned")
 
 // connFor returns an HTTP/1.1 connection for a request of key, or nil
 // when an h2 connection was put in the pool. With fresh, an HTTP/1.1
@@ -39,6 +47,16 @@ type dialCall struct {
 // as a connection being opened counts in Chrome's limit; the slot passes
 // to the waiter that takes an http/1.1 connection, and is freed otherwise.
 func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string, fresh bool) (*h1Conn, error) {
+	for {
+		c, err := t.connForOnce(ctx, tgt, key, fresh)
+		if err != errDialAbandoned {
+			return c, err
+		}
+	}
+}
+
+// connForOnce is connFor with one shared dial.
+func (t *Transport) connForOnce(ctx context.Context, tgt target.Target, key string, fresh bool) (*h1Conn, error) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
@@ -50,13 +68,16 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string, 
 	}
 	call := t.dialing[key]
 	if call == nil {
-		call = &dialCall{done: make(chan struct{})}
+		// As in Chrome's socket pool, a request waiting for a slot has
+		// no connect job yet: when the last one leaves, the wait ends.
+		slotCtx, stop := context.WithCancel(t.dialContextLocked())
+		call = &dialCall{done: make(chan struct{}), stopWait: stop}
 		if t.dialing == nil {
 			t.dialing = make(map[string]*dialCall)
 		}
 		t.dialing[key] = call
 		t.h1HostLocked(key).open++
-		go t.sharedDial(call, tgt, key)
+		go t.sharedDial(call, slotCtx, tgt, key)
 	}
 	call.waiters++
 	t.mu.Unlock()
@@ -68,6 +89,9 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string, 
 
 	t.mu.Lock()
 	call.waiters--
+	if call.waiters == 0 {
+		call.stopWait()
+	}
 	select {
 	case <-call.done:
 		// Done is closed under t.mu: the result is final, and a waiter
@@ -100,7 +124,7 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string, 
 // that negotiates h2 goes to the HTTP/2 pool, and the dial returns nil.
 func (t *Transport) h1DialTLS(tgt target.Target, key string) func(context.Context) (net.Conn, *tls.ConnectionState, error) {
 	return func(ctx context.Context) (net.Conn, *tls.ConnectionState, error) {
-		conn, err := t.dialTLS(ctx, tgt, key)
+		conn, err := t.dialTLS(ctx, ctx, tgt, key)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -139,15 +163,21 @@ func (t *Transport) addH2(key string, conn *utls.UConn) error {
 
 // sharedDial runs one dial for the waiters of key. An h2 connection enters
 // the pool even if every waiter left; an http/1.1 connection nobody waits
-// for is closed (R2).
-func (t *Transport) sharedDial(call *dialCall, tgt target.Target, key string) {
+// for is closed (R2). The wait for a slot ends at slotCtx.
+func (t *Transport) sharedDial(call *dialCall, slotCtx context.Context, tgt target.Target, key string) {
 	// The dial belongs to the Transport, not to the request that started
 	// it: Close cancels it, dialTimeout bounds it, and each waiter stops
 	// at its own context.
-	conn, err := t.dialTLS(t.dialContext(), tgt, key)
+	ctx := t.dialContext()
+	conn, err := t.dialTLS(ctx, slotCtx, tgt, key)
 	if err == nil && conn.ConnectionState().NegotiatedProtocol == tlsdial.ProtoH2 {
 		err = t.addH2(key, conn)
 		conn = nil
+	}
+	// A dial Close canceled keeps the cancellation, the cause of
+	// ErrClosed.
+	if errors.Is(err, context.Canceled) && ctx.Err() == nil {
+		err = errDialAbandoned
 	}
 
 	t.mu.Lock()
@@ -173,6 +203,10 @@ func (t *Transport) sharedDial(call *dialCall, tgt target.Target, key string) {
 func (t *Transport) dialContext() context.Context {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.dialContextLocked()
+}
+
+func (t *Transport) dialContextLocked() context.Context {
 	if t.dialCtx == nil {
 		t.dialCtx, t.cancelDials = context.WithCancel(context.Background())
 	}

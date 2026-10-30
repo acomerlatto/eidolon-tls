@@ -690,16 +690,17 @@ func (t *Transport) tlsConfig(serverName string) *utls.Config {
 }
 
 // dialTLS opens a TLS connection to tgt and records its protocol for key.
-// It stops at ctx, and the connection after dialTimeout, which starts
-// after the lookup of the ECH configuration.
-func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) (*utls.UConn, error) {
+// It stops at ctx, its wait for a slot also at slotCtx, and the connection
+// after dialTimeout, which starts after the lookup of the ECH
+// configuration.
+func (t *Transport) dialTLS(ctx, slotCtx context.Context, tgt target.Target, key string) (*utls.UConn, error) {
 	list, err := t.echConfig(ctx, tgt)
 	if err != nil {
 		return nil, err
 	}
 	// The wait for a slot does not count in dialTimeout. The slot goes to
 	// the first connection; a retry takes one of its own.
-	s, err := t.limiter().acquire(ctx)
+	s, err := t.limiter().acquire(slotCtx)
 	if err != nil {
 		return nil, err
 	}
