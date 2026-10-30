@@ -630,7 +630,8 @@ func TestDoHProxy(t *testing.T) {
 				return d
 			}
 		}
-		c := proxyClient(t, srv, scheme+"://"+addr, eidolon.WithDoH(dohTemplate))
+		// The proxy resolves the server: its addresses are not used.
+		c := proxyClient(t, srv, scheme+"://"+addr, eidolon.WithDoH(dohTemplate, "192.0.2.1"))
 		resp, err := echGet(c, "https://"+echSecret+"/")
 		if err != nil {
 			t.Fatal(err)

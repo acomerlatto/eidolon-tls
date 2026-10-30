@@ -23,6 +23,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,6 +58,11 @@ type Transport struct {
 	// destination, whose name the proxy resolves. An HTTP proxy gets the
 	// http:// requests as they are, as Chrome, without a tunnel.
 	Proxy *proxy.Proxy
+	// Addrs, without Proxy, are the IP addresses the TLS connections go
+	// to, whatever the host, tried in turn with the port of the target:
+	// each gets an equal share of the time left to the dial, and a failed
+	// connection or handshake goes to the next one. Empty dials the host.
+	Addrs []string
 	// Spelling is the HTTP/1.1 name spelling table.
 	Spelling http1.Spelling
 	// MaxConnsPerHost bounds the HTTP/1.1 connections per origin and
@@ -335,6 +341,7 @@ func (t *Transport) child() *Transport {
 		TLS:                    t.TLS,
 		DialContext:            t.DialContext,
 		Proxy:                  t.Proxy,
+		Addrs:                  t.Addrs,
 		Spelling:               t.Spelling,
 		MaxConnsPerHost:        t.MaxConnsPerHost,
 		IdleConnTimeout:        t.IdleConnTimeout,
@@ -688,7 +695,7 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 		},
 		StrictTLS12: t.StrictTLS12,
 	}
-	conn, err := tlsdial.Dial(ctx, "tcp", tgt.Addr(), dc)
+	conn, err := t.dialAddrs(ctx, tgt, dc)
 	var re *utls.ECHRejectionError
 	if errors.As(err, &re) {
 		conn, err = t.retryECH(ctx, tgt, dc, remote, re.RetryConfigList, err)
@@ -710,6 +717,28 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 		return nil, fmt.Errorf("%w: %s", ErrHTTP2InadequateSecurity, utls.CipherSuiteName(st.CipherSuite))
 	}
 	return conn, nil
+}
+
+// dialAddrs opens the TLS connection of dialTLS to tgt, or, with Addrs
+// and without Proxy, to each address in turn, within ctx, which has a
+// deadline. A rejected ECH is not a failure of the address.
+func (t *Transport) dialAddrs(ctx context.Context, tgt target.Target, dc tlsdial.Config) (*utls.UConn, error) {
+	if len(t.Addrs) == 0 || t.Proxy != nil {
+		return tlsdial.Dial(ctx, "tcp", tgt.Addr(), dc)
+	}
+	deadline, _ := ctx.Deadline()
+	var err error
+	for i, a := range t.Addrs {
+		actx, cancel := context.WithTimeout(ctx, time.Until(deadline)/time.Duration(len(t.Addrs)-i))
+		var conn *utls.UConn
+		conn, err = tlsdial.Dial(actx, "tcp", net.JoinHostPort(a, strconv.Itoa(tgt.Port)), dc)
+		cancel()
+		var re *utls.ECHRejectionError
+		if err == nil || errors.As(err, &re) {
+			return conn, err
+		}
+	}
+	return nil, err
 }
 
 // retryECH dials tgt once more after the server rejected ECH with err, as

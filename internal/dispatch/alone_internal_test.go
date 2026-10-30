@@ -28,6 +28,7 @@ func TestChild(t *testing.T) {
 		TLS:                    &utls.Config{},
 		DialContext:            func(context.Context, string, string) (net.Conn, error) { return nil, nil },
 		Proxy:                  &proxy.Proxy{},
+		Addrs:                  []string{"192.0.2.1"},
 		Spelling:               http1.Spelling{"a": "A"},
 		MaxConnsPerHost:        1,
 		IdleConnTimeout:        time.Second,

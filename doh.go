@@ -1,12 +1,10 @@
 package eidolon
 
 import (
-	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"net"
 	"net/netip"
 
 	"golang.org/x/crypto/cryptobyte"
@@ -41,7 +39,9 @@ type dohConfig struct {
 // HTTP/2 settings and GREASE ECH, the certificate verified for the host
 // of the template, through the proxy of WithProxy, which resolves that
 // host. Without a proxy, addrs are the IP addresses of the server, dialed
-// in turn: the server is never looked up in DNS. Redirects are not
+// in turn, each with an equal share of the time left, the next one after
+// a failed connection or TLS handshake: the server is never looked up in
+// DNS. Redirects are not
 // followed, where Chrome follows those to https://.
 //
 // Over HTTP/2 the queries carry Priority: u=4, i, the IDLE priority of
@@ -103,8 +103,9 @@ func (c *config) configureDoH(tr *dispatch.Transport) (*dispatch.Transport, erro
 	doh := &dispatch.Transport{
 		Spec:        tr.Spec,
 		TLS:         tr.TLS,
-		DialContext: c.dohDial(),
+		DialContext: c.dialContext,
 		Proxy:       tr.Proxy,
+		Addrs:       c.doh.addrs,
 		// As the captures of Chrome 156: its DoH lookups go at IDLE
 		// priority over HTTP/2, and with keep-alive over HTTP/1.1.
 		Priority:     "u=4, i",
@@ -126,30 +127,6 @@ func (c *config) configureDoH(tr *dispatch.Transport) (*dispatch.Transport, erro
 	}
 	tr.Resolver = &dns.Resolver{Exchanger: &dns.DoH{URL: c.doh.template, Transport: doh}, Local: hosts.Local}
 	return doh, nil
-}
-
-// dohDial returns the dial of the DoH connections: to the proxy, or else
-// to the addresses of the server, in turn.
-func (c *config) dohDial() func(ctx context.Context, network, addr string) (net.Conn, error) {
-	if c.proxy != nil {
-		return c.dialContext
-	}
-	dial := c.dialContext
-	if dial == nil {
-		dial = (&net.Dialer{}).DialContext
-	}
-	addrs := c.doh.addrs
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		_, port, _ := net.SplitHostPort(addr)
-		var err error
-		for _, a := range addrs {
-			var conn net.Conn
-			if conn, err = dial(ctx, network, net.JoinHostPort(a, port)); err == nil {
-				return conn, nil
-			}
-		}
-		return nil, err
-	}
 }
 
 // echProbe returns an ECHConfigList Chrome accepts, to check that a
