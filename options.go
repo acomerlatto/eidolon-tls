@@ -217,13 +217,16 @@ func WithMaxConnsPerHost(n int) Option {
 }
 
 // WithMaxConns bounds the connections of the client to every origin, in
-// use, idle or being opened. A new connection over the limit first closes
-// an idle HTTP/1.1 connection, the one used least recently, as Chrome;
-// HTTP/2 connections are not closed for it. Without one, it waits for a
-// connection to close, until its request ends, without counting the wait
-// in the dial timeout. By default there is no limit, where Chrome has 256:
-// a crawler would wait for connections where it expects none. The
-// connections of WithDoH are not counted.
+// use, idle or being opened, as Chrome's socket pool counts them. A new
+// connection over the limit first closes an idle HTTP/1.1 connection: of
+// the first origin, in key order, that has one, the one it used least
+// recently. Without one, as Chrome, it closes every HTTP/2 connection
+// without streams, then waits for a connection to close, until its
+// request ends, without counting the wait in the dial timeout; while it
+// waits, an HTTP/2 connection also closes when its last stream ends. By
+// default there is no limit, where Chrome has 256: a crawler would wait
+// for connections where it expects none. The connections of WithDoH are
+// not counted.
 func WithMaxConns(n int) Option {
 	return func(c *config) error {
 		if n <= 0 {

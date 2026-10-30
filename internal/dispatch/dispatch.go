@@ -126,10 +126,9 @@ type Transport struct {
 	NewConnPerRequest bool
 	// MaxConns, when positive, bounds the connections of the transport
 	// and of the transports of NewConnPerRequest, in use, idle or being
-	// opened. A connection over the limit first closes an idle HTTP/1.1
-	// connection, the one used least recently, as Chrome's
-	// HttpStreamPool; without one, it waits for a connection to close,
-	// until its request ends. The wait does not count in dialTimeout.
+	// opened, as Chrome's TransportClientSocketPool (connLimit.acquire).
+	// The wait for a slot ends with its request and does not count in
+	// dialTimeout.
 	MaxConns int
 
 	h2once sync.Once
@@ -1048,6 +1047,7 @@ func (t *Transport) h2t() *http2.Transport {
 		t.h2.ChromiumErrors = pre.ChromiumErrors
 		t.h2.ChromiumALPS = pre.ChromiumALPS
 		t.h2.ChromiumHeaderFraming = pre.ChromiumHeaderFraming
+		t.limiter().join(t.h2)
 	})
 	return t.h2
 }

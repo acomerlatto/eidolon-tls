@@ -207,6 +207,12 @@ type Transport struct {
 	// counting by 2; 0 is 1. It is odd.
 	FirstStreamID uint32
 
+	// [eidolon] CloseIdleIf, if non-nil, is called when a stream of a
+	// connection ends, with the connection locked; true closes it, without
+	// GOAWAY, once it has no stream, as Chromium's SpdySession closes when
+	// its socket pool is stalled (SpdySession::DeleteStream).
+	CloseIdleIf func() bool
+
 	// MaxReadFrameSize is the http2 SETTINGS_MAX_FRAME_SIZE to send in the
 	// initial settings frame. It is the size in bytes of the largest frame
 	// payload that the sender is willing to receive. If 0, no setting is

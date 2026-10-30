@@ -23,12 +23,18 @@ func limitLab(t *testing.T, maxConns int) (*lab.Server, *dispatch.Transport, cha
 // limitLabPlain is limitLab, without TLS when plain.
 func limitLabPlain(t *testing.T, maxConns int, plain bool) (*lab.Server, *dispatch.Transport, chan struct{}, chan struct{}) {
 	t.Helper()
+	return limitLabProtos(t, maxConns, plain, []string{"http/1.1"})
+}
+
+// limitLabProtos is limitLabPlain with the protocols the server offers.
+func limitLabProtos(t *testing.T, maxConns int, plain bool, protos []string) (*lab.Server, *dispatch.Transport, chan struct{}, chan struct{}) {
+	t.Helper()
 	cert, err := lab.NewCertificate(time.Hour, "a.test", "b.test", "c.test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	arrived, release := make(chan struct{}, 4), make(chan struct{})
-	srv := lab.Start(t, lab.Options{Certificate: &cert, Plain: plain, NextProtos: []string{"http/1.1"}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := lab.Start(t, lab.Options{Certificate: &cert, Plain: plain, NextProtos: protos, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/block" {
 			arrived <- struct{}{}
 			<-release
@@ -67,6 +73,64 @@ func TestMaxConnsClosesIdle(t *testing.T) {
 	a, b, c := srv.NextConn(t), srv.NextConn(t), srv.NextConn(t)
 	if !isClosed(a) || !isClosed(b) || isClosed(c) {
 		t.Error("want the connections of a.test and b.test closed, the one of c.test open")
+	}
+}
+
+// Over MaxConns, without an idle HTTP/1.1 connection, a new connection
+// closes the HTTP/2 connections without streams, as Chrome's
+// TransportClientSocketPool asks its SpdySessions to
+// (TryToCloseSocketsInLayeredPools); one stays open while nothing waits.
+func TestMaxConnsClosesIdleH2(t *testing.T) {
+	srv, tr, _, _ := limitLabProtos(t, 1, false, []string{"h2"})
+	if _, err := send(context.Background(), tr, http.MethodGet, "https://a.test/", nil); err != nil {
+		t.Fatal(err)
+	}
+	a := srv.NextConn(t)
+	if isClosed(a) {
+		t.Fatal("the idle connection closed with nothing waiting")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := send(ctx, tr, http.MethodGet, "https://b.test/", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !isClosed(a) {
+		t.Error("the idle connection of a.test is still open")
+	}
+}
+
+// An HTTP/2 connection busy when a new connection starts waiting closes
+// when its last stream ends, as Chrome's SpdySession when its socket pool
+// is stalled (DeleteStream).
+func TestMaxConnsClosesH2AfterLastStream(t *testing.T) {
+	srv, tr, arrived, release := limitLabProtos(t, 1, false, []string{"h2"})
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := send(context.Background(), tr, http.MethodGet, "https://a.test/block", nil)
+		blocked <- err
+	}()
+	<-arrived
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	waiting := make(chan error, 1)
+	go func() {
+		_, err := send(ctx, tr, http.MethodGet, "https://b.test/", nil)
+		waiting <- err
+	}()
+	select {
+	case err := <-waiting:
+		t.Fatalf("answered over the limit: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-blocked; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-waiting; err != nil {
+		t.Fatal(err)
+	}
+	if !isClosed(srv.NextConn(t)) {
+		t.Error("the connection of a.test is still open")
 	}
 }
 

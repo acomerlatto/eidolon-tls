@@ -1992,6 +1992,9 @@ func (cc *ClientConn) forgetStreamID(id uint32) {
 	cc.cond.Broadcast()
 
 	closeOnIdle := cc.singleUse || cc.doNotReuse || cc.t.disableKeepAlives() || cc.goAway != nil
+	if !closeOnIdle && cc.t.CloseIdleIf != nil {
+		closeOnIdle = cc.t.CloseIdleIf() // [eidolon]
+	}
 	if closeOnIdle && cc.streamsReserved == 0 && len(cc.streams) == 0 {
 		if VerboseLogs {
 			cc.vlogf("http2: Transport closing idle conn %p (forSingleUse=%v, maxStream=%v)", cc, cc.singleUse, cc.nextStreamID-2)

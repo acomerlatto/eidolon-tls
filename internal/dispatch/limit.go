@@ -5,16 +5,23 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+
+	"github.com/acomerlatto/eidolon-tls/internal/http2"
 )
 
 // connLimit bounds the connections of a transport and of its children
-// (MaxConns): in use, idle or being opened, as Chrome's HttpStreamPool
-// counts its stream sockets.
+// (MaxConns): in use, idle or being opened, as Chrome's
+// TransportClientSocketPool counts its sockets, an HTTP/2 session
+// included.
 type connLimit struct {
 	owner *Transport // closes the limit at its Close
 	mu    sync.Mutex
 	max   int
 	n     int
+	// waiting counts the acquires waiting for a slot.
+	waiting int
+	// h2 are the HTTP/2 engines of the transports under the limit.
+	h2 []*http2.Transport
 	// freed is closed, and replaced, when a slot is freed or the limit
 	// closed.
 	freed  chan struct{}
@@ -43,8 +50,11 @@ func (t *Transport) limiter() *connLimit {
 }
 
 // acquire returns a slot of l, waiting for one until ctx ends. Over the
-// limit, it first closes an idle HTTP/1.1 connection of the owner, as
-// Chrome's CloseOneIdleStreamSocket; HTTP/2 connections stay.
+// limit, as Chrome's TransportClientSocketPool, it first closes an idle
+// HTTP/1.1 connection of the owner (CloseOneIdleSocketExceptInGroup);
+// without one, every HTTP/2 connection without streams under the limit
+// (TryToCloseSocketsInLayeredPools), and while it waits, an HTTP/2
+// connection closes when its last stream ends (stalled).
 func (l *connLimit) acquire(ctx context.Context) (*slot, error) {
 	if l == nil {
 		return nil, nil
@@ -65,12 +75,46 @@ func (l *connLimit) acquire(ctx context.Context) (*slot, error) {
 		if l.owner.closeOneIdleH1() {
 			continue
 		}
+		l.mu.Lock()
+		l.waiting++
+		h2 := slices.Clone(l.h2)
+		l.mu.Unlock()
+		for _, t := range h2 {
+			t.CloseIdleConnections()
+		}
+		var err error
 		select {
 		case <-freed:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			err = ctx.Err()
+		}
+		l.mu.Lock()
+		l.waiting--
+		l.mu.Unlock()
+		if err != nil {
+			return nil, err
 		}
 	}
+}
+
+// join puts h2 under l: its connections close when idle while l is
+// stalled. Nil does nothing.
+func (l *connLimit) join(h2 *http2.Transport) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.h2 = append(l.h2, h2)
+	l.mu.Unlock()
+	h2.CloseIdleIf = l.stalled
+}
+
+// stalled reports whether an acquire waits for a slot, as Chrome's
+// IsPoolStalled.
+func (l *connLimit) stalled() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.waiting > 0
 }
 
 // wake makes the waits for a slot look again for an idle connection to
