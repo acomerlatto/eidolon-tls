@@ -14,6 +14,9 @@
 //
 // Response.TLS is converted from the uTLS connection state. Its
 // ExportKeyingMaterial cannot reach the connection and panics if called.
+//
+// What the client does not do, and where it differs from Chrome, is listed
+// in LIMITS.md at the root of the repository.
 package eidolon
 
 import (
