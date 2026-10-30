@@ -231,21 +231,29 @@ func blank(r rune) bool { return r == ' ' || r == '\t' }
 
 // setOptions applies an options line as glibc's res_setoptions does: words
 // are separated by spaces and tabs and matched by prefix, ndots and
-// attempts are capped, and ndots is kept in 4 bits.
+// attempts are capped, and ndots is kept in 4 bits. The number of ndots
+// and attempts is read by strtol from the rest of the line, so it may
+// follow blanks, and the word after them is then read as an option too.
 func setOptions(c *Config, useVC *bool, options string) {
-	for _, opt := range strings.FieldsFunc(options, blank) {
+	for s := options; s != ""; {
+		s = strings.TrimLeft(s, " \t")
 		switch {
-		case strings.HasPrefix(opt, "ndots:"):
+		case strings.HasPrefix(s, "ndots:"):
 			c.Ndots = maxNdots
-			if n := strtol(opt[len("ndots:"):]); n <= maxNdots {
+			if n := strtol(s[len("ndots:"):]); n <= maxNdots {
 				c.Ndots = n & maxNdots
 			}
-		case strings.HasPrefix(opt, "attempts:"):
-			c.Attempts = min(strtol(opt[len("attempts:"):]), maxRetry)
-		case strings.HasPrefix(opt, "rotate"):
+		case strings.HasPrefix(s, "attempts:"):
+			c.Attempts = min(strtol(s[len("attempts:"):]), maxRetry)
+		case strings.HasPrefix(s, "rotate"):
 			c.Rotate = true
-		case strings.HasPrefix(opt, "use-vc"):
+		case strings.HasPrefix(s, "use-vc"):
 			*useVC = true
+		}
+		if i := strings.IndexAny(s, " \t"); i >= 0 {
+			s = s[i:]
+		} else {
+			s = ""
 		}
 	}
 }

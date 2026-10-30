@@ -162,6 +162,9 @@ func TestResolvConf(t *testing.T) {
 			want: def(Config{Servers: servers("10.0.0.1"), Ndots: 4, Attempts: 3, Rotate: true}),
 			ok:   true,
 		},
+		{name: "options values after blanks", data: "options ndots: 3 attempts:\t4\n", want: def(Config{Ndots: 3, Attempts: 4}), ok: true},
+		{name: "options word after a value", data: "options attempts: rotate\n", want: Config{Servers: local, Ndots: 1, Rotate: true}, ok: true},
+		{name: "RES_OPTIONS value after a blank", env: map[string]string{"RES_OPTIONS": "attempts: 4"}, want: def(Config{Attempts: 4}), ok: true},
 		{name: "options last wins", data: "options ndots:3\noptions ndots:4\n", want: def(Config{Ndots: 4}), ok: true},
 		{
 			name: "RES_OPTIONS after the file",
