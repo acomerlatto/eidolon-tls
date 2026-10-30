@@ -16,6 +16,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/acomerlatto/eidolon-tls/internal/order"
+	"github.com/acomerlatto/eidolon-tls/internal/target"
 )
 
 // maxDoHResponse bounds a DoH response, as Chrome
@@ -48,14 +49,23 @@ type Template struct {
 	post          bool
 }
 
+// testQuery is the value of the dns variable with which Chrome checks a
+// template (IsValidDohTemplate).
+const testQuery = "this_is_a_test_query"
+
 // ParseTemplate parses a DoH URI template as Chrome checks one
 // (DnsOverHttpsServerConfig): an https:// URL with at most one variable,
-// dns, as {dns}, {?dns} or {&dns} (RFC 6570). Without the variable the
-// queries go by POST to the URL.
+// dns, as {dns}, {?dns} or {&dns} (RFC 6570), outside the host, and no
+// brace outside the expression. Without the variable the queries go by
+// POST to the URL. The URL must also be one the client can connect to,
+// with a valid host and port.
 func ParseTemplate(s string) (*Template, error) {
 	t := &Template{}
 	open := strings.IndexByte(s, '{')
 	if open < 0 {
+		if strings.Contains(s, "}") {
+			return nil, fmt.Errorf("DoH template %q: unexpected closing brace", s)
+		}
 		t.before, t.post = s, true
 	} else {
 		end := strings.IndexByte(s[open:], '}')
@@ -74,12 +84,18 @@ func ParseTemplate(s string) (*Template, error) {
 			return nil, fmt.Errorf("DoH template %q: more than one expression", s)
 		}
 	}
-	u, err := url.Parse(t.expand("x"))
+	u, err := url.Parse(t.expand(testQuery))
 	if err != nil {
 		return nil, fmt.Errorf("DoH template %q: %w", s, err)
 	}
-	if u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+	if u.Scheme != "https" || u.User != nil || u.Fragment != "" {
 		return nil, fmt.Errorf("DoH template %q: want an https:// URL without credentials or fragment", s)
+	}
+	if strings.Contains(u.Hostname(), testQuery) {
+		return nil, fmt.Errorf("DoH template %q: the dns variable is in the host", s)
+	}
+	if _, err := target.Parse(u); err != nil {
+		return nil, fmt.Errorf("DoH template %q: %w", s, err)
 	}
 	t.Host = u.Hostname()
 	return t, nil

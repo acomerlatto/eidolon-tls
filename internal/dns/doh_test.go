@@ -56,6 +56,14 @@ func TestParseTemplate(t *testing.T) {
 		"https://dns.test/{dns}{?dns}",
 		"https://dns.test/}{?dns}",
 		"https://dns.test/%zz{?dns}",
+		"https://dns.test/dns-query}",
+		"https://{dns}/dns-query",
+		"https://dns{dns}.test/dns-query",
+		"https://dns.test:65536/dns-query{?dns}",
+		"https://dns.test:0/dns-query{?dns}",
+		"https://1.2.3.999/dns-query{?dns}",
+		"https://a..b/dns-query{?dns}",
+		"https://[fe80::1%25eth0]/dns-query{?dns}",
 		"dns.test/dns-query",
 	} {
 		if _, err := ParseTemplate(s); err == nil {
