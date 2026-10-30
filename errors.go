@@ -40,8 +40,10 @@ var (
 	ErrCertificate = tlsdial.ErrCertificate
 	// ErrECHRequired reports a request, with ECHRequired, to an origin
 	// without an ECH configuration, from WithECHConfig or its HTTPS record
-	// (WithDoH), or with none the client can use, or to an http:// URL.
-	// No connection to the origin is opened.
+	// (WithDoH or the name servers of the system), or with none the client
+	// can use, or to an http:// URL: no connection to the origin is
+	// opened. It also reports, with ErrECHRejected, a server that rejected
+	// ECH without usable retry configurations, after that connection.
 	ErrECHRequired = dispatch.ErrECHRequired
 	// ErrECHRejected reports a server that rejected ECH also on the
 	// connection that retried it (see ECHAuto), or, with ECHRequired,
@@ -49,8 +51,9 @@ var (
 	// stays in the chain; no HTTP byte is sent.
 	ErrECHRejected = tlsdial.ErrECHRejected
 	// ErrDNS reports, with ECHRequired, an HTTPS record that could not be
-	// looked up (WithDoH): the DoH server could not be reached, answered
-	// with an error other than a refusal, or not in time. In any mode, it
+	// looked up (WithDoH or the name servers of the system): the server
+	// could not be reached, answered SERVFAIL or a malformed response, or
+	// not in time. In any mode, it
 	// also reports an HTTPS record whose services all have ECH and none an
 	// enabled protocol, which Chrome does not connect without. No
 	// connection to the origin is opened.

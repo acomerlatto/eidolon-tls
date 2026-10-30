@@ -51,9 +51,10 @@ type dohConfig struct {
 // Only the HTTPS records are asked: the addresses of the origins come
 // from the proxy, or else from WithDialContext or the system resolver. As
 // Chrome, localhost and its subdomains are not asked, nor, without a
-// proxy, the names of the hosts file of the system. A lookup that fails or gets no answer within 12 seconds leaves the origin
-// without ECH, unless ECHRequired. Answers are kept for their TTL, up to
-// 1000 origins per client.
+// proxy, the names of the hosts file of the system. A lookup that fails or
+// gets no answer within 12 seconds leaves the origin without ECH, unless
+// ECHRequired. Answers are kept for their TTL, up to 1000 origins per
+// client.
 //
 // New refuses, with ErrConfig, a template it cannot use, addrs that are
 // not IP addresses, no addrs without a proxy, ECHDisabled, and a profile

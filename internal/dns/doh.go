@@ -53,12 +53,13 @@ type Template struct {
 // template (IsValidDohTemplate).
 const testQuery = "this_is_a_test_query"
 
-// ParseTemplate parses a DoH URI template as Chrome checks one
-// (DnsOverHttpsServerConfig): an https:// URL with at most one variable,
-// dns, as {dns}, {?dns} or {&dns} (RFC 6570), outside the host, and no
-// brace outside the expression. Without the variable the queries go by
-// POST to the URL. The URL must also be one the client can connect to,
-// with a valid host and port.
+// ParseTemplate parses a DoH URI template with the checks of Chrome
+// (DnsOverHttpsServerConfig): an https:// URL whose variable, dns, is
+// outside the host, and no brace outside an expression. Without the
+// variable the queries go by POST to the URL. It is stricter than Chrome:
+// the only expressions are {dns}, {?dns} and {&dns} (RFC 6570), once,
+// without credentials or fragment, and the URL must be one the client can
+// connect to, with a valid host and port.
 func ParseTemplate(s string) (*Template, error) {
 	t := &Template{}
 	open := strings.IndexByte(s, '{')
