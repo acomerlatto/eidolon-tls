@@ -1,3 +1,37 @@
+diff --git a/internal/http2/eidolon_closeidle_test.go b/internal/http2/eidolon_closeidle_test.go
+new file mode 100644
+index 0000000..4f1f740
+--- /dev/null
++++ b/internal/http2/eidolon_closeidle_test.go
+@@ -0,0 +1,28 @@
++// A connection closed when it loses its last stream (patch 0045).
++
++package http2
++
++import (
++	"testing"
++	"testing/synctest"
++)
++
++// With CloseIdleIf true, a connection closes when its last stream ends,
++// as Chromium's SpdySession when its socket pool is stalled; with false,
++// it stays.
++func TestCloseIdleIf(t *testing.T) {
++	for _, stalled := range []bool{false, true} {
++		synctest.Test(t, func(t *testing.T) {
++			s := newErrorServer(t, &Transport{CloseIdleIf: func() bool { return stalled }})
++			done := s.request(true)
++			s.raw(FrameHeaders, FlagHeadersEndHeaders|FlagHeadersEndStream, 1, status200...)
++			if err := <-done; err != nil {
++				t.Fatal(err)
++			}
++			synctest.Wait()
++			if got := s.cc.State().Closed; got != stalled {
++				t.Errorf("CloseIdleIf %v: closed %v", stalled, got)
++			}
++		})
++	}
++}
 diff --git a/internal/http2/transport.go b/internal/http2/transport.go
 index d373ce1..a34360e 100644
 --- a/internal/http2/transport.go
