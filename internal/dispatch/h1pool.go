@@ -173,6 +173,15 @@ func (t *Transport) h1ReleaseLocked(key string) {
 		t.grantLocked(h, nil) // the slot passes to the waiter
 	} else {
 		h.open--
+		t.h1DropLocked(key, h)
+	}
+}
+
+// h1DropLocked forgets the pool of key once it has no connection, and so
+// no waiter, as Chrome deletes an empty group.
+func (t *Transport) h1DropLocked(key string, h *h1Host) {
+	if h.open == 0 {
+		delete(t.h1, key)
 	}
 }
 
@@ -188,6 +197,7 @@ func (t *Transport) h1Closed(c *h1Conn) {
 		t.grantLocked(h, nil)
 	} else {
 		h.open--
+		t.h1DropLocked(c.key, h)
 	}
 	t.mu.Unlock()
 }

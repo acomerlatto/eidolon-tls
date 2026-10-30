@@ -44,7 +44,7 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string, 
 		t.mu.Unlock()
 		return nil, ErrClosed
 	}
-	if t.protos[key] == tlsdial.ProtoHTTP1 || !t.allows(tlsdial.ProtoH2) {
+	if proto, _ := t.protos.get(key); proto == tlsdial.ProtoHTTP1 || !t.allows(tlsdial.ProtoH2) {
 		t.mu.Unlock()
 		return t.h1Get(ctx, key, fresh, t.h1DialTLS(tgt, key))
 	}
@@ -186,9 +186,6 @@ func (t *Transport) dialContext() context.Context {
 // connection revalidates it.
 func (t *Transport) learn(key, proto string) {
 	t.mu.Lock()
-	if t.protos == nil {
-		t.protos = make(map[string]string)
-	}
-	t.protos[key] = proto
+	t.protosLocked().put(key, proto)
 	t.mu.Unlock()
 }

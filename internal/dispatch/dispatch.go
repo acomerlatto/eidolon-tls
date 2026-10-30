@@ -138,15 +138,16 @@ type Transport struct {
 	closed bool
 	conns  map[*trackedConn]struct{}
 	limit  *connLimit // MaxConns, shared with the children
-	// protos holds the protocol learned per key; dialing, the shared
-	// dial in progress per key.
-	protos  map[string]string
+	// protos holds the protocol learned per key, for the maxServerInfo
+	// keys used last; dialing, the shared dial in progress per key.
+	protos  *lru[string]
 	dialing map[string]*dialCall
-	// h1 holds the HTTP/1.1 pool per key.
+	// h1 holds the HTTP/1.1 pool per key, while it has connections.
 	h1 map[string]*h1Host
-	// h1Required marks the keys whose server answered HTTP_1_1_REQUIRED:
-	// their new connections offer only http/1.1, as Chrome does.
-	h1Required map[string]bool
+	// h1Required holds the keys whose server answered HTTP_1_1_REQUIRED,
+	// the maxHTTP11Required used last: their new connections offer only
+	// http/1.1, as Chrome does.
+	h1Required *lru[bool]
 	// dialCtx is the context of the shared dials, canceled by Close.
 	dialCtx     context.Context
 	cancelDials context.CancelFunc
@@ -821,7 +822,7 @@ func (t *Transport) CheckSpec() error {
 // offerLocked returns the protocols a new connection of key offers, or nil
 // for the spec as it is.
 func (t *Transport) offerLocked(key string) []string {
-	if t.h1Required[key] && t.allows(tlsdial.ProtoHTTP1) {
+	if _, ok := t.h1Required.get(key); ok && t.allows(tlsdial.ProtoHTTP1) {
 		return []string{tlsdial.ProtoHTTP1}
 	}
 	return t.Protocols
@@ -839,21 +840,27 @@ func (t *Transport) h1Only(key string) bool {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.h1Required[key]
+	_, ok := t.h1Required.get(key)
+	return ok
 }
 
 // requireH1 records that the server of key requires HTTP/1.1.
 func (t *Transport) requireH1(key string) {
 	t.mu.Lock()
 	if t.h1Required == nil {
-		t.h1Required = make(map[string]bool)
+		t.h1Required = newLRU[bool](maxHTTP11Required)
 	}
-	t.h1Required[key] = true
-	if t.protos == nil {
-		t.protos = make(map[string]string)
-	}
-	t.protos[key] = tlsdial.ProtoHTTP1
+	t.h1Required.put(key, true)
+	t.protosLocked().put(key, tlsdial.ProtoHTTP1)
 	t.mu.Unlock()
+}
+
+// protosLocked returns the protocols learned per key, made on first use.
+func (t *Transport) protosLocked() *lru[string] {
+	if t.protos == nil {
+		t.protos = newLRU[string](maxServerInfo)
+	}
+	return t.protos
 }
 
 // http11Required reports an HTTP_1_1_REQUIRED from the server, in
