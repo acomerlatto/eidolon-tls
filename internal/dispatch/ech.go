@@ -25,8 +25,8 @@ var ErrInvalidECHConfig = errors.New("eidolon: invalid ECHConfigList in the HTTP
 
 // echConfig returns the ECHConfigList a connection to tgt offers, before
 // it is dialed: the one set for its origin, or else, with a Resolver, the
-// one of its HTTPS record, as Chrome reads it (HttpStreamPool's
-// AttemptManager, SSLClientSocketImpl::ConfigureEch). Nil sends the
+// one of its HTTPS record, as Chrome reads it (SSLConnectJob::DoSSLConnect,
+// SSLClientSocketImpl::ConfigureEch). Nil sends the
 // GREASE ECH of the profile; with ECHRequired, it is ErrECHRequired.
 //
 // The record gives the ECHConfigList of the first service, by priority,
