@@ -466,23 +466,23 @@ func helloExtension(t *testing.T, hello []byte, typ uint16) ([]byte, bool) {
 
 // The ClientHelloOuter of the Chrome profile has the extensions of its
 // ClientHello without ECH, as BoringSSL aligns them, and carries no ticket
-// or PSK, even after the server sent tickets on an earlier connection:
-// the ECH path keeps no session. Its encrypted_client_hello is of type
-// outer, with the configuration's suite and id, and a payload of a padded
+// or PSK, even on a connection that resumes: the session goes in
+// ClientHelloInner only. Its encrypted_client_hello is of type outer, with
+// the configuration's suite and id, and a payload of a padded
 // ClientHelloInner.
 func TestECHOuter(t *testing.T) {
 	srv, list := echLab(t)
 	c := profileClient(t, srv, eidolon.WithProfile(eidolon.Chrome156Linux()), eidolon.WithECHConfig(echSecret, list))
 	var hellos [][]byte
-	for _, url := range []string{"https://" + echSecret + "/", "https://" + echSecret + "/", "https://other.test/"} {
+	for i, url := range []string{"https://" + echSecret + "/", "https://" + echSecret + "/", "https://other.test/"} {
 		resp, err := echGet(c, url)
 		if err != nil {
 			t.Fatal(err)
 		}
 		hellos = append(hellos, srv.NextConn(t).ClientHello)
 		c.CloseIdleConnections()
-		if resp.TLS.DidResume {
-			t.Errorf("%s: session resumed", url)
+		if resp.TLS.DidResume != (i == 1) {
+			t.Errorf("connection %d to %s: resumed %v", i, url, resp.TLS.DidResume)
 		}
 	}
 	// sorted returns the extension types of hello in order, every GREASE

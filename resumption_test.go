@@ -107,19 +107,31 @@ func TestNoResumptionNewConnPerRequest(t *testing.T) {
 	}
 }
 
-// A connection with ECH neither resumes nor keeps a session, until the
-// session goes in ClientHelloInner; one without it, with GREASE ECH,
-// resumes.
-func TestNoResumptionECH(t *testing.T) {
+// With ECH, as Chrome, the session goes in ClientHelloInner only:
+// ClientHelloOuter offers no pre_shared_key, and the connections after the
+// first resume with ECH accepted.
+func TestResumptionECH(t *testing.T) {
 	srv, list := echLab(t)
 	c := profileClient(t, srv, chrome, eidolon.WithECHConfig(echSecret, list))
-	for range 2 {
+	for range 3 {
 		getNew(t, c, "https://"+echSecret+"/")
 	}
-	getNew(t, c, "https://other.test/")
-	getNew(t, c, "https://other.test/")
-	if got := resumed(t, srv, 4); !slices.Equal(got, []bool{false, false, false, true}) {
-		t.Errorf("resumed %v, want [false false false true]", got)
+	var got []bool
+	for range 3 {
+		conn := srv.NextConn(t)
+		if conn.HandshakeErr != nil {
+			t.Fatal(conn.HandshakeErr)
+		}
+		if !conn.State.ECHAccepted {
+			t.Error("ECH not accepted")
+		}
+		if exts := helloExtensions(t, conn.ClientHello); slices.Contains(exts, extPreSharedKey) {
+			t.Errorf("ClientHelloOuter with pre_shared_key: %v", exts)
+		}
+		got = append(got, conn.State.DidResume)
+	}
+	if !slices.Equal(got, []bool{false, true, true}) {
+		t.Errorf("resumed %v, want [false true true]", got)
 	}
 }
 

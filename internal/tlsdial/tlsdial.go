@@ -70,9 +70,8 @@ type Config struct {
 	StrictTLS12 bool
 
 	// Sessions, when set, returns the session cache of each new
-	// connection without ECH: the connection resumes a session from it
-	// and keeps there the ones the server sends. With ECH, the connection
-	// neither resumes nor keeps any.
+	// connection: the connection resumes a session from it and keeps
+	// there the ones the server sends.
 	Sessions func() Sessions
 }
 
@@ -109,7 +108,7 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 		cfg.TLS = tc
 	}
 	var sessions Sessions
-	if cfg.Sessions != nil && len(cfg.TLS.EncryptedClientHelloConfigList) == 0 {
+	if cfg.Sessions != nil {
 		sessions = cfg.Sessions()
 	}
 	// Build the ClientHello before dialing, so a bad profile opens no

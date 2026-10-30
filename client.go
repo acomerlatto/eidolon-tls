@@ -9,8 +9,8 @@
 // are kept per origin, for the 1024 origins used last, two each; a TLS 1.3
 // session is used once, for 48 hours at most and 7 days of resumptions
 // from a full handshake, and a TLS 1.2 one for an hour from its full
-// handshake. Clients share none, and a connection with ECH neither resumes
-// nor keeps one.
+// handshake. Clients share none. With ECH, as Chrome, the session goes in
+// ClientHelloInner only, and a TLS 1.2 session is not offered.
 //
 // Response.TLS is converted from the uTLS connection state. Its
 // ExportKeyingMaterial cannot reach the connection and panics if called.
