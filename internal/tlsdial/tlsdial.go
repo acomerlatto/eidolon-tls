@@ -82,10 +82,10 @@ type Sessions interface {
 	// Unused gives back the session Get returned to a connection whose
 	// TCP dial failed: it was never sent.
 	Unused()
-	// Handshake reports the end of the handshake, and whether it resumed
-	// the session Get returned. It comes before the Put calls after the
-	// handshake.
-	Handshake(resumed bool)
+	// Handshake reports the end of the handshake, its TLS version, and
+	// whether it resumed the session Get returned. It comes before the
+	// Put calls after the handshake.
+	Handshake(version uint16, resumed bool)
 }
 
 // Dial opens a TCP connection to addr, performs the TLS handshake with a new
@@ -145,7 +145,7 @@ func Dial(ctx context.Context, network, addr string, cfg Config) (*utls.UConn, e
 	}
 	st := uconn.ConnectionState()
 	if sessions != nil {
-		sessions.Handshake(st.DidResume)
+		sessions.Handshake(st.Version, st.DidResume)
 	}
 	switch st.NegotiatedProtocol {
 	case ProtoH2, ProtoHTTP1, "":

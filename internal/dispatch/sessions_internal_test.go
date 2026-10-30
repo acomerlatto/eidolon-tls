@@ -3,6 +3,7 @@ package dispatch
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"testing"
@@ -58,11 +59,18 @@ type clock struct{ t time.Time }
 
 func (c *clock) now() time.Time { return c.t }
 
+// versionOf returns the TLS version of cs, with which its handshake ended.
+func versionOf(cs *utls.ClientSessionState) uint16 {
+	_, st, _ := cs.ResumptionState()
+	b, _ := st.Bytes()
+	return binary.BigEndian.Uint16(b) // the encoding starts with it
+}
+
 // fullHandshake puts cs as the session of a connection to key that did
 // not resume, at the time of c.
 func fullHandshake(c *sessionCache, key string, cs *utls.ClientSessionState) {
 	s := c.conn(key)
-	s.Handshake(false)
+	s.Handshake(versionOf(cs), false)
 	s.Put(key, cs)
 }
 
@@ -144,7 +152,7 @@ func TestSessionExpiry(t *testing.T) {
 					if cs, _ := s.Get("o"); cs != last {
 						t.Fatalf("at %v: %p, want the last session", clk.t.Sub(start), cs)
 					}
-					s.Handshake(true)
+					s.Handshake(tt.version, true)
 					last = realSession(t, tt.version)
 					s.Put("o", last)
 				}
@@ -178,7 +186,7 @@ func TestSessionPutBeforeHandshake(t *testing.T) {
 	if got := offered(cache, "o"); got != a {
 		t.Errorf("before the end of the handshake: %p, want the first session", got)
 	}
-	s.Handshake(true)
+	s.Handshake(tls.VersionTLS12, true)
 	clk.t = start.Add(time.Hour)
 	if got := offered(cache, "o"); got != nil {
 		t.Errorf("an hour after the full handshake: %p, want none", got)
@@ -263,7 +271,7 @@ func TestSessionDeclined(t *testing.T) {
 		clk.t = start.Add(time.Duration(i) * 40 * time.Hour)
 		s := cache.conn("o")
 		s.Get("o")
-		s.Handshake(i < 4) // the fourth is declined
+		s.Handshake(tls.VersionTLS13, i < 4) // the fourth is declined
 		last = realSession(t, tls.VersionTLS13)
 		s.Put("o", last)
 	}

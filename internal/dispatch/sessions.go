@@ -1,7 +1,6 @@
 package dispatch
 
 import (
-	"encoding/binary"
 	"sync"
 	"time"
 
@@ -137,6 +136,7 @@ type connSessions struct {
 
 	offered *session
 	done    bool
+	tls13   bool // the version of the handshake, which its sessions have
 	auth    time.Time
 	waiting []*utls.ClientSessionState
 }
@@ -169,8 +169,9 @@ func (s *connSessions) Unused() {
 	}
 }
 
-func (s *connSessions) Handshake(resumed bool) {
+func (s *connSessions) Handshake(version uint16, resumed bool) {
 	s.done = true
+	s.tls13 = version == utls.VersionTLS13
 	s.auth = s.c.now()
 	if resumed {
 		s.auth = s.offered.auth
@@ -182,17 +183,12 @@ func (s *connSessions) Handshake(resumed bool) {
 
 // insert adds cs, from the handshake of the connection, with its expiry.
 func (s *connSessions) insert(cs *utls.ClientSessionState) {
-	// The encoding of a SessionState starts with its version. The
-	// session of a handshake has a state, which encodes.
-	_, st, _ := cs.ResumptionState()
-	b, _ := st.Bytes()
-	tls13 := binary.BigEndian.Uint16(b) == utls.VersionTLS13
 	expires := s.auth.Add(sessionTimeout12)
-	if tls13 {
+	if s.tls13 {
 		expires = s.c.now().Add(sessionTimeout13)
 		if a := s.auth.Add(sessionAuthTimeout13); a.Before(expires) {
 			expires = a
 		}
 	}
-	s.c.insert(s.key, &session{cs: cs, tls13: tls13, auth: s.auth, expires: expires})
+	s.c.insert(s.key, &session{cs: cs, tls13: s.tls13, auth: s.auth, expires: expires})
 }

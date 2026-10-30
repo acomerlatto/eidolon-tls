@@ -37,8 +37,8 @@ func (l *sessionLog) Put(_ string, cs *utls.ClientSessionState) {
 
 func (l *sessionLog) Unused() { l.calls = append(l.calls, "unused") }
 
-func (l *sessionLog) Handshake(resumed bool) {
-	l.calls = append(l.calls, fmt.Sprintf("handshake resumed=%v", resumed))
+func (l *sessionLog) Handshake(version uint16, resumed bool) {
+	l.calls = append(l.calls, fmt.Sprintf("handshake %s resumed=%v", tls.VersionName(version), resumed))
 }
 
 // exchange sends a request over conn and reads the response, after the
@@ -79,9 +79,12 @@ func TestDialSessions(t *testing.T) {
 			}
 			// In TLS 1.2 the ticket comes in the handshake, before its
 			// end; crypto/tls renews it on resumption.
-			first, next := []string{"get", "handshake resumed=false", "put"}, []string{"get", "handshake resumed=true", "put"}
+			handshake := func(resumed bool) string {
+				return fmt.Sprintf("handshake %s resumed=%v", tls.VersionName(version), resumed)
+			}
+			first, next := []string{"get", handshake(false), "put"}, []string{"get", handshake(true), "put"}
 			if version == tls.VersionTLS12 {
-				first, next = []string{"get", "put", "handshake resumed=false"}, []string{"get", "put", "handshake resumed=true"}
+				first, next = []string{"get", "put", handshake(false)}, []string{"get", "put", handshake(true)}
 			}
 			dial(first...)
 			dial(next...)
