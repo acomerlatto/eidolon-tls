@@ -13,9 +13,10 @@ import (
 
 // dohHandler answers the DoH queries of the browser (RFC 8484): A queries
 // of the lab names with 127.0.0.1, an HTTPS query of DoHSiteHost on port
-// with a record for h2, NOERROR without records for the other queries of
-// the lab names, and NXDOMAIN for the rest.
-func dohHandler(port int) http.Handler {
+// with a record for h2 and, when echList is not empty, an ech parameter
+// with it; NOERROR without records for the other queries of the lab names,
+// and NXDOMAIN for the rest.
+func dohHandler(port int, echList []byte) http.Handler {
 	site := fmt.Sprintf("_%d._https.%s.", port, hostDoHSite)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var q []byte
@@ -50,6 +51,19 @@ func dohHandler(port int) http.Handler {
 			hdr.Type = dnsmessage.TypeHTTPS
 			// Priority 1, target ".", alpn=h2.
 			data := []byte{0, 1, 0, 0, 1, 0, 3, 2, 'h', '2'}
+			if len(echList) > 0 {
+				// With the port prefix, the target "." is the owner
+				// name, not the host of the A records: Chrome uses the
+				// ECHConfigList only with the host as target.
+				target := []byte{0, 1}
+				for label := range strings.SplitSeq(hostDoHSite, ".") {
+					target = append(target, byte(len(label)))
+					target = append(target, label...)
+				}
+				data = append(append(target, 0), data[3:]...)
+				data = append(data, 0, 5, byte(len(echList)>>8), byte(len(echList)))
+				data = append(data, echList...)
+			}
 			m.Answers = append(m.Answers, dnsmessage.Resource{Header: hdr, Body: &dnsmessage.UnknownResource{Type: dnsmessage.TypeHTTPS, Data: data}})
 		case strings.HasSuffix(name, ".lab.test."):
 		default:

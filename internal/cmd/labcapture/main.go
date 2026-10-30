@@ -15,7 +15,10 @@
 // http/1.1, or http/1.1 only with -doh http/1.1. It answers A queries of
 // the lab names with 127.0.0.1, HTTPS queries with a record for h2, and
 // the other names with NXDOMAIN; the page of DoHSiteHost, on the port of
-// the first server, is found through it.
+// the first server, is found through it. With -ech too, that HTTPS record
+// carries an ECHConfigList whose key the first server has, so the browser
+// connects to DoHSiteHost with ECH; the log has the extension types of
+// each ClientHelloInner.
 package main
 
 import (
@@ -47,17 +50,23 @@ const (
 	// server that only the DoH server resolves.
 	hostDoH     = "doh.lab.test"
 	hostDoHSite = "dns.lab.test"
+	// hostECHPublic is the public name of the ECH configuration.
+	hostECHPublic = "public.lab.test"
 )
 
 func main() {
 	out := flag.String("out", "lab-captures", "directory for the captures")
 	port := flag.Int("port", 8443, "first of three consecutive ports, four with -doh")
 	doh := flag.String("doh", "", `serve the DoH server of the browser: "h2" (h2 and http/1.1) or "http/1.1"`)
+	ech := flag.Bool("ech", false, "with -doh, give the first server an ECH key and its HTTPS record the ECHConfigList")
 	flag.Parse()
+	if *ech && *doh == "" {
+		log.Fatal("-ech needs -doh")
+	}
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		log.Fatal(err)
 	}
-	cert, err := lab.NewCertificate(24*time.Hour, hostBoth, hostH1, hostDoH, hostDoHSite)
+	cert, err := lab.NewCertificate(24*time.Hour, hostBoth, hostH1, hostDoH, hostDoHSite, hostECHPublic)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -67,18 +76,34 @@ func main() {
 		log.Fatal(err)
 	}
 
+	first := lab.Options{Certificate: &cert}
+	var echList []byte
+	if *ech {
+		list, key, err := lab.NewECHKey(1, hostECHPublic)
+		if err != nil {
+			log.Fatal(err)
+		}
+		echList = list
+		first.TLS = func(c *tls.Config) {
+			c.EncryptedClientHelloKeys = []tls.EncryptedClientHelloKey{key}
+			c.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+				log.Printf("ClientHello %s from %s: extensions %v", chi.ServerName, chi.Conn.RemoteAddr(), chi.Extensions)
+				return nil, nil
+			}
+		}
+	}
 	servers := []struct {
 		host string
 		opts lab.Options
 	}{
-		{hostBoth, lab.Options{Certificate: &cert}},
+		{hostBoth, first},
 		{hostH1, lab.Options{Certificate: &cert, NextProtos: []string{"http/1.1"}}},
 		{hostPlain, lab.Options{Plain: true}},
 	}
 	switch *doh {
 	case "":
 	case "h2", "http/1.1":
-		opts := lab.Options{Certificate: &cert, Handler: dohHandler(*port)}
+		opts := lab.Options{Certificate: &cert, Handler: dohHandler(*port, echList)}
 		if *doh == "http/1.1" {
 			opts.NextProtos = []string{"http/1.1"}
 		}
@@ -175,11 +200,16 @@ and visit https://%s:%d/ instead, which only the DoH server resolves.
 
 // capture is the JSON form of one connection.
 type capture struct {
-	Server      string `json:"server"`
-	Time        string `json:"time"`
-	ALPN        string `json:"alpn,omitempty"`
-	TLSVersion  string `json:"tls_version,omitempty"`
-	Cipher      string `json:"cipher,omitempty"`
+	Server     string `json:"server"`
+	Time       string `json:"time"`
+	ALPN       string `json:"alpn,omitempty"`
+	TLSVersion string `json:"tls_version,omitempty"`
+	Cipher     string `json:"cipher,omitempty"`
+	// ServerName is the name the server read, of ClientHelloInner with
+	// ECH accepted.
+	ServerName  string `json:"server_name,omitempty"`
+	ECHAccepted bool   `json:"ech_accepted,omitempty"`
+	DidResume   bool   `json:"did_resume,omitempty"`
 	ClientHello string `json:"client_hello,omitempty"` // hex, handshake message
 	// ClientHelloRecord is ClientHello in one TLS record, hex, the input
 	// of utls.Fingerprinter.
@@ -210,6 +240,9 @@ func write(dir string, n int32, host string, c *lab.Conn) {
 		cp.ALPN = c.State.NegotiatedProtocol
 		cp.TLSVersion = tls.VersionName(c.State.Version)
 		cp.Cipher = tls.CipherSuiteName(c.State.CipherSuite)
+		cp.ServerName = c.State.ServerName
+		cp.ECHAccepted = c.State.ECHAccepted
+		cp.DidResume = c.State.DidResume
 		proto = cp.ALPN
 		if proto == "" {
 			proto = "none"
