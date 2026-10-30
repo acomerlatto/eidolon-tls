@@ -115,7 +115,7 @@ func TestDoHRequest(t *testing.T) {
 			"Accept-Language": {"*"},
 			"User-Agent":      {"Chrome"},
 			"Accept-Encoding": {"identity"},
-			order.HeaderKey:   {"host", "content-length", "accept", "accept-language", "user-agent", "accept-encoding", "content-type"},
+			order.HeaderKey:   {"host", "connection", "content-length", "accept", "accept-language", "user-agent", "accept-encoding", "content-type", "priority"},
 		}
 		if strings.HasSuffix(template, "{?dns}") {
 			if r.Method != http.MethodGet || r.URL.String() != "https://dns.test/dns-query?dns="+base64.RawURLEncoding.EncodeToString(want) || r.Body != nil {

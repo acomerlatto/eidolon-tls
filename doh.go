@@ -43,6 +43,10 @@ type dohConfig struct {
 // in turn: the server is never looked up in DNS. Redirects are not
 // followed, where Chrome follows those to https://.
 //
+// Over HTTP/2 the queries carry Priority: u=4, i, the IDLE priority of
+// most DoH queries of Chrome, the navigations' included, and over
+// HTTP/1.1 Connection: keep-alive.
+//
 // Only the HTTPS records are asked: the addresses of the origins come
 // from the proxy, or else from WithDialContext or the system resolver. A
 // lookup that fails or gets no answer within 12 seconds leaves the origin
@@ -95,10 +99,14 @@ func (c *config) configureDoH(tr *dispatch.Transport) (*dispatch.Transport, erro
 		pseudo = c.order.Pseudo
 	}
 	doh := &dispatch.Transport{
-		Spec:            tr.Spec,
-		TLS:             tr.TLS,
-		DialContext:     c.dohDial(),
-		Proxy:           tr.Proxy,
+		Spec:        tr.Spec,
+		TLS:         tr.TLS,
+		DialContext: c.dohDial(),
+		Proxy:       tr.Proxy,
+		// As the captures of Chrome 156: its DoH lookups go at IDLE
+		// priority over HTTP/2, and with keep-alive over HTTP/1.1.
+		Priority:        "u=4, i",
+		H1Connection:    "keep-alive",
 		Order:           &order.Order{Pseudo: pseudo},
 		H2:              tr.H2,
 		StrictTLS12:     tr.StrictTLS12,

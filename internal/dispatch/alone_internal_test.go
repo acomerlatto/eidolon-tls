@@ -33,6 +33,8 @@ func TestChild(t *testing.T) {
 		IdleConnTimeout:        time.Second,
 		Order:                  &order.Order{},
 		Headers:                &browser.Headers{},
+		Priority:               "u=4, i",
+		H1Connection:           "keep-alive",
 		MaxResponseHeaderBytes: 1,
 		DisableDecompression:   true,
 		StrictTLS12:            true,

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -72,6 +73,11 @@ type Transport struct {
 	// Headers are the headers of the profile, added to each request
 	// outside exact mode, with their order below Order. Nil adds none.
 	Headers *browser.Headers
+	// Priority, without Headers, is sent in the Priority field of the
+	// requests over HTTP/2 that have none, outside exact mode, and
+	// H1Connection in the Connection field of those over HTTP/1.1, as
+	// Chrome adds them to its own requests, such as DoH. "" sends none.
+	Priority, H1Connection string
 	// MaxResponseHeaderBytes bounds the headers of a response: over
 	// HTTP/1.1 the bytes read with them, 1xx included; over HTTP/2 the
 	// header list, as announced in SETTINGS_MAX_HEADER_LIST_SIZE. Zero
@@ -207,6 +213,20 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		sent.Header, profileOrder = pr.Header, pr.Order
 		ctx = context.WithValue(ctx, h1HeaderKey{}, pr.H1Header)
+	} else {
+		// A field the request has, even without a value, stays its own;
+		// exact mode sends its own fields.
+		h1, h2 := http.Header{}, http.Header{}
+		maps.Copy(h1, sent.Header)
+		maps.Copy(h2, sent.Header)
+		if _, ok := h2["Priority"]; !ok && t.Priority != "" {
+			h2["Priority"] = []string{t.Priority}
+		}
+		if _, ok := h1["Connection"]; !ok && t.H1Connection != "" {
+			h1["Connection"] = []string{t.H1Connection}
+		}
+		sent.Header = h2
+		ctx = context.WithValue(ctx, h1HeaderKey{}, h1)
 	}
 	if merged := order.Merge(order.FromHeader(req.Header), order.FromContext(ctx), t.Order, profileOrder, defaultOrder); merged != nil {
 		ctx = order.WithOrder(ctx, *merged)
@@ -316,6 +336,8 @@ func (t *Transport) child() *Transport {
 		IdleConnTimeout:        t.IdleConnTimeout,
 		Order:                  t.Order,
 		Headers:                t.Headers,
+		Priority:               t.Priority,
+		H1Connection:           t.H1Connection,
 		MaxResponseHeaderBytes: t.MaxResponseHeaderBytes,
 		DisableDecompression:   t.DisableDecompression,
 		StrictTLS12:            t.StrictTLS12,

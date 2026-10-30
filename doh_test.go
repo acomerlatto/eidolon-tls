@@ -215,7 +215,7 @@ func TestDoHECH(t *testing.T) {
 
 // The DoH request is Chrome's: GET with the padded query of ID 0, its
 // minimal fields in its order, over HTTP/2 with the profile's pseudo-header
-// order.
+// order, at the IDLE priority of Chrome's DoH (u=4, weight 110).
 func TestDoHRequestFields(t *testing.T) {
 	z := &zone{}
 	srv, _ := dohLab(t, z)
@@ -234,6 +234,9 @@ func TestDoHRequestFields(t *testing.T) {
 	for _, f := range frames {
 		if f.Type == "HEADERS" {
 			fields = f.Headers
+			if f.Priority == nil || f.Priority.Weight != 109 || f.Priority.StreamDep != 0 || !f.Priority.Exclusive {
+				t.Errorf("priority %+v, want weight 110, exclusive on stream 0", f.Priority)
+			}
 			break
 		}
 	}
@@ -247,14 +250,38 @@ func TestDoHRequestFields(t *testing.T) {
 			}
 		}
 	}
-	want := []string{":method", ":authority", ":scheme", ":path", "accept", "accept-language", "user-agent", "accept-encoding"}
+	want := []string{":method", ":authority", ":scheme", ":path", "accept", "accept-language", "user-agent", "accept-encoding", "priority"}
 	if !slices.Equal(names, want) {
 		t.Errorf("fields %q, want %q", names, want)
 	}
 	for _, f := range fields {
-		if v, ok := map[string]string{":method": "GET", ":authority": dohHost, "accept": "application/dns-message", "accept-language": "*", "user-agent": "Chrome", "accept-encoding": "identity"}[f.Name]; ok && f.Value != v {
+		if v, ok := map[string]string{":method": "GET", ":authority": dohHost, "accept": "application/dns-message", "accept-language": "*", "user-agent": "Chrome", "accept-encoding": "identity", "priority": "u=4, i"}[f.Name]; ok && f.Value != v {
 			t.Errorf("%s: %q, want %q", f.Name, f.Value, v)
 		}
+	}
+}
+
+// Over HTTP/1.1, the DoH request has Connection: keep-alive and no
+// Priority, as Chrome's.
+func TestDoHRequestFieldsHTTP1(t *testing.T) {
+	z := &zone{}
+	cert, err := lab.NewCertificate(time.Hour, echSecret, dohHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := lab.Start(t, lab.Options{Certificate: &cert, Handler: z, NextProtos: []string{"http/1.1"}})
+	c := dohClient(t, srv)
+	if _, err := echGet(c, "https://"+echSecret+"/"); err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	doh := srv.NextConn(t)
+	<-doh.Done()
+	head, _, _ := strings.Cut(string(doh.Bytes()), "\r\n\r\n")
+	path, rest, _ := strings.Cut(head, "\r\n")
+	want := "Host: " + dohHost + "\r\nConnection: keep-alive\r\nAccept: application/dns-message\r\nAccept-Language: *\r\nUser-Agent: Chrome\r\nAccept-Encoding: identity"
+	if !strings.HasPrefix(path, "GET /dns-query?dns=") || rest != want {
+		t.Errorf("request %q", head)
 	}
 }
 

@@ -98,10 +98,11 @@ func (t *Template) expand(v string) string {
 	}
 }
 
-// dohOrder is the order of the fields of a DoH request in Chrome:
-// Content-Length from HttpNetworkTransaction, before the fields of
-// DnsHTTPAttempt, Content-Type after them.
-var dohOrder = []string{"host", "content-length", "accept", "accept-language", "user-agent", "accept-encoding", "content-type"}
+// dohOrder is the order of the fields of a DoH request in Chrome: Host
+// and Connection (HTTP/1.1) and Content-Length from HttpNetworkTransaction,
+// before the fields of DnsHTTPAttempt, Content-Type after them, and
+// Priority (HTTP/2) last, from the HTTP/2 stream.
+var dohOrder = []string{"host", "connection", "content-length", "accept", "accept-language", "user-agent", "accept-encoding", "content-type", "priority"}
 
 // Exchange sends a query for qtype of name to the server.
 func (d *DoH) Exchange(ctx context.Context, name string, qtype dnsmessage.Type) ([]byte, []byte, error) {
