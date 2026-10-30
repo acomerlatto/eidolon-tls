@@ -21,9 +21,16 @@ type ECHMode int
 
 const (
 	// ECHAuto, the default, offers ECH to an origin with an ECH
-	// configuration, from WithECHConfig or else from its HTTPS record
-	// (WithDoH), and sends the GREASE ECH of the profile to the others, as
-	// Chrome (kOpportunistic). A record that cannot be looked up, or whose
+	// configuration, from WithECHConfig or else from its HTTPS record, and
+	// sends the GREASE ECH of the profile to the others, as Chrome
+	// (kOpportunistic). The record is asked to the server of WithDoH, or,
+	// on a direct connection (no proxy, no WithDialContext), to the name
+	// servers of the system as Chrome on Linux does: those of
+	// /etc/resolv.conf, by UDP, unless Chrome would leave the resolution
+	// to the system (use-vc, an nsswitch.conf it does not follow) or the
+	// host is localhost or in /etc/hosts. The configuration is read when
+	// the client is made; the name is asked as it is, without the search
+	// list. A record that cannot be looked up, or whose
 	// configurations the client cannot use, leaves the origin with GREASE;
 	// one whose ECHConfigList cannot be read fails with
 	// ErrInvalidECHConfig, as in Chrome. When the server
@@ -40,8 +47,8 @@ const (
 	// ECHRequired completes a request only over a connection whose server
 	// accepted ECH, as Chrome's kStrict: a request to an origin without an
 	// ECH configuration, http:// included, fails with ErrECHRequired
-	// before any dial, and GREASE ECH does not count. With WithDoH, an
-	// HTTPS record that could not be looked up fails with ErrDNS. A rejection is
+	// before any dial, and GREASE ECH does not count. An HTTPS record that
+	// could not be looked up fails with ErrDNS. A rejection is
 	// retried as in ECHAuto with the retry configurations; without usable
 	// ones, the request fails with ErrECHRequired and ErrECHRejected.
 	ECHRequired

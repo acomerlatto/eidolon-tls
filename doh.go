@@ -28,8 +28,10 @@ type dohConfig struct {
 // WithDoH sets the DNS over HTTPS server (RFC 8484) the client asks for
 // the HTTPS records (RFC 9460) of its https:// origins, as Chrome with
 // secure DNS: the record of an origin gives its ECH configuration, which
-// ECHAuto and ECHRequired use. Without WithDoH, no HTTPS record is looked
-// up and only WithECHConfig gives ECH configurations.
+// ECHAuto and ECHRequired use. Without WithDoH, a client that connects
+// directly asks the name servers of the system, as Chrome's built-in
+// client (see WithECHMode); through a proxy or WithDialContext, no HTTPS
+// record is looked up and only WithECHConfig gives ECH configurations.
 //
 // template is the URI template of the server: an https:// URL with the
 // variable dns ({?dns}, {&dns} or {dns}), whose queries go by GET, or
