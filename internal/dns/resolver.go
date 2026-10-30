@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,12 +69,15 @@ func QueryName(host string, port uint16) string {
 }
 
 // HTTPS returns the HTTPS answer for the origin of host and port, from the
-// cache or from a query. It returns at the end of ctx with a Failed answer
+// cache or from a query. host may end with a dot. It returns at the end of ctx with a Failed answer
 // whose Err is ctx's.
 func (r *Resolver) HTTPS(ctx context.Context, host string, port uint16) HTTPS {
 	if r.Local != nil && r.Local(host) {
 		return HTTPS{Status: NoData}
 	}
+	// A final dot only says the name is complete: it is asked and its
+	// records read as without it.
+	host = strings.TrimSuffix(host, ".")
 	name := QueryName(host, port)
 	r.mu.Lock()
 	if e, ok := r.cache[name]; ok && time.Now().Before(e.expires) {

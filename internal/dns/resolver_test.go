@@ -269,3 +269,19 @@ func TestResolverEviction(t *testing.T) {
 		t.Errorf("%d entries", len(r.cache))
 	}
 }
+
+// A host with a final dot is asked without it, and a record whose target
+// is the host applies.
+func TestResolverFinalDot(t *testing.T) {
+	ex, count := answering(t, dnsmessage.RCodeSuccess, https("", 60, svc(1, "a.example", alpn("h2"))))
+	r := &Resolver{Exchanger: ex}
+	for _, tt := range []struct {
+		port uint16
+		name string
+	}{{443, "a.example"}, {8443, "_8443._https.a.example"}} {
+		h := r.HTTPS(context.Background(), "a.example.", tt.port)
+		if h.Status != Found || len(h.Services) != 1 || count(tt.name) != 1 {
+			t.Errorf("HTTPS(a.example., %d) = %+v after %d queries of %s", tt.port, h, count(tt.name), tt.name)
+		}
+	}
+}
