@@ -98,11 +98,8 @@ func (l *connLimit) acquire(ctx context.Context) (*slot, error) {
 }
 
 // join puts h2 under l: its connections close when idle while l is
-// stalled. Nil does nothing.
+// stalled.
 func (l *connLimit) join(h2 *http2.Transport) {
-	if l == nil {
-		return
-	}
 	l.mu.Lock()
 	l.h2 = append(l.h2, h2)
 	l.mu.Unlock()

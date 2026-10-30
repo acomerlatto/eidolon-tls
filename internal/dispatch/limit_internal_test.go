@@ -177,3 +177,42 @@ func TestMaxConnsJoinAbandonedDial(t *testing.T) {
 		t.Fatalf("second request: %v", err)
 	}
 }
+
+// The HTTP/2 engines of the children of NewConnPerRequest, which close
+// their connection with their response, do not join the limit: it would
+// keep one per request.
+func TestMaxConnsPerRequestH2(t *testing.T) {
+	srv := lab.Start(t, lab.Options{NextProtos: []string{"h2"}})
+	tr := &Transport{
+		Spec: func() (*utls.ClientHelloSpec, error) {
+			spec, err := utls.UTLSIdToSpec(utls.HelloChrome_155)
+			return &spec, err
+		},
+		TLS: &utls.Config{RootCAs: srv.RootCAs},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, srv.Addr)
+		},
+		MaxConns:          2,
+		NewConnPerRequest: true,
+	}
+	defer tr.Close()
+	for range 5 {
+		req, _ := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.ProtoMajor != 2 {
+			t.Fatalf("HTTP/%d, want HTTP/2", resp.ProtoMajor)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	l := tr.limiter()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.h2) != 0 {
+		t.Errorf("%d engines under the limit, want 0", len(l.h2))
+	}
+}

@@ -1055,7 +1055,11 @@ func (t *Transport) h2t() *http2.Transport {
 		t.h2.ChromiumErrors = pre.ChromiumErrors
 		t.h2.ChromiumALPS = pre.ChromiumALPS
 		t.h2.ChromiumHeaderFraming = pre.ChromiumHeaderFraming
-		t.limiter().join(t.h2)
+		// A child of NewConnPerRequest closes its connection with its
+		// response: only the engine of the owner joins its limit.
+		if l := t.limiter(); l != nil && l.owner == t {
+			l.join(t.h2)
+		}
 	})
 	return t.h2
 }
