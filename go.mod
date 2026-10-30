@@ -3,7 +3,7 @@ module github.com/acomerlatto/eidolon-tls
 go 1.27.2
 
 require (
-	github.com/acomerlatto/utls v0.0.8
+	github.com/acomerlatto/utls v0.0.9
 	github.com/andybalholm/brotli v1.2.7
 	github.com/klauspost/compress v1.20.1
 	go.uber.org/goleak v1.3.0
