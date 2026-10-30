@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
+	utls "github.com/acomerlatto/utls"
 	"golang.org/x/crypto/cryptobyte"
 
 	eidolon "github.com/acomerlatto/eidolon-tls"
@@ -148,6 +151,123 @@ func TestClientHelloFromRawShuffled(t *testing.T) {
 	}
 	if !shuffled {
 		t.Error("8 ClientHellos in the captured order")
+	}
+}
+
+// extEncryptedClientHello is the type of encrypted_client_hello.
+const extEncryptedClientHello = 0xfe0d
+
+// withGREASEECH returns record with its encrypted_client_hello rebuilt
+// with kdf, aead, an enc of encLen bytes and a payload of payloadLen.
+func withGREASEECH(t *testing.T, record []byte, kdf, aead uint16, encLen, payloadLen int) []byte {
+	t.Helper()
+	s := cryptobyte.String(record[9:]) // after the record and handshake headers
+	var head []byte
+	var sid, cs, comp, exts cryptobyte.String
+	if !s.ReadBytes(&head, 2+32) || !s.ReadUint8LengthPrefixed(&sid) || !s.ReadUint16LengthPrefixed(&cs) ||
+		!s.ReadUint8LengthPrefixed(&comp) || !s.ReadUint16LengthPrefixed(&exts) || !s.Empty() {
+		t.Fatal("malformed ClientHello")
+	}
+	var b cryptobyte.Builder
+	b.AddUint8(22)
+	b.AddUint16(0x0301)
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		b.AddUint8(1)
+		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+			b.AddBytes(head)
+			b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(sid) })
+			b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(cs) })
+			b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(comp) })
+			b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+				for !exts.Empty() {
+					var typ uint16
+					var body cryptobyte.String
+					exts.ReadUint16(&typ)
+					exts.ReadUint16LengthPrefixed(&body)
+					b.AddUint16(typ)
+					b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+						if typ != extEncryptedClientHello {
+							b.AddBytes(body)
+							return
+						}
+						b.AddUint8(0) // outer
+						b.AddUint16(kdf)
+						b.AddUint16(aead)
+						b.AddUint8(7) // config_id
+						b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(make([]byte, encLen)) })
+						b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(make([]byte, payloadLen)) })
+					})
+				}
+			})
+		})
+	})
+	return b.BytesOrPanic()
+}
+
+// greaseECHLens returns the payload lengths of the GREASE
+// encrypted_client_hello in n ClientHellos of spec.
+func greaseECHLens(t *testing.T, spec func() (*utls.ClientHelloSpec, error), n int) map[int]bool {
+	t.Helper()
+	lens := make(map[int]bool)
+	for range n {
+		s, err := spec()
+		if err != nil {
+			t.Fatal(err)
+		}
+		i := slices.IndexFunc(s.Extensions, func(e utls.TLSExtension) bool {
+			_, ok := e.(*utls.GREASEEncryptedClientHelloExtension)
+			return ok
+		})
+		if i < 0 {
+			t.Fatal("no GREASE encrypted_client_hello")
+		}
+		buf := make([]byte, s.Extensions[i].Len())
+		s.Extensions[i].Read(buf)
+		body := cryptobyte.String(buf[4:])
+		var enc, payload cryptobyte.String
+		if !body.Skip(1+4+1) || !body.ReadUint16LengthPrefixed(&enc) || !body.ReadUint16LengthPrefixed(&payload) {
+			t.Fatal("malformed encrypted_client_hello")
+		}
+		lens[len(payload)] = true
+	}
+	return lens
+}
+
+// The GREASE encrypted_client_hello of a captured ClientHello draws its
+// payload length on each connection when it has the shape BoringSSL gives
+// it, as Chrome (setup_ech_grease); another keeps the captured length.
+func TestClientHelloFromRawGREASEECH(t *testing.T) {
+	const (
+		sha256, sha384 = 1, 2
+		aes128, aes256 = 1, 2
+		chacha         = 3
+		boringLens     = "144 176 208 240"
+	)
+	for _, tt := range []struct {
+		name               string
+		kdf, aead          uint16
+		encLen, payloadLen int
+		want               string
+	}{
+		{"BoringSSL", sha256, aes128, 32, 176, boringLens},
+		{"BoringSSL ChaCha20", sha256, chacha, 32, 240, boringLens},
+		{"other length", sha256, aes128, 32, 186, "186"},
+		{"other KDF", sha384, aes128, 32, 176, "176"},
+		{"other AEAD", sha256, aes256, 32, 176, "176"},
+		{"other enc", sha256, aes128, 65, 176, "176"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			spec, err := eidolon.ClientHelloFromRaw(withGREASEECH(t, chromeCapture(t), tt.kdf, tt.aead, tt.encLen, tt.payloadLen))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// 4 lengths drawn 100 times: one is missing with a
+			// probability under 2e-12.
+			lens := slices.Sorted(maps.Keys(greaseECHLens(t, spec, 100)))
+			if got := strings.Trim(fmt.Sprint(lens), "[]"); got != tt.want {
+				t.Errorf("payload lengths %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
 

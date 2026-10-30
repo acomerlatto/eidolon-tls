@@ -4,8 +4,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 
 	utls "github.com/acomerlatto/utls"
+	"github.com/acomerlatto/utls/dicttls"
 
 	"github.com/acomerlatto/eidolon-tls/internal/tlsdial"
 )
@@ -33,7 +35,9 @@ func WithShuffledExtensions() ClientHelloOption {
 // unless WithShuffledExtensions is given. A captured pre_shared_key is
 // left out, or carries a session of the client when it resumes one;
 // without it, pre_shared_key is added at the end when the ClientHello
-// offers psk_key_exchange_modes, as Chrome does.
+// offers psk_key_exchange_modes, as Chrome does. A GREASE
+// encrypted_client_hello of BoringSSL draws its payload length again, as
+// Chrome; another keeps the captured one.
 //
 // The ClientHello is checked once, as New checks every spec: an extension
 // uTLS does not know, an extension twice, a malformed list, pre_shared_key
@@ -63,6 +67,7 @@ func ClientHelloFromRaw(raw []byte, opts ...ClientHelloOption) (func() (*utls.Cl
 		if err != nil {
 			return nil, err
 		}
+		boringGREASEECH(spec.Extensions)
 		if cfg.shuffle {
 			spec.Extensions = utls.ShuffleChromeTLSExtensions(spec.Extensions)
 		}
@@ -72,6 +77,26 @@ func ClientHelloFromRaw(raw []byte, opts ...ClientHelloOption) (func() (*utls.Cl
 		return nil, fmt.Errorf("ClientHelloFromRaw: %w", err)
 	}
 	return spec, nil
+}
+
+// boringGREASEECH makes a GREASE encrypted_client_hello of exts in the
+// shape BoringSSL gives it (setup_ech_grease) draw its payload length
+// among BoringSSL's, where uTLS keeps the captured one: HKDF-SHA256,
+// AES-128-GCM or ChaCha20-Poly1305, an X25519 enc, and 128 to 224 bytes
+// in steps of 32 before the AEAD overhead.
+func boringGREASEECH(exts []utls.TLSExtension) {
+	boring := utls.BoringGREASEECH().CandidatePayloadLens
+	for _, e := range exts {
+		g, ok := e.(*utls.GREASEEncryptedClientHelloExtension)
+		// Write sets one cipher suite and one length, those captured.
+		if !ok || len(g.EncapsulatedKey) != 32 || !slices.Contains(boring, g.CandidatePayloadLens[0]) {
+			continue
+		}
+		if cs := g.CandidateCipherSuites[0]; cs.KdfId == dicttls.HKDF_SHA256 &&
+			(cs.AeadId == dicttls.AEAD_AES_128_GCM || cs.AeadId == dicttls.AEAD_CHACHA20_POLY1305) {
+			g.CandidatePayloadLens = boring
+		}
+	}
 }
 
 // clientHelloRecord returns a copy of raw in a TLS record, adding the
