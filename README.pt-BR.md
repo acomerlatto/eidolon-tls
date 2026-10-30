@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/eidolon.png" alt="Logo do Eidolon" width="220">
+</p>
+
 # EIDOLON
 
 Um cliente HTTP para Go fiel ao navegador e atento ao fingerprint.
