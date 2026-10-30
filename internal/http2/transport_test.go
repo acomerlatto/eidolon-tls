@@ -199,6 +199,7 @@ func TestTransportH2c(t *testing.T) {
 			return net.Dial(network, addr)
 		},
 	}
+	defer tr.CloseIdleConnections()
 	res, err := tr.RoundTrip(req)
 	if err != nil {
 		t.Fatal(err)

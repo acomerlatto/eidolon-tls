@@ -1,0 +1,87 @@
+diff --git a/internal/gate/main_test.go b/internal/gate/main_test.go
+new file mode 100644
+index 0000000..284e764
+--- /dev/null
++++ b/internal/gate/main_test.go
+@@ -0,0 +1,9 @@
++package gate
++
++import (
++	"testing"
++
++	"go.uber.org/goleak"
++)
++
++func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
+diff --git a/internal/http2/hpack/main_test.go b/internal/http2/hpack/main_test.go
+new file mode 100644
+index 0000000..3da51f2
+--- /dev/null
++++ b/internal/http2/hpack/main_test.go
+@@ -0,0 +1,9 @@
++package hpack
++
++import (
++	"testing"
++
++	"go.uber.org/goleak"
++)
++
++func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
+diff --git a/internal/http2/main_test.go b/internal/http2/main_test.go
+new file mode 100644
+index 0000000..186d957
+--- /dev/null
++++ b/internal/http2/main_test.go
+@@ -0,0 +1,9 @@
++package http2
++
++import (
++	"testing"
++
++	"go.uber.org/goleak"
++)
++
++func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
+diff --git a/internal/http2/transport_test.go b/internal/http2/transport_test.go
+index bb62dbe..b2a0b85 100644
+--- a/internal/http2/transport_test.go
++++ b/internal/http2/transport_test.go
+@@ -199,6 +199,7 @@ func TestTransportH2c(t *testing.T) {
+ 			return net.Dial(network, addr)
+ 		},
+ 	}
++	defer tr.CloseIdleConnections()
+ 	res, err := tr.RoundTrip(req)
+ 	if err != nil {
+ 		t.Fatal(err)
+diff --git a/internal/httpcommon/main_test.go b/internal/httpcommon/main_test.go
+new file mode 100644
+index 0000000..79eec1b
+--- /dev/null
++++ b/internal/httpcommon/main_test.go
+@@ -0,0 +1,9 @@
++package httpcommon
++
++import (
++	"testing"
++
++	"go.uber.org/goleak"
++)
++
++func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
+diff --git a/internal/httpsfv/main_test.go b/internal/httpsfv/main_test.go
+new file mode 100644
+index 0000000..df57fbb
+--- /dev/null
++++ b/internal/httpsfv/main_test.go
+@@ -0,0 +1,9 @@
++package httpsfv
++
++import (
++	"testing"
++
++	"go.uber.org/goleak"
++)
++
++func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }

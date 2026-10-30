@@ -6,6 +6,7 @@ require (
 	github.com/acomerlatto/utls v0.0.7
 	github.com/andybalholm/brotli v1.2.7
 	github.com/klauspost/compress v1.20.1
+	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/net v0.61.1-0.20261020135414-4af4fce62e93
 	golang.org/x/sys v0.49.0
