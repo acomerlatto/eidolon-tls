@@ -208,6 +208,31 @@ func TestMaxConnsAbandonedDial(t *testing.T) {
 	}
 }
 
+// A request canceled before its connection opens opens none: neither the
+// shared dial of an origin not yet learned nor a dial of the HTTP/1.1
+// pool.
+func TestCanceledRequestDialsNothing(t *testing.T) {
+	for _, learned := range []bool{false, true} {
+		srv, tr, _, _ := limitLab(t, 4)
+		if learned {
+			if _, err := send(context.Background(), tr, http.MethodGet, "https://a.test/", nil); err != nil {
+				t.Fatal(err)
+			}
+			tr.CloseIdleConnections()
+		}
+		n := srv.Accepted()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := send(ctx, tr, http.MethodGet, "https://a.test/", nil); !errors.Is(err, context.Canceled) {
+			t.Fatalf("learned %v: %v, want the cancellation", learned, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+		if m := srv.Accepted(); m != n {
+			t.Errorf("learned %v: %d connections, want %d", learned, m, n)
+		}
+	}
+}
+
 // Without an idle connection to close, a new connection waits until its
 // request ends, or a connection goes idle, which it then closes.
 func TestMaxConnsWaits(t *testing.T) {

@@ -57,6 +57,11 @@ func (t *Transport) connFor(ctx context.Context, tgt target.Target, key string, 
 
 // connForOnce is connFor with one shared dial.
 func (t *Transport) connForOnce(ctx context.Context, tgt target.Target, key string, fresh bool) (*h1Conn, error) {
+	// A request already canceled, also when it comes back after an
+	// abandoned dial, starts none.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
