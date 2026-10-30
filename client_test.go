@@ -55,6 +55,7 @@ func TestNewValidatesOptions(t *testing.T) {
 		{name: "negative timeout", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithTimeout(-time.Second)}},
 		{name: "nil dialer", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithDialContext(nil)}},
 		{name: "zero connections per host", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithMaxConnsPerHost(0)}},
+		{name: "zero connections", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithMaxConns(0)}},
 		{name: "zero DNS queries", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithMaxDNSQueries(0)}},
 		{name: "zero idle timeout", opts: []eidolon.Option{eidolon.WithClientHello(chromeSpec), eidolon.WithIdleConnTimeout(0)}},
 	}

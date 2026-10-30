@@ -46,8 +46,12 @@ func TestChild(t *testing.T) {
 		Protocols:              []string{"h2"},
 		H2:                     &H2Preface{},
 		NewConnPerRequest:      true,
+		MaxConns:               1,
 	}
 	c := tr.child()
+	if c.limit == nil || c.limit != tr.limit {
+		t.Error("the child does not share the limit of the connections")
+	}
 	pv, cv := reflect.ValueOf(tr).Elem(), reflect.ValueOf(c).Elem()
 	for i := range pv.NumField() {
 		f := pv.Type().Field(i)

@@ -231,7 +231,10 @@ func (t *Transport) h1Put(c *h1Conn) {
 	c.idleGen++
 	gen := c.idleGen
 	c.idleTimer = time.AfterFunc(t.idleConnTimeout(), func() { t.h1Expire(c, gen) })
+	limit := t.limit
 	t.mu.Unlock()
+	// A wait for a slot may now close this connection.
+	limit.wake()
 }
 
 // h1Expire closes c if it is still in the idle period gen: a timer that

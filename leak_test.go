@@ -318,3 +318,27 @@ func TestH2StreamsReleased(t *testing.T) {
 		t.Errorf("%d connections, want 1", n)
 	}
 }
+
+// WithMaxConns bounds the connections of the client: over the limit, a
+// request to another host closes the idle connection.
+func TestMaxConns(t *testing.T) {
+	cert, err := lab.NewCertificate(time.Hour, "a.test", "b.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := lab.Start(t, lab.Options{Certificate: &cert, NextProtos: []string{"http/1.1"}})
+	c := profileClient(t, srv, chrome, eidolon.WithMaxConns(1))
+	for _, u := range []string{"https://a.test/", "https://b.test/"} {
+		resp, err := c.Get(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	select {
+	case <-srv.NextConn(t).Done():
+	case <-time.After(5 * time.Second):
+		t.Error("the idle connection of a.test stays open over the limit")
+	}
+}

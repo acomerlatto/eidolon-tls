@@ -123,6 +123,13 @@ type Transport struct {
 	// when its response ends: none is reused, and a proxy opens a tunnel
 	// per request. The learned protocols go with them.
 	NewConnPerRequest bool
+	// MaxConns, when positive, bounds the connections of the transport
+	// and of the transports of NewConnPerRequest, in use, idle or being
+	// opened. A connection over the limit first closes an idle HTTP/1.1
+	// connection, the one used least recently, as Chrome's
+	// HttpStreamPool; without one, it waits for a connection to close,
+	// until its request ends. The wait does not count in dialTimeout.
+	MaxConns int
 
 	h2once sync.Once
 	h2     *http2.Transport
@@ -130,6 +137,7 @@ type Transport struct {
 	mu     sync.Mutex
 	closed bool
 	conns  map[*trackedConn]struct{}
+	limit  *connLimit // MaxConns, shared with the children
 	// protos holds the protocol learned per key; dialing, the shared
 	// dial in progress per key.
 	protos  map[string]string
@@ -288,7 +296,11 @@ func (t *Transport) Close() error {
 	t.stopH1Locked()
 	alone := t.alone
 	t.alone = nil
+	limit := t.limit
 	t.mu.Unlock()
+	if limit != nil && limit.owner == t {
+		limit.close()
+	}
 	for c := range conns {
 		c.Conn.Close()
 	}
@@ -358,6 +370,8 @@ func (t *Transport) child() *Transport {
 		Resolver:               t.Resolver,
 		Protocols:              t.Protocols,
 		H2:                     t.H2,
+		MaxConns:               t.MaxConns,
+		limit:                  t.limiter(),
 	}
 }
 
@@ -406,7 +420,7 @@ func (t *Transport) roundTrip(req *http.Request, tgt target.Target) (*http.Respo
 		}
 		dial := func(ctx context.Context) (net.Conn, *tls.ConnectionState, error) {
 			if t.forwards() {
-				conn, err := t.proxyDial(ctx, "tcp", "")
+				conn, err := t.trackedDial(ctx, "tcp", "")
 				return conn, nil, err
 			}
 			conn, err := t.dial(ctx, tgt.Addr())
@@ -677,6 +691,17 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 	if err != nil {
 		return nil, err
 	}
+	// The wait for a slot does not count in dialTimeout. The slot goes to
+	// the first connection; a retry takes one of its own.
+	s, err := t.limiter().acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if s.take() {
+			s.release()
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	cfg := t.tlsConfig(tgt.ServerName())
@@ -689,7 +714,7 @@ func (t *Transport) dialTLS(ctx context.Context, tgt target.Target, key string) 
 		Spec: t.spec(protos),
 		TLS:  cfg,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			conn, err := t.trackedDial(ctx, network, addr)
+			conn, err := t.slotDial(ctx, s, network, addr)
 			if err == nil {
 				remote = conn.RemoteAddr()
 			}
@@ -850,25 +875,42 @@ func (t *Transport) dial(ctx context.Context, addr string) (net.Conn, error) {
 // DialContext. A variable for the tests.
 var systemDial = (&net.Dialer{}).DialContext
 
-// trackedDial opens a TCP connection and registers it until it is closed,
-// so Close can reach it. A dial that ends after Close closes its connection.
+// trackedDial opens a TCP connection, to the proxy with a tunnel to addr
+// unless addr is "", and registers it until it is closed, so Close can
+// reach it. A dial that ends after Close closes its connection. With
+// MaxConns, it first waits for a slot.
 func (t *Transport) trackedDial(ctx context.Context, network, addr string) (net.Conn, error) {
-	if t.Proxy != nil {
-		return t.proxyDial(ctx, network, addr)
-	}
-	dial := t.DialContext
-	if dial == nil {
-		dial = systemDial
-	}
-	conn, err := dial(ctx, network, addr)
-	if err != nil {
-		return nil, err
-	}
-	return t.track(conn)
+	return t.slotDial(ctx, nil, network, addr)
 }
 
-// proxyDial opens a tracked connection to the proxy, with a tunnel to
-// addr unless addr is "".
+// slotDial is trackedDial with s, a slot for the connection unless taken.
+func (t *Transport) slotDial(ctx context.Context, s *slot, network, addr string) (net.Conn, error) {
+	if !s.take() {
+		var err error
+		if s, err = t.limiter().acquire(ctx); err != nil {
+			return nil, err
+		}
+	}
+	var conn net.Conn
+	var err error
+	if t.Proxy != nil {
+		conn, err = t.proxyDial(ctx, network, addr)
+	} else {
+		dial := t.DialContext
+		if dial == nil {
+			dial = systemDial
+		}
+		conn, err = dial(ctx, network, addr)
+	}
+	if err != nil {
+		s.release()
+		return nil, err
+	}
+	return t.track(conn, s)
+}
+
+// proxyDial opens a connection to the proxy, with a tunnel to addr unless
+// addr is "".
 func (t *Transport) proxyDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	dial := t.DialContext
 	if dial == nil {
@@ -890,7 +932,7 @@ func (t *Transport) proxyDial(ctx context.Context, network, addr string) (net.Co
 			return nil, err
 		}
 	}
-	return t.track(conn)
+	return conn, nil
 }
 
 // proxyTLS opens a TLS connection to an HTTPS proxy with the ClientHello
@@ -918,13 +960,15 @@ func (t *Transport) forwards() bool {
 	return t.Proxy != nil && (t.Proxy.Scheme == "http" || t.Proxy.Scheme == "https")
 }
 
-// track registers conn until it is closed, or closes it after Close.
-func (t *Transport) track(conn net.Conn) (net.Conn, error) {
-	tc := &trackedConn{Conn: conn, t: t}
+// track registers conn, which holds s, until it is closed, or closes it
+// after Close.
+func (t *Transport) track(conn net.Conn, s *slot) (net.Conn, error) {
+	tc := &trackedConn{Conn: conn, t: t, slot: s}
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
 		conn.Close()
+		s.release()
 		return nil, ErrClosed
 	}
 	if t.conns == nil {
@@ -939,6 +983,7 @@ func (t *Transport) track(conn net.Conn) (net.Conn, error) {
 type trackedConn struct {
 	net.Conn
 	t    *Transport
+	slot *slot
 	once sync.Once
 }
 
@@ -952,7 +997,9 @@ func (c *trackedConn) Close() error {
 		delete(c.t.conns, c)
 		c.t.mu.Unlock()
 	})
-	return c.Conn.Close()
+	err := c.Conn.Close()
+	c.slot.release()
+	return err
 }
 
 // h2t returns the HTTP/2 engine, whose pool never dials: the dispatcher

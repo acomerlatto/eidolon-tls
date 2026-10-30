@@ -42,6 +42,7 @@ type config struct {
 	doh     *dohConfig
 
 	maxConnsPerHost   int
+	maxConns          int
 	maxDNSQueries     int
 	idleConnTimeout   time.Duration
 	newConnPerRequest bool
@@ -209,6 +210,24 @@ func WithMaxConnsPerHost(n int) Option {
 			return fmt.Errorf("WithMaxConnsPerHost: %d is not positive", n)
 		}
 		c.maxConnsPerHost = n
+		return nil
+	}
+}
+
+// WithMaxConns bounds the connections of the client to every origin, in
+// use, idle or being opened. A new connection over the limit first closes
+// an idle HTTP/1.1 connection, the one used least recently, as Chrome;
+// HTTP/2 connections are not closed for it. Without one, it waits for a
+// connection to close, until its request ends, without counting the wait
+// in the dial timeout. By default there is no limit, where Chrome has 256:
+// a crawler would wait for connections where it expects none. The
+// connections of WithDoH are not counted.
+func WithMaxConns(n int) Option {
+	return func(c *config) error {
+		if n <= 0 {
+			return fmt.Errorf("WithMaxConns: %d is not positive", n)
+		}
+		c.maxConns = n
 		return nil
 	}
 }

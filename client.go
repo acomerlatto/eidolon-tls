@@ -106,6 +106,7 @@ func New(opts ...Option) (HttpClient, error) {
 		H2:          cfg.h2,
 
 		MaxConnsPerHost:   cfg.maxConnsPerHost,
+		MaxConns:          cfg.maxConns,
 		IdleConnTimeout:   cfg.idleConnTimeout,
 		NewConnPerRequest: cfg.newConnPerRequest,
 
