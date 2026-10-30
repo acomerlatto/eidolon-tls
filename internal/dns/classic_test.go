@@ -365,18 +365,29 @@ func TestClassicEarlierFailure(t *testing.T) {
 	}
 }
 
-// When every attempt failed, the error of the last one is returned.
+// When every attempt failed, the last failure is returned: a response
+// with a failure RCODE, which Parse classifies, or else the error.
 func TestClassicAllFail(t *testing.T) {
 	fail := func(rcode dnsmessage.RCode) answerFunc {
 		return func(_ string, _ int, q []byte) ([]byte, time.Duration) { return withRcode(t, q, rcode), 0 }
 	}
 	a, b := newNameServer(t, fail(dnsmessage.RCodeServerFailure)), newNameServer(t, fail(dnsmessage.RCodeRefused))
-	_, _, err := exchangeWithin(t, classic(2, 10*time.Second, a, b), 5*time.Second)
-	if err == nil || err.Error() != "dns: "+dnsmessage.RCodeRefused.String() {
-		t.Fatalf("Exchange error %v", err)
+	q, resp, err := exchangeWithin(t, classic(2, 10*time.Second, a, b), 5*time.Second)
+	if err != nil || Parse(q, resp, "a.example", 443).Status != Refused {
+		t.Fatalf("Exchange = %v, %v; want the REFUSED response", Parse(q, resp, "a.example", 443), err)
 	}
 	if len(a.queries("udp")) != 2 || len(b.queries("udp")) != 2 {
 		t.Errorf("queries %d and %d, want 2 each", len(a.queries("udp")), len(b.queries("udp")))
+	}
+
+	other := newNameServer(t, func(_ string, _ int, q []byte) ([]byte, time.Duration) {
+		r := found(t, q)
+		r[0] ^= 0xff
+		return r, 0
+	})
+	q, resp, err = exchangeWithin(t, classic(1, 10*time.Second, b, other), 5*time.Second)
+	if err == nil || q != nil || resp != nil {
+		t.Fatalf("Exchange = %x, %x, %v; want the error of the response to another ID", q, resp, err)
 	}
 }
 
@@ -441,9 +452,9 @@ func TestClassicTruncatedFailure(t *testing.T) {
 		return withRcode(t, q, dnsmessage.RCodeServerFailure), 0
 	})
 	b := newNameServer(t, func(string, int, []byte) ([]byte, time.Duration) { return nil, 0 })
-	_, _, err := exchangeWithin(t, classic(1, 30*time.Millisecond, a, b), 5*time.Second)
-	if err == nil || errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Exchange error %v, want the SERVFAIL of the retry", err)
+	q, resp, err := exchangeWithin(t, classic(1, 30*time.Millisecond, a, b), 5*time.Second)
+	if err != nil || resp[3]&0xf != byte(dnsmessage.RCodeServerFailure) || Parse(q, resp, "a.example", 443).Status != Failed {
+		t.Fatalf("Exchange = %x, %v; want the SERVFAIL of the retry", resp, err)
 	}
 }
 

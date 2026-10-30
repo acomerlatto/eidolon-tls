@@ -27,6 +27,9 @@ const (
 // ErrTruncated reports a TCP response with the TC bit.
 var ErrTruncated = errors.New("dns: truncated response over TCP")
 
+// errRCode reports a response whose RCODE is a failure.
+var errRCode = errors.New("dns: failure RCODE")
+
 // Classic is an Exchanger over the name servers of a Config, as Chrome's
 // classic DnsTransaction: each attempt has a new random ID and goes, by
 // UDP, to the next server, each server taking Attempts of them. A new
@@ -35,7 +38,9 @@ var ErrTruncated = errors.New("dns: truncated response over TCP")
 // retried once by TCP to the same server, the other attempts dropped, and
 // then no other attempt is made. Without other attempts, the query waits
 // for the pending ones until ctx ends. A response with NXDOMAIN ends the
-// query: the name is not completed with the search list.
+// query: the name is not completed with the search list. A response with
+// another failure RCODE goes to the next attempt; when it is the last
+// failure, it is returned, for Parse to classify its RCODE.
 //
 // The fallback period is FallbackPeriod, doubled after each round of the
 // servers, up to 5s: Chrome starts from the 99th percentile of the round
@@ -109,7 +114,7 @@ func (c *Classic) Exchange(ctx context.Context, name string, qtype dnsmessage.Ty
 		timer.Reset(c.period(next))
 		last, next, pending = next, next+1, pending+1
 	}
-	var err error
+	var fail attempt // the last failure
 	for {
 		select {
 		case <-ctx.Done():
@@ -137,13 +142,16 @@ func (c *Classic) Exchange(ctx context.Context, name string, qtype dnsmessage.Ty
 			case r.err == nil:
 				return r.query, r.resp, nil
 			}
-			err = r.err
+			fail = r
 			if r.n == last && !tcp && next < total {
 				more()
 			}
 		}
 		if pending == 0 {
-			return nil, nil, err
+			if errors.Is(fail.err, errRCode) {
+				return fail.query, fail.resp, nil
+			}
+			return nil, nil, fail.err
 		}
 	}
 }
@@ -163,7 +171,7 @@ func check(query, resp []byte) (bool, error) {
 	case dnsmessage.RCodeSuccess, dnsmessage.RCodeNameError:
 		return false, nil
 	default:
-		return false, fmt.Errorf("dns: %v", rcode)
+		return false, fmt.Errorf("%w %v", errRCode, rcode)
 	}
 }
 

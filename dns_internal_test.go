@@ -22,9 +22,9 @@ func useSystemDNS(t *testing.T, conf dns.Config, ok bool) {
 	t.Cleanup(func() { systemDNS = old })
 }
 
-// noDataServer answers every query over UDP with NOERROR and no record,
-// and returns the questions it got.
-func noDataServer(t *testing.T) (netip.AddrPort, func() []dnsmessage.Question) {
+// rcodeServer answers every query over UDP with rcode and no record, and
+// returns the questions it got.
+func rcodeServer(t *testing.T, rcode dnsmessage.RCode) (netip.AddrPort, func() []dnsmessage.Question) {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func noDataServer(t *testing.T) (netip.AddrPort, func() []dnsmessage.Question) {
 			mu.Lock()
 			got = append(got, m.Questions[0])
 			mu.Unlock()
-			m.Header.Response = true
+			m.Header.Response, m.Header.RCode = true, rcode
 			resp, _ := m.Pack()
 			conn.WriteToUDPAddrPort(resp, from)
 		}
@@ -63,7 +63,7 @@ func noDataServer(t *testing.T) (netip.AddrPort, func() []dnsmessage.Question) {
 // A direct client asks the name servers of the system for the HTTPS
 // records, except for the hosts of the hosts file and localhost.
 func TestSystemDNS(t *testing.T) {
-	addr, questions := noDataServer(t)
+	addr, questions := rcodeServer(t, dnsmessage.RCodeSuccess)
 	useSystemDNS(t, dns.Config{
 		Servers:  []netip.AddrPort{addr},
 		Attempts: 1,
@@ -85,6 +85,31 @@ func TestSystemDNS(t *testing.T) {
 	}
 	if got := questions(); !slices.Equal(got, want) {
 		t.Errorf("questions %v, want %v", got, want)
+	}
+}
+
+// A name server that refuses the query leaves the origin without ECH, as
+// a DoH server: ECHRequired fails with ErrECHRequired, and only a SERVFAIL
+// with ErrDNS.
+func TestSystemDNSRefused(t *testing.T) {
+	for _, tt := range []struct {
+		rcode dnsmessage.RCode
+		want  error
+	}{
+		{dnsmessage.RCodeRefused, ErrECHRequired},
+		{dnsmessage.RCodeFormatError, ErrECHRequired},
+		{dnsmessage.RCodeServerFailure, ErrDNS},
+	} {
+		addr, _ := rcodeServer(t, tt.rcode)
+		useSystemDNS(t, dns.Config{Servers: []netip.AddrPort{addr}, Attempts: 1}, true)
+		c, err := New(WithProfile(Chrome156Linux()), WithECHMode(ECHRequired))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Get("https://a.example/"); !errors.Is(err, tt.want) || tt.want == ErrECHRequired && errors.Is(err, ErrDNS) {
+			t.Errorf("%v: Get error %v, want %v", tt.rcode, err, tt.want)
+		}
+		c.Close()
 	}
 }
 
