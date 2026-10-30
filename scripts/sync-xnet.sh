@@ -103,6 +103,7 @@ gofmt -w "${gofiles[@]}"
 	echo "- Commit: \`$commit\` ($commit_date)"
 	echo "- Toolchain used for file selection: \`$have_go\`, tags \`http2legacy\`"
 	echo "- License: BSD-3-Clause, copied as \`LICENSE\` into each package directory"
+	echo "- Security sync: see the \`UPSTREAM.md\` at the root of the repository"
 	echo
 	echo "Packages (\`internal/gate\` and \`internal/testcert\` are used only by tests):"
 	echo
